@@ -27,8 +27,8 @@ The in-app **Help** page (press `?`) explains every feature with examples; there
 The usual way is the container image with Docker Compose, behind a web server that provides
 HTTPS (Caddy, nginx, Traefik…).
 
-1. Make a folder and save [`docker-compose.yml`](docker-compose.yml) in it. Replace `OWNER` in
-   the image name, and set `ENTROPICIDE_PUBLIC_URL` (the address people will open) and `TZ`.
+1. Make a folder and save [`docker-compose.yml`](docker-compose.yml) in it. Set
+   `ENTROPICIDE_PUBLIC_URL` (the address people will open) and `TZ`.
 2. Start it, and make your account:
 
    ```sh

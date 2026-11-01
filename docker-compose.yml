@@ -5,7 +5,7 @@
 
 services:
   entropicide:
-    image: ghcr.io/OWNER/entropicide:latest   # or: build: .
+    image: ghcr.io/steventomer/entropicide:latest   # or: build: .
     restart: unless-stopped
     ports:
       - "127.0.0.1:8000:8000"   # only the web server in front should reach it
@@ -29,7 +29,7 @@ services:
 
   # A backup of the database every night (kept: 7 daily, 4 weekly, 12 monthly), in ./data/backups.
   backup:
-    image: ghcr.io/OWNER/entropicide:latest   # or: build: .
+    image: ghcr.io/steventomer/entropicide:latest   # or: build: .
     restart: unless-stopped
     volumes:
       - ./data:/data

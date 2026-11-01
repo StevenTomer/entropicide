@@ -42,8 +42,10 @@ fi
 
 echo "== Copying the app to $DEST"
 mkdir -p "$DEST/data" "$DEST/backups"
+# (Development-only files stay behind: the tests, CI settings and the ideas backlog.)
 rsync -a --delete --exclude venv --exclude data --exclude backups --exclude .env \
-    --exclude __pycache__ --exclude .git --exclude android --exclude tests "$SRC/" "$DEST/"
+    --exclude __pycache__ --exclude .git --exclude android --exclude tests \
+    --exclude .pytest_cache --exclude .github --exclude IDEAS.md "$SRC/" "$DEST/"
 
 if [ ! -x "$DEST/venv/bin/python" ]; then
     echo "== Creating virtualenv"

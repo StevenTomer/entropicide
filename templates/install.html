@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Install · Entropicide</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='icons/favicon.svg') }}">
+  <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='icons/favicon-32.png') }}">
+  <link rel="manifest" href="{{ url_for('web_manifest') }}">
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/apple-touch-icon.png') }}">
+  <meta name="theme-color" content="#0866a8">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body class="login-page">
+  <main class="login-card privacy install">
+    <img class="install-logo" src="{{ url_for('static', filename='icons/icon-192.png') }}" alt="" width="64" height="64">
+    <h1>Install Entropicide</h1>
+
+    <h2>Android</h2>
+    {% if apk %}
+    <p><a class="install-btn" href="{{ url_for('install_apk') }}" download>Download the app</a>
+      <span class="muted small">{{ apk.size_mb }} MB · built {{ apk.built }}{% if apk.version %} · version {{ apk.version }}{% endif %}</span></p>
+    <ol>
+      <li>Open the downloaded <strong>entropicide.apk</strong> (from the notification, or Files → Downloads).</li>
+      <li>If Android says it can't install apps from this source, tap <strong>Settings</strong>,
+        turn on <strong>Allow from this source</strong>, then go back.</li>
+      <li>Tap <strong>Install</strong>, then open Entropicide and sign in.</li>
+      <li>For reminders: Settings → Notifications → <strong>Turn on for this device</strong>, and allow
+        notifications when Android asks.</li>
+    </ol>
+    <p class="muted small">Entropicide then also appears in other apps' <strong>Share</strong> menu: share a page,
+      photo or file to it and it lands in your Inbox.</p>
+    <p class="muted small">The app opens this site in Chrome's engine, full screen, so Entropicide itself
+      updates by itself. When the app around it changes, Entropicide offers the new version when you open it:
+      tap <strong>Update</strong>, then open the download and tap <strong>Update</strong> again.
+      Chrome must be installed on the phone.</p>
+    {% else %}
+    <p class="muted">The Android download isn't available yet.</p>
+    {% endif %}
+    <p>Or, without downloading: open <a href="{{ url_for('index') }}">{{ request.host }}{{ url_for('index').rstrip("/") }}</a> in
+      Chrome, tap the <strong>⋮</strong> menu, then <strong>Add to home screen → Install</strong>.</p>
+
+    <h2>iPhone and iPad</h2>
+    <p>Open <a href="{{ url_for('index') }}">{{ request.host }}{{ url_for('index').rstrip("/") }}</a> in Safari, tap
+      <strong>Share</strong>, then <strong>Add to Home Screen</strong>.</p>
+
+    <h2>Computer</h2>
+    <p>In Chrome or Edge, click the install icon at the right of the address bar.</p>
+
+    <p class="muted small login-foot"><a href="{{ url_for('index') }}">Open Entropicide</a> ·
+      <a href="{{ url_for('help_page') }}">Help</a> ·
+      <a href="{{ url_for('privacy') }}">Privacy</a></p>
+  </main>
+</body>
+</html>

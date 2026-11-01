@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>App log · Entropicide</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='icons/favicon.svg') }}">
+  <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='icons/favicon-32.png') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body class="login-page">
+  <main class="login-card privacy debug">
+    <h1>App log</h1>
+    <p class="muted small">Every use of the Share menu, every launch of the Android app and every
+      task it adds from its notification or tile (app-add), newest
+      first (times in your time zone){% if admin %}, for all users, including shares that arrived
+      signed out (other people's without what they shared or typed){% else %}: yours{% endif %}. A share that never shows up here never reached the server.
+      Latest Android app: {{ apk.name if apk else "none" }}.</p>
+    <p><a href="{{ url_for('debug_page') }}">Refresh</a></p>
+
+    {% for e in entries %}
+    <details class="debug-entry">
+      <summary><b>{{ e.at }}</b> · {{ e.kind }} · {{ e.user }}<br>
+        {% if e.kind in ("share", "app-add") %}{{ e.detail.result }}{% else %}Android app {{ e.detail.app_version or e.detail.url }}{% endif %}</summary>
+      <pre>{{ e.detail | tojson(indent=1) }}</pre>
+    </details>
+    {% else %}
+    <p class="muted">Nothing yet.</p>
+    {% endfor %}
+
+    <h2>Test sharing from this browser</h2>
+    <p class="muted small">Sends a share the way the phone's Share menu should, and adds an Inbox
+      task. If this works but sharing from another app doesn't, the problem is between Android
+      and the app, not the server.</p>
+    <form class="stack" method="post" action="{{ url_for('share') }}" enctype="multipart/form-data">
+      <input name="title" placeholder="Title (optional)">
+      <input name="text" value="Test share">
+      <input name="url" placeholder="Link (optional)">
+      <input type="file" name="files" multiple>
+      <button>Send test share</button>
+    </form>
+
+    <p class="muted small login-foot"><a href="{{ url_for('index') }}">Open Entropicide</a> ·
+      <a href="{{ url_for('install') }}">Install</a></p>
+  </main>
+</body>
+</html>

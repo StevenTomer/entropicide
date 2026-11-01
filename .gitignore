@@ -1,0 +1,16 @@
+# Local and server state: never in the repository
+venv/
+data/
+backups/
+.env
+__pycache__/
+*.pyc
+# This site's settings (copy deploy/site.conf.example)
+deploy/site.conf
+# Built Android app and its build tools (android/build.mjs makes these)
+apk/
+android/build/
+android/node_modules/
+
+# The personal backlog of ideas (not published)
+IDEAS.md

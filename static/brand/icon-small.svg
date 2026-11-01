@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 200 200" role="img" aria-label="Entropicide simplified compass icon"><title>Entropicide simplified compass icon</title><g><rect x="36" y="21" width="9" height="9" rx="1" fill="#0866A8" transform="rotate(-12 40.5 25.5)"/><rect x="17" y="83" width="8" height="8" rx="1" fill="#09254A" transform="rotate(-12 21.0 87.0)"/><rect x="46" y="129" width="9" height="9" rx="1" fill="#0866A8" transform="rotate(-12 50.5 133.5)"/><path d="M99 14 A83 83 0 0 1 182 97" stroke="#09254A" stroke-width="9" fill="none"/><path d="M182 110 A83 83 0 0 1 99 193" stroke="#09254A" stroke-width="9" fill="none"/><path d="M88 193 A83 83 0 0 1 65 184" stroke="#09254A" stroke-width="9" fill="none"/>
+<path d="M99 5 L110 87 L99 99 L87 88 Z" fill="#0866A8"/><path d="M99 5 L99 99 L110 87 Z" fill="#F5AB13"/>
+<path d="M99 193 L87 110 L99 99 L111 111 Z" fill="#0866A8"/><path d="M99 193 L99 99 L111 111 Z" fill="#D88A00"/>
+<path d="M5 99 L87 87 L99 99 L87 111 Z" fill="#0866A8"/><path d="M193 99 L111 87 L99 99 L111 111 Z" fill="#F5AB13"/>
+<path d="M49 49 L91 83 L99 99 L81 91 Z" fill="#45A9D8"/><path d="M149 49 L107 83 L99 99 L117 91 Z" fill="#F5AB13"/><path d="M49 149 L91 115 L99 99 L81 107 Z" fill="#45A9D8"/><path d="M149 149 L107 115 L99 99 L117 107 Z" fill="#D88A00"/>
+<path d="M99 5 L99 193" stroke="#09254A" stroke-width="1" opacity=".3"/>
+</g></svg>

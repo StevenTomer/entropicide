@@ -1,0 +1,40 @@
+# Entropicide with Docker Compose: copy this file, set the environment below, then
+#   docker compose up -d
+#   docker compose exec entropicide manage create-user YOURNAME --admin
+# Put a web server with HTTPS in front of port 8000 (see README.md: Caddy, nginx, Traefik).
+
+services:
+  entropicide:
+    image: ghcr.io/OWNER/entropicide:latest   # or: build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"   # only the web server in front should reach it
+    volumes:
+      - ./data:/data            # the database, its backups and the secret key: back this folder up
+    environment:
+      # The address people open (with a trailing slash). Served under a path rather than the
+      # whole site (https://example.com/tasks/)? Also set SCRIPT_NAME: /tasks
+      ENTROPICIDE_PUBLIC_URL: https://tasks.example.com/
+      # SCRIPT_NAME: /tasks
+      TZ: America/New_York      # the server's time zone (each user's own is set by their browser)
+      # Who runs it, for the privacy page (optional).
+      # ENTROPICIDE_OPERATOR: Your Name
+      # ENTROPICIDE_CONTACT: you@example.com
+      # Google Calendar sync (optional; see README.md).
+      # ENTROPICIDE_GOOGLE_CLIENT_ID: ...apps.googleusercontent.com
+      # ENTROPICIDE_GOOGLE_CLIENT_SECRET: ...
+      # The Android app (optional; you build it yourself, see README.md).
+      # ENTROPICIDE_ANDROID_PACKAGE: com.example.entropicide
+      # ENTROPICIDE_APK_DIR: /data/apk
+
+  # A backup of the database every night (kept: 7 daily, 4 weekly, 12 monthly), in ./data/backups.
+  backup:
+    image: ghcr.io/OWNER/entropicide:latest   # or: build: .
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+    environment:
+      TZ: America/New_York
+    command: ["sh", "-c", "while :; do manage backup; sleep 86400; done"]
+    healthcheck:
+      disable: true

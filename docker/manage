@@ -1,0 +1,8 @@
+#!/bin/sh
+# manage.py, run as the app's account (docker compose exec runs commands as root):
+#   docker compose exec entropicide manage create-user NAME --admin
+cd /app
+if [ "$(id -u)" = 0 ]; then
+    exec setpriv --reuid=entropicide --regid=entropicide --init-groups python manage.py "$@"
+fi
+exec python manage.py "$@"

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy · Entropicide</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='icons/favicon.svg') }}">
+  <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='icons/favicon-32.png') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body class="login-page">
+  <main class="login-card privacy">
+    <h1>Privacy</h1>
+    <p>Entropicide at {{ request.host }} is a private task manager{% if operator %}, run by {{ operator }}{% endif %},
+      used by invitation only.</p>
+    <h2>What it stores</h2>
+    <p>Your account name, a hashed password, and the tasks, projects, areas, tags and links you enter.
+      Everything is kept in a database on this server and is visible only to you.</p>
+    <h2>Google Calendar</h2>
+    <p>If you connect Google Calendar, Entropicide uses Google's permission to:</p>
+    <ul>
+      <li>see your email address, to show which account is connected;</li>
+      <li>list your calendars and read their upcoming events, to show them alongside your tasks;</li>
+      <li>add, change and remove events for your dated tasks on the one calendar you choose,
+        and read changes you make to those events.</li>
+    </ul>
+    <p>Calendar data is used only to show it to you and keep your tasks in step. It is not
+      shared with anyone, sold, or used for advertising or any other purpose. Entropicide's use of
+      information received from Google APIs adheres to the
+      <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services
+      User Data Policy</a>, including the Limited Use requirements.</p>
+    <p>Disconnecting in Settings removes the events Entropicide added, revokes its access, and deletes
+      the stored Google tokens and cached events. You can also revoke access at
+      <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</p>
+    <h2>Contact</h2>
+    <p>Questions or deletion requests: {% if contact and "@" in contact and "/" not in contact -%}
+      <a href="mailto:{{ contact }}">{{ contact }}</a>
+      {%- elif contact.startswith("https://") %}<a href="{{ contact }}">{{ contact }}</a>
+      {%- elif contact %}{{ contact }}{% else %}ask the person who invited you{% endif %}.</p>
+    <p><a href="{{ url_for('index') }}">← Back to Entropicide</a></p>
+  </main>
+</body>
+</html>

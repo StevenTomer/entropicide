@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Entropicide</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='icons/favicon.svg') }}">
+  <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='icons/favicon-32.png') }}">
+  <link rel="manifest" href="{{ url_for('web_manifest') }}">
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/apple-touch-icon.png') }}">
+  <meta name="theme-color" content="#0866a8">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <script>
+    // Settings saved under their names from before the rename ("todo.…") move over, once.
+    try {
+      for (const k of Object.keys(localStorage)) {
+        if (k.startsWith("todo.") && localStorage.getItem("entropicide." + k.slice(5)) === null) {
+          localStorage.setItem("entropicide." + k.slice(5), localStorage.getItem(k));
+        }
+        if (k.startsWith("todo.")) localStorage.removeItem(k);
+      }
+    } catch {}
+    // This device's text size (Settings → Text size), applied before the first paint.
+    try { const pct = localStorage.getItem("entropicide.textSize"); if (pct) document.documentElement.style.fontSize = pct + "%"; } catch {}
+  </script>
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="sidebar-head">
+        <span class="brand"><img class="brand-logo" src="{{ url_for('static', filename='icons/logo-name.svg') }}"
+          alt="Entropicide" width="160" height="100"></span>
+        <div id="area-filter">
+          <button type="button" id="area-btn" aria-haspopup="true" aria-expanded="false" title="Areas shown"></button>
+          <div id="area-menu" role="group" aria-label="Areas shown" hidden></div>
+        </div>
+      </div>
+      <nav id="nav"></nav>
+      <div class="sidebar-foot">
+        <button id="settings-btn" class="link">{{ user.display_name or user.username }}</button>
+        <a href="{{ url_for('help_page') }}" class="link" title="Help (?)">Help</a>
+        <form method="post" action="{{ url_for('logout') }}">
+          <button class="link" type="submit">Sign out</button>
+        </form>
+      </div>
+    </aside>
+
+    <main id="main">
+      <nav id="toolbar" aria-label="Starred links" hidden></nav>
+      <header id="topbar">
+        <button id="menu-btn" class="icon" aria-label="Menu">☰</button>
+        <h1 id="view-title"></h1>
+        <span id="offline" hidden title="Saved on this device; sent when the connection is back"></span>
+        <button id="palette-btn" class="icon" type="button" title="Find anything, or run a command (Ctrl+K)" aria-label="Find anything, or run a command">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M15.5 15.5L21 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <input id="search" type="search" placeholder="Search" aria-label="Search (or /regular expression/)">
+      </header>
+      <form id="quick-add" autocomplete="off">
+        <input id="quick-add-input" placeholder="Add a task… (press N · Ctrl+Enter adds and opens it · #tag, !someday, !2 priority, +area, tomorrow 3pm, due fri)"
+               aria-label="New task" aria-autocomplete="list" aria-controls="suggest">
+        <div id="suggest" role="listbox" hidden></div>
+        <div id="quick-when" class="muted small" aria-live="polite" hidden></div>
+      </form>
+      <div id="tag-bar"></div>
+      <div id="select-bar" hidden></div>
+      <div id="list"></div>
+      <section id="detail" aria-label="Task details" hidden></section>
+    </main>
+  </div>
+
+  <dialog id="dialog"></dialog>
+  <dialog id="defer-dialog">
+    <form method="dialog" class="stack">
+      <h2>Defer until</h2>
+      <label>Date <input type="date" name="date" required></label>
+      <label>Time (optional) <input type="time" name="time"></label>
+      <div class="dlg-actions">
+        <button value="cancel" formnovalidate>Cancel</button>
+        <button value="ok" class="primary">Defer</button>
+      </div>
+    </form>
+  </dialog>
+  <div id="timer" hidden></div>
+  <button type="button" id="timer-pill" hidden title="Back to the timer"></button>
+  <dialog id="palette" aria-label="Find anything, or run a command">
+    <input id="pal-input" placeholder="Find a task, list, project… or a command" autocomplete="off"
+           aria-autocomplete="list" aria-controls="pal-list">
+    <div id="pal-list" role="listbox"></div>
+    <p class="muted small pal-foot">↑↓ to choose · Enter to go · Esc to close</p>
+  </dialog>
+  <dialog id="viewer" aria-label="File viewer">
+    <div class="viewer-bar">
+      <span class="viewer-name"></span>
+      <span class="viewer-count muted small"></span>
+      <button type="button" class="icon viewer-step" data-step="-1" title="Previous file (←)" aria-label="Previous file">‹</button>
+      <button type="button" class="icon viewer-step" data-step="1" title="Next file (→)" aria-label="Next file">›</button>
+      <button type="button" class="icon viewer-zoom" data-zoom="0.8" title="Zoom out (−)" aria-label="Zoom out">−</button>
+      <button type="button" class="icon viewer-zoom" data-zoom="1.25" title="Zoom in (+)" aria-label="Zoom in">+</button>
+      <a class="viewer-save" title="Download" aria-label="Download">⤓</a>
+      <button type="button" class="icon viewer-close" title="Close (Esc)" aria-label="Close">✕</button>
+    </div>
+    <div class="viewer-body"></div>
+  </dialog>
+  <dialog id="proj-dialog"></dialog>
+  <dialog id="tpl-dialog"></dialog>
+  <dialog id="link-dialog">
+    <form method="dialog" class="stack">
+      <h2>Link</h2>
+      <label>Name <input name="name" required maxlength="200"></label>
+      <label class="link-only">Web address <input name="url" type="url"></label>
+      <label>Folder <select name="parent"></select></label>
+      <label class="check link-only"><input type="checkbox" name="starred"> Show in the toolbar</label>
+      <div class="link-only link-icon">
+        <span class="icon-slot"></span>
+        <label class="link-label">Upload icon…<input type="file" accept=".svg,image/svg+xml" class="link-icon-file" hidden></label>
+        <button type="button" class="link link-icon-url">From URL…</button>
+        <button type="button" class="link link-icon-remove">Remove icon</button>
+      </div>
+      <p class="link-only muted small">With an icon (an SVG), the toolbar shows just the icon; the name shows when you point at it.</p>
+      <div class="dlg-actions">
+        <button value="cancel" formnovalidate>Cancel</button>
+        <button value="ok" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+  <div id="ctx" class="ctx" role="menu" hidden></div>
+  <div id="toast" hidden></div>
+  <div id="drag-count" aria-hidden="true"></div>
+
+  <script>
+    window.ENTROPICIDE_BASE = {{ url_for('index')|tojson }};
+    window.ENTROPICIDE_ANDROID_PACKAGE = {{ android_package|tojson }};
+  </script>
+  <script src="{{ url_for('static', filename='quickadd.js') }}"></script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

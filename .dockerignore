@@ -1,0 +1,14 @@
+.git
+.github
+venv
+data
+backups
+apk
+android
+tests
+__pycache__
+*.pyc
+.env
+deploy/site.conf
+docker-compose.yml
+Dockerfile

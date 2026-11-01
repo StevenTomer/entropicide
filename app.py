@@ -1,0 +1,3004 @@
+import calendar
+import csv
+import hashlib
+import io
+import json
+import mimetypes
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import threading
+import tempfile
+import time
+import urllib.parse
+import zipfile
+from datetime import date, datetime, timedelta
+from functools import wraps
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from flask import (Flask, Response, abort, g, jsonify, redirect, render_template,
+                   request, send_file, send_from_directory, session, url_for)
+from flask.sessions import SecureCookieSessionInterface
+from itsdangerous import BadSignature
+from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import check_password_hash, generate_password_hash
+
+import backup
+import db
+import push
+import gcal
+import icons
+
+TASK_STATES = {"inbox", "next", "soon", "waiting", "scheduled", "someday", "later"}
+PROJECT_STATES = {"active", "someday", "later", "done"}
+REPEATS = set(db.DEFAULT_ON_MISS)
+# every N days (every:9), weeks (every:2w), months (every:3m) or years (every:1y); N up to 999
+EVERY_RE = re.compile(r"every:([1-9][0-9]{0,2})([wmy]?)")
+ON_MISS = {"keep", "replace"}
+ENERGIES = {"low", "medium", "high"}
+PRIORITY_MAX = 99
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+# Defer menu entries: a count and a unit (minutes, hours, days, weeks, months).
+DEFER_RE = re.compile(r"^([1-9]\d{0,2})(m|h|d|w|mo)$")
+# timezone: the user's (IANA name, set by their browser); Google sync works in it.
+DEFAULT_SETTINGS = {"defer_options": ["1h", "2h", "6h", "24h", "3d", "1w"], "timezone": "",
+                    # Notifications: when a task's start time comes, and a morning summary
+                    # of what's due ("" for none).
+                    "notify_starts": True, "digest_time": "08:00",
+                    # No notifications in these hours ("22:00-07:00"; "" for none): they're
+                    # sent when they end.
+                    "quiet_hours": "",
+                    # Days before an expiry date to send a notice (0: on the day).
+                    "expiry_notices": [90, 30, 7, 0]}
+STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$")
+# Checked checklist lines in notes ("[x] ..."), unchecked on each new repeat.
+UNCHECK_RE = re.compile(r"^(\s*(?:[-*]\s*)?)\[[xX]\]", re.MULTILINE)
+MIN_PASSWORD = 8
+MAX_CATCH_UP = 400  # occurrences one series may generate per page load
+
+# Site settings: where the app is served, its Android app, who runs it. Each comes from the
+# environment as ENTROPICIDE_<NAME> (as in Docker), else deploy/site.conf (see site.conf.example).
+SITE = {}
+try:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "deploy", "site.conf")) as f:
+        SITE = dict(m.groups() for line in f if (m := re.match(r"\s*([A-Z_]+)=(.*?)\s*$", line)))
+except OSError:
+    pass
+
+
+def setting(name, default=""):
+    return os.environ.get("ENTROPICIDE_" + name) or SITE.get(name) or default
+
+
+def secret_key(db_path):
+    """ENTROPICIDE_SECRET_KEY, else one made once and kept next to the database, so restarts
+    don't sign everyone out."""
+    if os.environ.get("ENTROPICIDE_SECRET_KEY"):
+        return os.environ["ENTROPICIDE_SECRET_KEY"]
+    path = os.path.join(os.path.dirname(os.path.abspath(db_path)), "secret_key")
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        key = secrets.token_hex(32)
+        with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+            f.write(key)
+        return key
+
+
+app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+DATABASE = os.environ.get("ENTROPICIDE_DATABASE", os.path.join(app.root_path, "data", "entropicide.db"))
+app.config.update(
+    SECRET_KEY=secret_key(DATABASE),
+    DATABASE=DATABASE,
+    SESSION_COOKIE_NAME="entropicide_session",
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("ENTROPICIDE_SECURE_COOKIES", "1") == "1",
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+    MAX_CONTENT_LENGTH=26 * 1024 * 1024,  # attachments are up to 25 MB
+)
+app.teardown_appcontext(db.close_db)
+db.init_db(app.config["DATABASE"])
+
+
+class SessionInterface(SecureCookieSessionInterface):
+    """Flask's signed-cookie sessions, which also read the cookie's name from before the
+    rename (todo_session), so nobody is signed out by it; the next response sets the new one."""
+    OLD_NAME = "todo_session"
+
+    def open_session(self, app, request):
+        if app.config["SESSION_COOKIE_NAME"] not in request.cookies and self.OLD_NAME in request.cookies:
+            serializer = self.get_signing_serializer(app)
+            try:
+                data = serializer.loads(request.cookies[self.OLD_NAME],
+                                        max_age=int(app.permanent_session_lifetime.total_seconds()))
+            except BadSignature:
+                return self.session_class()
+            session = self.session_class(data)
+            session.modified = True  # (saves it under the new name)
+            return session
+        return super().open_session(app, request)
+
+    def save_session(self, app, session, response):
+        super().save_session(app, session, response)
+        if self.OLD_NAME in request.cookies:
+            response.delete_cookie(self.OLD_NAME, path=self.get_cookie_path(app),
+                                   domain=self.get_cookie_domain(app))
+
+
+app.session_interface = SessionInterface()
+
+
+# --- auth -----------------------------------------------------------------
+
+# Failed logins per (ip, username), and per ip across usernames (someone trying many);
+# one gunicorn worker so in-memory is fine.
+_failures = {}
+MAX_FAILURES = 5
+MAX_FAILURES_PER_IP = 20
+LOCKOUT_SECONDS = 15 * 60
+
+
+def _too_many_failures(key, limit=MAX_FAILURES):
+    now = time.time()
+    recent = [t for t in _failures.get(key, []) if now - t < LOCKOUT_SECONDS]
+    _failures[key] = recent
+    return len(recent) >= limit
+
+
+def _session_stamp(user):
+    # Changes whenever the password changes, which signs out other sessions.
+    return user["password_hash"][-12:]
+
+
+@app.before_request
+def load_user():
+    g.user = None
+    uid = session.get("uid")
+    if uid is None:
+        return
+    user = db.get_db().execute(
+        "SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+    if user and not user["disabled"] and session.get("stamp") == _session_stamp(user):
+        g.user = user
+    else:
+        session.clear()
+
+
+# The header the app's own requests carry ("todo": pages and phone apps from before the rename).
+REQUESTED_WITH = {"entropicide", "todo"}
+
+
+@app.before_request
+def csrf_check():
+    # API writes must carry a custom header, which a cross-site form can't send.
+    if (request.path.startswith("/api/") and request.method != "GET"
+            and request.headers.get("X-Requested-With") not in REQUESTED_WITH):
+        abort(403)
+
+
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if g.user is None:
+            if request.path.startswith("/api/"):
+                return jsonify(error="not logged in"), 401
+            return redirect(url_for("login"))
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def admin_required(view):
+    @wraps(view)
+    @login_required
+    def wrapped(*args, **kwargs):
+        if not g.user["is_admin"]:
+            abort(403)
+        return view(*args, **kwargs)
+    return wrapped
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = None
+    if request.method == "POST":
+        if request.form.get("csrf") != session.get("login_csrf"):
+            error = "Your session expired. Please try again."
+        else:
+            username = request.form.get("username", "").strip()
+            password = request.form.get("password", "")
+            key = (request.remote_addr, username.lower())
+            ip_key = (request.remote_addr, None)
+            if _too_many_failures(key) or _too_many_failures(ip_key, MAX_FAILURES_PER_IP):
+                error = "Too many failed attempts. Try again in 15 minutes."
+            else:
+                user = db.get_db().execute(
+                    "SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+                if (user and not user["disabled"]
+                        and check_password_hash(user["password_hash"], password)):
+                    _failures.pop(key, None)
+                    session.clear()
+                    session.permanent = True
+                    session["uid"] = user["id"]
+                    session["stamp"] = _session_stamp(user)
+                    conn = db.get_db()
+                    conn.execute("UPDATE users SET last_login = datetime('now') WHERE id = ?",
+                                 (user["id"],))
+                    conn.commit()
+                    return redirect(url_for("index"))
+                _failures.setdefault(key, []).append(time.time())
+                _failures.setdefault(ip_key, []).append(time.time())
+                error = "Wrong username or password."
+    session["login_csrf"] = secrets.token_urlsafe(16)
+    return render_template("login.html", error=error, csrf=session["login_csrf"])
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.get("/privacy")
+def privacy():
+    return render_template("privacy.html")
+
+
+# --- installable app --------------------------------------------------------
+
+APP_NAME = "Entropicide"
+
+
+@app.context_processor
+def site_settings():
+    # The phone-connect link names the Android app's package (app.js, fillDevices); the
+    # privacy page names who runs the site.
+    return {"android_package": setting("ANDROID_PACKAGE"), "operator": setting("OPERATOR"),
+            "contact": setting("CONTACT")}
+# The Android app (android/build.mjs) puts entropicide.apk and assetlinks.json here.
+APK_DIR = setting("APK_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "apk"))
+APK_NAME = "entropicide.apk"
+
+
+@app.get("/manifest.webmanifest")
+def web_manifest():
+    home = url_for("index")
+    icon = lambda name: url_for("static", filename="icons/" + name)
+    return jsonify(
+        # Lets the installed app take things from the phone's Share menu (see share()).
+        share_target={"action": url_for("share"), "method": "POST", "enctype": "multipart/form-data",
+                      "params": {"title": "title", "text": "text", "url": "url",
+                                 "files": [{"name": "files", "accept": ["*/*"]}]}},
+        id=home, start_url=home, scope=home, name=APP_NAME, short_name=APP_NAME,
+        description="From chaos to clarity: tasks, GTD style", display="standalone",
+        background_color="#ffffff", theme_color="#0866a8",
+        icons=[
+            {"src": icon("icon-192.png"), "sizes": "192x192", "type": "image/png"},
+            {"src": icon("icon-512.png"), "sizes": "512x512", "type": "image/png"},
+            {"src": icon("maskable-512.png"), "sizes": "512x512", "type": "image/png",
+             "purpose": "maskable"},
+        ],
+    ), 200, {"Content-Type": "application/manifest+json"}
+
+
+@app.get("/sw.js")
+def service_worker():
+    # Served from the app's root rather than /static so that it covers every page.
+    res = send_from_directory(app.static_folder, "sw.js", max_age=0)
+    res.headers["Cache-Control"] = "no-cache"
+    return res
+
+
+@app.get("/help")
+def help_page():
+    return render_template("help.html")
+
+
+def apk_version():
+    """The APK on offer: {"code": …, "name": …} from apk/version.json (android/build.mjs)."""
+    try:
+        with open(os.path.join(APK_DIR, "version.json")) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+@app.get("/install")
+def install():
+    path = os.path.join(APK_DIR, APK_NAME)
+    apk = None
+    if os.path.isfile(path):
+        st = os.stat(path)
+        apk = {"size_mb": f"{st.st_size / 1e6:.1f}",
+               "built": datetime.fromtimestamp(st.st_mtime).strftime("%-d %b %Y"),
+               "version": (apk_version() or {}).get("name")}
+    return render_template("install.html", apk=apk)
+
+
+def version_name(code):
+    """1000007 → "1.0.7" (android/build.mjs); older builds had no version, or a smaller code."""
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        return "an early build (no version)"
+    if code < 1_000_000:
+        return f"an early build ({code})"
+    return f"{code // 1_000_000}.{code // 1000 % 1000}.{code % 1000}"
+
+
+@app.get("/install/version")
+def install_version():
+    # The Android app compares this with its own version, to offer updates.
+    res = jsonify(apk_version() or {})
+    res.headers["Cache-Control"] = "no-cache"
+    return res
+
+
+@app.get("/install/entropicide.apk")
+def install_apk():
+    return send_from_directory(APK_DIR, APK_NAME, max_age=0, as_attachment=True,
+                               mimetype="application/vnd.android.package-archive")
+
+
+@app.get("/install/todo.apk")  # its name before Entropicide, in older pages and apps
+def install_apk_old_name():
+    return install_apk()
+
+
+@app.get("/assetlinks.json")
+def asset_links():
+    # The web server serves this as https://SITE_HOST/.well-known/assetlinks.json. It tells
+    # Chrome the Android app is ours, so the app opens full screen with no address bar.
+    return send_from_directory(APK_DIR, "assetlinks.json", max_age=300,
+                               mimetype="application/json")
+
+
+@app.route("/")
+def index():
+    # The Android app opens SITE_PATH/?app=<version>; older builds are known by Chrome's referrer.
+    if request.args.get("app") or request.referrer and request.referrer.startswith("android-app://"):
+        app_log("launch", **request_info(), app_version=version_name(request.args.get("app")))
+    if g.user is None:
+        return redirect(url_for("login"))
+    return render_template("app.html", user=g.user)
+
+
+# --- troubleshooting log (shares and app launches) ------------------------
+
+APP_LOG_KEEP = 300
+
+
+def request_info():
+    h = request.headers
+    return {"method": request.method, "url": request.full_path.rstrip("?"),
+            "referrer": h.get("Referer", ""), "agent": h.get("User-Agent", ""),
+            "content_type": h.get("Content-Type", ""), "length": request.content_length,
+            "signed_in": g.get("user") is not None}
+
+
+def app_log(kind, **detail):
+    """Notes a share attempt or an app launch for SITE_PATH/debug. Never fails the request."""
+    try:
+        conn = db.get_db()
+        conn.execute("INSERT INTO app_log (user_id, kind, detail) VALUES (?, ?, ?)",
+                     (g.user["id"] if g.get("user") else None, kind, json.dumps(detail)))
+        conn.execute("DELETE FROM app_log WHERE id <= (SELECT MAX(id) FROM app_log) - ?",
+                     (APP_LOG_KEEP,))
+        conn.commit()
+    except Exception:
+        app.logger.exception("app_log")
+
+
+def without_content(detail):
+    """An App log entry from someone else (as an admin sees it): what happened, but not what
+    they shared or typed, or their files' names."""
+    detail = dict(detail)
+    if isinstance(detail.get("fields"), dict):
+        detail["fields"] = {k: f"({len(str(v))} characters)" for k, v in detail["fields"].items()}
+    if isinstance(detail.get("files"), list):
+        detail["files"] = [{k: v for k, v in f.items() if k != "name"} for f in detail["files"] if isinstance(f, dict)]
+    if "text" in detail:
+        detail["text"] = f"({len(str(detail['text']))} characters)"
+    if "url" in detail and detail.get("method") == "POST":
+        detail["url"] = str(detail["url"]).split("?")[0]
+    return detail
+
+
+@app.get("/debug")
+@login_required
+def debug_page():
+    # Your own entries; admins also see everyone's, and shares that arrived signed out.
+    tz = ZoneInfo(user_tz(g.user))
+    mine = "" if g.user["is_admin"] else "WHERE user_id = ? "
+    rows = db.get_db().execute(
+        "SELECT app_log.*, users.username FROM app_log LEFT JOIN users ON users.id = user_id "
+        + mine + "ORDER BY app_log.id DESC LIMIT 100", () if g.user["is_admin"] else (g.user["id"],)).fetchall()
+    entries = []
+    for r in rows:
+        at = datetime.fromisoformat(r["at"]).replace(tzinfo=ZoneInfo("UTC")).astimezone(tz)
+        detail = json.loads(r["detail"])
+        if r["user_id"] != g.user["id"]:
+            detail = without_content(detail)
+        entries.append({"at": at.strftime("%a %-d %b %H:%M:%S"), "kind": r["kind"],
+                        "user": r["username"] or "(not signed in)", "detail": detail})
+    return render_template("debug.html", entries=entries, apk=apk_version(), admin=g.user["is_admin"])
+
+
+# --- helpers --------------------------------------------------------------
+
+def body():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        abort(400)
+    return data
+
+
+def bad(message):
+    return jsonify(error=message), 400
+
+
+def owned(table, row_id):
+    row = db.get_db().execute(
+        f"SELECT * FROM {table} WHERE id = ? AND user_id = ?",
+        (row_id, g.user["id"])).fetchone()
+    if row is None:
+        abort(404)
+    return row
+
+
+def next_position(table, where="", params=()):
+    row = db.get_db().execute(
+        f"SELECT COALESCE(MAX(position), 0) + 1 FROM {table} WHERE user_id = ? {where}",
+        (g.user["id"], *params)).fetchone()
+    return row[0]
+
+
+def task_dict(row, tags, series):
+    d = dict(row)
+    d["focus"] = bool(d["focus"])
+    d["missed"] = bool(d["missed"])
+    d["tags"] = tags.get(row["id"], [])
+    s = series.get(row["series_id"])
+    d["repeat"] = s["repeat"] if s else None
+    d["on_miss"] = s["on_miss"] if s else None
+    d["carry_files"] = bool(s["carry_files"]) if s else False
+    d["repeat_from"] = ("done" if s["from_done"] else "calendar") if s else None
+    d["series_latest"] = s["latest"] if s else None
+    del d["user_id"]
+    return d
+
+
+def tags_for(task_ids):
+    if not task_ids:
+        return {}
+    marks = ",".join("?" * len(task_ids))
+    rows = db.get_db().execute(
+        f"SELECT tt.task_id, t.name FROM task_tags tt JOIN tags t ON t.id = tt.tag_id "
+        f"WHERE tt.task_id IN ({marks}) ORDER BY t.name", task_ids).fetchall()
+    out = {}
+    for r in rows:
+        out.setdefault(r["task_id"], []).append(r["name"])
+    return out
+
+
+def attachments_for(task_ids):
+    """{task_id: [attachment info]} (without the files themselves)."""
+    if not task_ids:
+        return {}
+    marks = ",".join("?" * len(task_ids))
+    out = {}
+    for r in db.get_db().execute(
+            f"SELECT id, task_id, name, mime, size, created_at FROM attachments "
+            f"WHERE task_id IN ({marks}) ORDER BY id", task_ids):
+        out.setdefault(r["task_id"], []).append(
+            {"id": r["id"], "name": r["name"], "mime": r["mime"], "size": r["size"],
+             "created_at": r["created_at"]})
+    return out
+
+
+def deps_for(task_ids):
+    """{task_id: [ids of the tasks blocking it]}."""
+    if not task_ids:
+        return {}
+    marks = ",".join("?" * len(task_ids))
+    out = {}
+    for r in db.get_db().execute(f"SELECT task_id, blocker_id FROM task_deps WHERE task_id IN ({marks}) "
+                                 "ORDER BY blocker_id", task_ids):
+        out.setdefault(r["task_id"], []).append(r["blocker_id"])
+    return out
+
+
+def set_blockers(task_id, blocker_ids):
+    """Replace what a task is blocked by. ValueError for a task that isn't the user's, the
+    task itself, or one that (in turn) waits on this task."""
+    if not isinstance(blocker_ids, list) or len(blocker_ids) > 50:
+        raise ValueError("blocked_by must be a list of task ids")
+    conn = db.get_db()
+    ids = []
+    for b in blocker_ids:
+        b = int(b)
+        if b == task_id:
+            raise ValueError("A task can't wait on itself.")
+        if not conn.execute("SELECT 1 FROM tasks WHERE id = ? AND user_id = ?", (b, g.user["id"])).fetchone():
+            raise ValueError("No such task to wait on.")
+        # Would b (through what it waits on) end up waiting on this task?
+        seen, pending = set(), [b]
+        while pending:
+            t = pending.pop()
+            if t == task_id:
+                raise ValueError("That would make tasks wait on each other in a loop.")
+            if t not in seen:
+                seen.add(t)
+                pending += [r[0] for r in conn.execute("SELECT blocker_id FROM task_deps WHERE task_id = ?", (t,))]
+        ids.append(b)
+    conn.execute("DELETE FROM task_deps WHERE task_id = ?", (task_id,))
+    conn.executemany("INSERT OR IGNORE INTO task_deps (task_id, blocker_id) VALUES (?, ?)",
+                     [(task_id, b) for b in ids])
+
+
+def tasks_json(rows):
+    files = attachments_for([r["id"] for r in rows])
+    deps = deps_for([r["id"] for r in rows])
+    for_task = lambda d: d | {"attachments": files.get(d["id"], []),  # noqa: E731
+                              "blocked_by": deps.get(d["id"], [])}
+    return [for_task(d) for d in _tasks_json(rows)]
+
+
+def _tasks_json(rows):
+    tags = tags_for([r["id"] for r in rows])
+    ids = list({r["series_id"] for r in rows if r["series_id"]})
+    series = {}
+    if ids:
+        marks = ",".join("?" * len(ids))
+        series = {s["id"]: s for s in db.get_db().execute(
+            f"SELECT * FROM series WHERE id IN ({marks})", ids)}
+    return [task_dict(r, tags, series) for r in rows]
+
+
+def project_dict(row):
+    d = dict(row)
+    d["focus"] = bool(d["focus"])
+    d["sequential"] = bool(d["sequential"])
+    del d["user_id"]
+    return d
+
+
+def clean_date(value):
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or not DATE_RE.match(value):
+        raise ValueError("dates must be YYYY-MM-DD")
+    if not 1900 <= date.fromisoformat(value).year <= 2199:
+        raise ValueError("date is out of range")
+    return value
+
+
+def client_today():
+    return client_now()[0]
+
+
+def client_now():
+    """(date, HH:MM) on the user's device, sent as ?now=YYYY-MM-DDTHH:MM (or ?today=)."""
+    day, _, hhmm = request.args.get("now", "").partition("T")
+    day = day or request.args.get("today", "")
+    try:
+        day = clean_date(day)
+    except ValueError:
+        day = None
+    if not day:
+        return date.today().isoformat(), time.strftime("%H:%M")
+    return day, hhmm if TIME_RE.match(hhmm) else "23:59"
+
+
+def user_settings(user):
+    try:
+        saved = json.loads(user["settings"] or "{}")
+    except ValueError:
+        saved = {}
+    return DEFAULT_SETTINGS | {k: v for k, v in saved.items() if k in DEFAULT_SETTINGS}
+
+
+def set_tags(task_id, names):
+    conn = db.get_db()
+    conn.execute("DELETE FROM task_tags WHERE task_id = ?", (task_id,))
+    for name in {n.strip() for n in names if isinstance(n, str) and n.strip()}:
+        conn.execute("INSERT OR IGNORE INTO tags (user_id, name) VALUES (?, ?)",
+                     (g.user["id"], name))
+        tag = conn.execute("SELECT id FROM tags WHERE user_id = ? AND name = ?",
+                           (g.user["id"], name)).fetchone()
+        conn.execute("INSERT OR IGNORE INTO task_tags VALUES (?, ?)", (task_id, tag["id"]))
+
+
+def check_ref(table, value):
+    if value in (None, ""):
+        return None
+    owned(table, int(value))
+    return int(value)
+
+
+def task_fields(data):
+    """Validate the editable task fields present in data."""
+    out = {}
+    for key, value in data.items():
+        if key == "title":
+            value = str(value).strip()
+            if not value:
+                raise ValueError("title is required")
+            out[key] = value[:500]
+        elif key in ("notes", "waiting_for"):
+            out[key] = str(value or "")[:20000]
+        elif key == "state":
+            if value not in TASK_STATES:
+                raise ValueError("bad state")
+            out[key] = value
+        elif key == "focus":
+            out[key] = 1 if value else 0
+        elif key in ("due_date", "start_date", "expires_on"):
+            out[key] = clean_date(value)
+        elif key == "start_time":
+            if value not in (None, "") and not TIME_RE.match(str(value)):
+                raise ValueError("times must be HH:MM")
+            out[key] = value or None
+        elif key == "energy":
+            if value not in ENERGIES and value not in (None, ""):
+                raise ValueError("bad energy")
+            out[key] = value or None
+        elif key == "minutes":
+            out[key] = int(value) if value not in (None, "") else None
+        elif key == "priority":
+            value = int(value or 0)
+            if not -PRIORITY_MAX <= value <= PRIORITY_MAX:
+                raise ValueError(f"priority must be between -{PRIORITY_MAX} and {PRIORITY_MAX}")
+            out[key] = value
+        elif key == "project_id":
+            out[key] = check_ref("projects", value)
+        elif key == "area_id":
+            out[key] = check_ref("areas", value)
+        elif key == "position":
+            out[key] = float(value)
+        elif key == "spent":
+            out[key] = max(0, min(10_000_000, int(value or 0)))
+        elif key == "remind_at":
+            # When to send a reminder, in UTC ("YYYY-MM-DD HH:MM:SS"), or none.
+            if value in (None, ""):
+                out[key] = None
+            elif not STAMP_RE.match(str(value)):
+                raise ValueError("remind_at must be a UTC date and time")
+            else:
+                out[key] = datetime.fromisoformat(str(value).replace(" ", "T")).strftime("%Y-%m-%d %H:%M:%S")
+            out["reminded_at"] = None  # a new time means a new reminder
+            out["remind_plan"] = out[key]
+    if out.get("state") == "scheduled" and "start_date" in out and not out["start_date"]:
+        raise ValueError("scheduled tasks need a start date")
+    return out
+
+
+def add_months(d, months):
+    m = d.month - 1 + months
+    y, m = d.year + m // 12, m % 12 + 1
+    return d.replace(year=y, month=m, day=min(d.day, calendar.monthrange(y, m)[1]))
+
+
+def shift(d, repeat, n):
+    """The date n repeats after d."""
+    if repeat == "daily":
+        return d + timedelta(days=n)
+    if every := EVERY_RE.fullmatch(repeat):
+        k, unit = n * int(every[1]), every[2]
+        return (d + timedelta(weeks=k) if unit == "w" else add_months(d, k) if unit == "m"
+                else add_months(d, 12 * k) if unit == "y" else d + timedelta(days=k))
+    if repeat == "weekly":
+        return d + timedelta(weeks=n)
+    if repeat == "monthly":
+        return add_months(d, n)
+    if repeat == "yearly":
+        return add_months(d, 12 * n)
+    for _ in range(n):  # weekdays
+        d += timedelta(days=1)
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
+    return d
+
+
+def occurrence_dates(s, n):
+    """(start, due) of occurrence n of series s, as ISO strings or None.
+
+    Without a base start date, an occurrence starts the day after the previous
+    one was due, so e.g. a daily chore appears each morning.
+    """
+    k = n - s["base_index"]
+
+    def at(base, steps):
+        return shift(date.fromisoformat(base), s["repeat"], steps)
+
+    due = at(s["base_due"], k).isoformat() if s["base_due"] else None
+    if s["base_start"]:
+        start = at(s["base_start"], k).isoformat()
+    elif k > 0:
+        start = (at(s["base_due"], k - 1) + timedelta(days=1)).isoformat()
+    else:
+        start = None
+    return start, due
+
+
+def utcnow():
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+
+
+def base_dates(task, today):
+    start = task["start_date"]
+    if not start and not task["due_date"]:
+        start = today
+    return start, task["due_date"]
+
+
+def start_series(task, repeat, on_miss, today):
+    conn = db.get_db()
+    cur = conn.execute(
+        "INSERT INTO series (user_id, repeat, on_miss, base_start, base_due) VALUES (?, ?, ?, ?, ?)",
+        (g.user["id"], repeat, on_miss, *base_dates(task, today)))
+    conn.execute("UPDATE tasks SET series_id = ?, series_index = 0 WHERE id = ?",
+                 (cur.lastrowid, task["id"]))
+
+
+def rebase_series(task, repeat, today):
+    """Restart a series' schedule from this occurrence's dates."""
+    conn = db.get_db()
+    s = conn.execute("SELECT * FROM series WHERE id = ?", (task["series_id"],)).fetchone()
+    index = task["series_index"]
+    if index != s["latest"]:
+        # Upcoming copies made from the old schedule are superseded.
+        conn.execute("DELETE FROM tasks WHERE series_id = ? AND series_index > ? "
+                     "AND completed_at IS NULL AND deleted_at IS NULL AND start_date > ?",
+                     (s["id"], index, today))
+        index = s["latest"] + 1
+        conn.execute("UPDATE tasks SET series_index = ? WHERE id = ?", (index, task["id"]))
+    conn.execute("UPDATE series SET repeat = ?, base_start = ?, base_due = ?, base_index = ?, "
+                 "latest = ? WHERE id = ?",
+                 (repeat, *base_dates(task, today), index, index, s["id"]))
+
+
+def end_series(series_id, today, keep_id=None):
+    """Stop repeating: drop copies that haven't started yet and detach the rest."""
+    conn = db.get_db()
+    conn.execute("DELETE FROM tasks WHERE series_id = ? AND id IS NOT ? AND completed_at IS NULL "
+                 "AND deleted_at IS NULL AND start_date > ?", (series_id, keep_id, today))
+    conn.execute("UPDATE tasks SET series_id = NULL, series_index = NULL WHERE series_id = ?",
+                 (series_id,))
+    conn.execute("DELETE FROM series WHERE id = ?", (series_id,))
+
+
+def carried_reminder(template, start, due):
+    """A later copy's reminder: the template copy's (as set, not snoozed), at the same
+    distance from its start (or due) date, in the user's local time. None if there's none."""
+    plan = template["remind_plan"]
+    anchor, new_anchor = template["start_date"] or template["due_date"], start or due
+    if not plan or not anchor or not new_anchor:
+        return None
+    tz = ZoneInfo(user_tz(g.user))
+    local = datetime.fromisoformat(plan.replace(" ", "T")).replace(tzinfo=ZoneInfo("UTC")).astimezone(tz)
+    offset = local.replace(tzinfo=None) - datetime.fromisoformat(anchor)
+    return utc_stamp((datetime.fromisoformat(new_anchor) + offset).replace(tzinfo=tz))
+
+
+def copy_occurrence(s, template, index, start, due, today):
+    """A series' next copy, made from its newest one (so edits carry forward), with fresh
+    checklists; returns its id."""
+    conn = db.get_db()
+    cur = conn.execute(
+        "INSERT INTO tasks (user_id, project_id, area_id, title, notes, state, focus, "
+        "due_date, start_date, waiting_for, energy, minutes, priority, expires_on, series_id, "
+        "series_index, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (s["user_id"], template["project_id"], template["area_id"], template["title"],
+         UNCHECK_RE.sub(r"\1[ ]", template["notes"]),
+         "scheduled" if start and start > today else "next", template["focus"],
+         due, start, template["waiting_for"], template["energy"], template["minutes"],
+         template["priority"], template["expires_on"], s["id"], index, template["position"]))
+    conn.execute("INSERT INTO task_tags SELECT ?, tag_id FROM task_tags WHERE task_id = ?",
+                 (cur.lastrowid, template["id"]))
+    if remind := carried_reminder(template, start, due):
+        conn.execute("UPDATE tasks SET remind_at = ?, remind_plan = ? WHERE id = ?", (remind, remind, cur.lastrowid))
+    if s["carry_files"]:
+        # The same files (stored once) on the new copy too.
+        conn.execute("INSERT INTO attachments (user_id, task_id, name, mime, size, blob_id, "
+                     "created_at) SELECT user_id, ?, name, mime, size, blob_id, created_at "
+                     "FROM attachments WHERE task_id = ? ORDER BY id", (cur.lastrowid, template["id"]))
+    return cur.lastrowid
+
+
+def next_after_done(s, task, today):
+    """For a series counted from completion: task (its newest copy) was just completed, so
+    make the next copy, one repeat on from today, keeping the copy's gap from start to due."""
+    conn = db.get_db()
+    if task["series_index"] != s["latest"] or conn.execute(
+            "SELECT 1 FROM tasks WHERE series_id = ? AND id != ? AND completed_at IS NULL "
+            "AND deleted_at IS NULL", (s["id"], task["id"])).fetchone():
+        return  # an older copy, or there's already one waiting
+    start = shift(date.fromisoformat(today), s["repeat"], 1)
+    due = None
+    if task["due_date"]:
+        gap = (date.fromisoformat(task["due_date"]) - date.fromisoformat(task["start_date"])).days \
+            if task["start_date"] else 0
+        due = (start + timedelta(days=gap)).isoformat()
+    copy_occurrence(s, task, s["latest"] + 1, start.isoformat(), due, today)
+    conn.execute("UPDATE series SET latest = latest + 1 WHERE id = ?", (s["id"],))
+
+
+def set_repeat_from(task_id, done, today):
+    """Count a task's series from completion (done) or from the calendar."""
+    conn = db.get_db()
+    task = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    s = task["series_id"] and conn.execute("SELECT * FROM series WHERE id = ?", (task["series_id"],)).fetchone()
+    if not s or bool(s["from_done"]) == done:
+        return
+    if done:
+        # Copies already made ahead on the calendar's schedule aren't wanted now.
+        conn.execute("DELETE FROM tasks WHERE series_id = ? AND id != ? AND completed_at IS NULL "
+                     "AND deleted_at IS NULL AND start_date > ?", (s["id"], task_id, today))
+        conn.execute("UPDATE series SET from_done = 1, latest = (SELECT MAX(series_index) FROM tasks "
+                     "WHERE series_id = ?) WHERE id = ?", (s["id"], s["id"]))
+    else:
+        conn.execute("UPDATE series SET from_done = 0 WHERE id = ?", (s["id"],))
+        rebase_series(conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone(), s["repeat"], today)
+
+
+def run_series(uid, today):
+    """Create each series' occurrences on schedule, and close out replaced ones.
+
+    As soon as an occurrence's start date arrives, the following one is created
+    (in Scheduled), whether or not anything was completed.
+    """
+    conn = db.get_db()
+    # Series counted from completion get their copies in apply_task_update instead.
+    for s in conn.execute("SELECT * FROM series WHERE user_id = ? AND from_done = 0", (uid,)).fetchall():
+        latest = s["latest"]
+        for _ in range(MAX_CATCH_UP):
+            start, _due = occurrence_dates(s, latest)
+            if start and start > today:
+                break
+            # New copies take their details from the newest one, so edits carry forward.
+            template = conn.execute(
+                "SELECT * FROM tasks WHERE series_id = ? AND deleted_at IS NULL "
+                "ORDER BY series_index DESC LIMIT 1", (s["id"],)).fetchone()
+            if template is None:
+                # Every copy has been trashed or deleted: the series is over.
+                end_series(s["id"], today)
+                break
+            latest += 1
+            start, due = occurrence_dates(s, latest)
+            copy_occurrence(s, template, latest, start, due, today)
+        conn.execute("UPDATE series SET latest = ? WHERE id = ?", (latest, s["id"]))
+        if s["on_miss"] == "replace":
+            begun = conn.execute(
+                "SELECT id FROM tasks WHERE series_id = ? AND completed_at IS NULL "
+                "AND deleted_at IS NULL AND (start_date IS NULL OR start_date <= ?) "
+                "ORDER BY series_index", (s["id"], today)).fetchall()
+            for r in begun[:-1]:
+                conn.execute("UPDATE tasks SET completed_at = ?, missed = 1 WHERE id = ?",
+                             (utcnow(), r["id"]))
+
+
+def repeat_args(data):
+    repeat = data.get("repeat") or None
+    on_miss = data.get("on_miss") or None
+    if repeat not in REPEATS | {None} and not EVERY_RE.fullmatch(str(repeat)):
+        raise ValueError("bad repeat")
+    if on_miss not in ON_MISS | {None}:
+        raise ValueError("bad on_miss")
+    return repeat, on_miss
+
+
+# --- data API -------------------------------------------------------------
+
+@app.get("/api/data")
+@login_required
+def all_data():
+    uid = g.user["id"]
+    today, now = client_now()
+    conn = db.get_db()
+    # Locked so two tabs loading at once can't both create the same occurrence.
+    conn.execute("BEGIN IMMEDIATE")
+    run_series(uid, today)
+    run_templates(uid, today)
+    # Scheduled items whose start date has arrived join the Queue (state "next").
+    conn.execute("UPDATE tasks SET state = 'next' WHERE user_id = ? AND state = 'scheduled' "
+                 "AND completed_at IS NULL AND (start_date < ? OR (start_date = ? AND "
+                 "(start_time IS NULL OR start_time <= ?)))", (uid, today, today, now))
+    conn.commit()
+    tasks = conn.execute(
+        "SELECT * FROM tasks WHERE user_id = ? AND completed_at IS NULL AND deleted_at IS NULL "
+        "ORDER BY position, id", (uid,)).fetchall()
+    projects = conn.execute(
+        "SELECT * FROM projects WHERE user_id = ? AND deleted_at IS NULL "
+        "AND (state != 'done' OR completed_at > datetime('now', '-30 days')) "
+        "ORDER BY position, id", (uid,)).fetchall()
+    areas = conn.execute("SELECT id, name, position, icon_version FROM areas WHERE user_id = ? "
+                         "ORDER BY position, id", (uid,)).fetchall()
+    tags = conn.execute("SELECT id, name FROM tags WHERE user_id = ? ORDER BY name",
+                        (uid,)).fetchall()
+    acct = google_account(uid)
+    return jsonify(
+        google=google_status(uid) | {"available": gcal.configured()},
+        events=json.loads(acct["events_json"]) if acct else [],
+        user={"id": uid, "username": g.user["username"],
+              "push_devices": conn.execute("SELECT COUNT(*) FROM push_subscriptions WHERE user_id = ?",
+                                           (uid,)).fetchone()[0],
+              "display_name": g.user["display_name"], "is_admin": bool(g.user["is_admin"]),
+              "settings": user_settings(g.user)},
+        tasks=tasks_json(tasks),
+        projects=[project_dict(p) for p in projects],
+        areas=[dict(a) for a in areas],
+        tags=[dict(t) for t in tags],
+        templates=[template_dict(r) for r in conn.execute(
+            "SELECT * FROM templates WHERE user_id = ? ORDER BY name COLLATE NOCASE", (uid,))],
+        links=[link_dict(r) for r in conn.execute(
+            "SELECT * FROM links WHERE user_id = ? ORDER BY position, id", (uid,))],
+    )
+
+
+@app.post("/api/tasks")
+@login_required
+def create_task():
+    try:
+        task_id = insert_task(body(), client_today())
+    except (ValueError, TypeError) as e:
+        return bad(str(e))
+    return jsonify(tasks_json([owned("tasks", task_id)])[0]), 201
+
+
+def insert_task(data, today):
+    """Create a task for g.user from API-style data; returns its id."""
+    data.setdefault("state", "inbox")
+    fields = task_fields(data)
+    repeat, on_miss = repeat_args(data)
+    if "title" not in fields:
+        raise ValueError("title is required")
+    fields.setdefault("position", next_position("tasks"))
+    fields["user_id"] = g.user["id"]
+    cols = ", ".join(fields)
+    conn = db.get_db()
+    cur = conn.execute(f"INSERT INTO tasks ({cols}) VALUES ({', '.join('?' * len(fields))})",
+                       tuple(fields.values()))
+    if isinstance(data.get("tags"), list):
+        set_tags(cur.lastrowid, data["tags"])
+    if data.get("blocked_by"):
+        set_blockers(cur.lastrowid, data["blocked_by"])
+    if repeat:
+        start_series(owned("tasks", cur.lastrowid), repeat,
+                     on_miss or db.default_on_miss(repeat), today)
+        if data.get("repeat_from") == "done":
+            set_repeat_from(cur.lastrowid, True, today)
+    conn.commit()
+    return cur.lastrowid
+
+
+@app.patch("/api/tasks/<int:task_id>")
+@login_required
+def update_task(task_id):
+    task = owned("tasks", task_id)
+    try:
+        apply_task_update(task, body(), client_today())
+    except (ValueError, TypeError) as e:
+        return bad(str(e))
+    return jsonify(tasks_json([owned("tasks", task_id)])[0])
+
+
+@app.post("/api/tasks/<int:task_id>/duplicate")
+@login_required
+def duplicate_task(task_id):
+    """A copy of a task, just after it: same details, tags, blockers and files (stored once),
+    but no reminder or time spent. A repeating task's copy repeats the same way, as a
+    schedule of its own."""
+    t = owned("tasks", task_id)
+    if t["deleted_at"]:
+        return bad("Restore it from the trash first.")
+    conn = db.get_db()
+    nxt = conn.execute("SELECT MIN(position) FROM tasks WHERE user_id = ? AND position > ?",
+                       (g.user["id"], t["position"])).fetchone()[0]
+    cols = ["project_id", "area_id", "title", "notes", "state", "focus", "due_date", "start_date",
+            "start_time", "waiting_for", "energy", "minutes", "priority", "expires_on"]
+    cur = conn.execute(
+        f"INSERT INTO tasks (user_id, position, {', '.join(cols)}) VALUES (?, ?, {', '.join('?' * len(cols))})",
+        (g.user["id"], (t["position"] + nxt) / 2 if nxt is not None else t["position"] + 1,
+         *[t[c] for c in cols]))
+    new = cur.lastrowid
+    if t["completed_at"]:  # a copy of a done task starts again, open
+        conn.execute("UPDATE tasks SET state = CASE WHEN state = 'scheduled' THEN 'next' ELSE state END "
+                     "WHERE id = ?", (new,))
+    conn.execute("INSERT INTO task_tags SELECT ?, tag_id FROM task_tags WHERE task_id = ?", (new, task_id))
+    conn.execute("INSERT INTO task_deps SELECT ?, blocker_id FROM task_deps WHERE task_id = ?", (new, task_id))
+    conn.execute("INSERT INTO attachments (user_id, task_id, name, mime, size, blob_id, created_at) "
+                 "SELECT user_id, ?, name, mime, size, blob_id, created_at FROM attachments "
+                 "WHERE task_id = ? ORDER BY id", (new, task_id))
+    s = t["series_id"] and conn.execute("SELECT * FROM series WHERE id = ?", (t["series_id"],)).fetchone()
+    if s and not t["completed_at"]:
+        start_series(owned("tasks", new), s["repeat"], s["on_miss"], client_today())
+        conn.execute("UPDATE series SET from_done = ?, carry_files = ? WHERE id = "
+                     "(SELECT series_id FROM tasks WHERE id = ?)", (s["from_done"], s["carry_files"], new))
+    conn.commit()
+    return jsonify(tasks_json([owned("tasks", new)])[0]), 201
+
+
+@app.post("/api/tasks/bulk")
+@login_required
+def update_tasks():
+    """Change several tasks at once: {"tasks": [{"id": 1, ...changes}, ...]}."""
+    items = body().get("tasks")
+    if not isinstance(items, list) or not items or len(items) > 1000:
+        return bad("Send a list of task changes.")
+    if not all(isinstance(x, dict) and isinstance(x.get("id"), int) for x in items):
+        return bad("Each change needs a task id.")
+    tasks = [owned("tasks", x["id"]) for x in items]
+    today = client_today()
+    for task, data in zip(tasks, items):
+        try:
+            apply_task_update(task, {k: v for k, v in data.items() if k != "id"}, today)
+        except (ValueError, TypeError) as e:
+            return bad(str(e))
+    return jsonify(tasks_json([owned("tasks", x["id"]) for x in items]))
+
+
+def apply_task_update(task, data, today):
+    """Apply API-style changes to one of g.user's tasks (from the app or from Google)."""
+    task_id = task["id"]
+    was_done = task["completed_at"]
+    fields = task_fields(data)
+    repeat, on_miss = repeat_args(data)
+    conn = db.get_db()
+    if "completed" in data:
+        if data["completed"] and not task["completed_at"]:
+            fields["completed_at"] = utcnow()
+        elif not data["completed"]:
+            fields["completed_at"] = None
+            if task["missed"]:
+                # Reopening a replaced copy makes it a one-off; the series has moved on.
+                fields.update(missed=0, series_id=None, series_index=None)
+    if "deleted" in data:
+        fields["deleted_at"] = (time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+                                if data["deleted"] else None)
+    if fields:
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        conn.execute(f"UPDATE tasks SET {sets}, updated_at = datetime('now') WHERE id = ?",
+                     (*fields.values(), task_id))
+    if isinstance(data.get("tags"), list):
+        set_tags(task_id, data["tags"])
+
+    task = owned("tasks", task_id)
+    series = task["series_id"] and conn.execute(
+        "SELECT * FROM series WHERE id = ?", (task["series_id"],)).fetchone()
+    if "repeat" in data:
+        if repeat and not series:
+            start_series(task, repeat, on_miss or db.default_on_miss(repeat), today)
+        elif series and not repeat:
+            end_series(series["id"], today, keep_id=task_id)
+        elif series and repeat != series["repeat"]:
+            rebase_series(task, repeat, today)
+    elif (series and ("start_date" in fields or "due_date" in fields)
+          and task["series_index"] == series["latest"] and not data.get("defer")):
+        # Editing the newest copy's dates changes the schedule from here on;
+        # editing an older copy, or deferring any copy, only moves that one.
+        rebase_series(task, series["repeat"], today)
+    if on_miss:
+        conn.execute("UPDATE series SET on_miss = ? WHERE id = "
+                     "(SELECT series_id FROM tasks WHERE id = ?)", (on_miss, task_id))
+    if "blocked_by" in data:
+        set_blockers(task_id, data["blocked_by"])
+    if data.get("repeat_from") in ("done", "calendar"):
+        set_repeat_from(task_id, data["repeat_from"] == "done", today)
+    task = owned("tasks", task_id)
+    s = task["series_id"] and conn.execute("SELECT * FROM series WHERE id = ?", (task["series_id"],)).fetchone()
+    if s and s["from_done"] and "completed" in data:
+        if data["completed"] and not was_done:
+            next_after_done(s, task, today)
+        elif not data["completed"] and was_done:
+            # Undone: take back the copy its completion made, if it hasn't been touched.
+            conn.execute("DELETE FROM tasks WHERE series_id = ? AND series_index = ? AND completed_at IS NULL "
+                         "AND deleted_at IS NULL AND updated_at = created_at", (s["id"], task["series_index"] + 1))
+            conn.execute("UPDATE series SET latest = (SELECT MAX(series_index) FROM tasks WHERE series_id = ?) "
+                         "WHERE id = ?", (s["id"], s["id"]))
+    if "remind_at" in data and task["series_id"]:
+        # Later copies already made take the new reminder too (or lose it, if cleared).
+        for later in conn.execute("SELECT * FROM tasks WHERE series_id = ? AND series_index > ? AND "
+                                  "completed_at IS NULL AND deleted_at IS NULL",
+                                  (task["series_id"], task["series_index"])).fetchall():
+            remind = carried_reminder(task, later["start_date"], later["due_date"])
+            conn.execute("UPDATE tasks SET remind_at = ?, remind_plan = ?, reminded_at = NULL WHERE id = ?",
+                         (remind, remind, later["id"]))
+    if "carry_files" in data:
+        conn.execute("UPDATE series SET carry_files = ? WHERE id = "
+                     "(SELECT series_id FROM tasks WHERE id = ?)", (1 if data["carry_files"] else 0, task_id))
+    conn.commit()
+
+
+# --- project templates (and recurring projects) -------------------------------
+#
+# A template is a project's outline as JSON:
+#   {"project": {"name", "notes", "area_id", "sequential", "due"},
+#    "tasks": [{"title", "notes", "state", "focus", "priority", "tags", "minutes", "energy",
+#               "start", "start_time", "due", "after"}]}
+# "start" and "due" are days from the project's date (negative: before it), or null; "after"
+# lists the tasks (by position in the list) it's blocked by. A template with a repeat makes
+# a new project on schedule (run_templates).
+
+OFFSET_MAX = 3650
+TEMPLATE_STATES = TASK_STATES - {"scheduled"}  # scheduling comes from the dates
+
+
+def clean_offset(v):
+    if v in (None, ""):
+        return None
+    v = int(v)
+    if not -OFFSET_MAX <= v <= OFFSET_MAX:
+        raise ValueError("days must be within 10 years")
+    return v
+
+
+def clean_template(data):
+    """Validate a template's JSON (raises ValueError)."""
+    if not isinstance(data, dict):
+        raise ValueError("bad template")
+    p = data.get("project") or {}
+    tasks = data.get("tasks") or []
+    if not isinstance(tasks, list) or len(tasks) > 300:
+        raise ValueError("a template can have up to 300 tasks")
+    area = p.get("area_id")
+    out = {"project": {"name": str(p.get("name") or "").strip()[:500] or "Project",
+                       "notes": str(p.get("notes") or "")[:20000],
+                       "area_id": int(area) if area not in (None, "") else None,
+                       "sequential": bool(p.get("sequential")),
+                       "due": clean_offset(p.get("due"))},
+           "tasks": []}
+    for t in tasks:
+        title = str(t.get("title") or "").strip()[:500]
+        if not title:
+            continue
+        state = t.get("state") if t.get("state") in TEMPLATE_STATES else "next"
+        after = [int(i) for i in (t.get("after") or []) if str(i).isdigit()]
+        out["tasks"].append({
+            "title": title, "notes": str(t.get("notes") or "")[:20000], "state": state,
+            "focus": bool(t.get("focus")), "priority": max(-PRIORITY_MAX, min(PRIORITY_MAX, int(t.get("priority") or 0))),
+            "tags": [str(x)[:100] for x in (t.get("tags") or []) if str(x).strip()][:30],
+            "minutes": int(t["minutes"]) if t.get("minutes") not in (None, "") else None,
+            "energy": t.get("energy") if t.get("energy") in ENERGIES else None,
+            "start": clean_offset(t.get("start")),
+            "start_time": t.get("start_time") if t.get("start_time") and TIME_RE.match(str(t["start_time"])) else None,
+            "due": clean_offset(t.get("due")),
+            "after": after})
+    n = len(out["tasks"])
+    for i, t in enumerate(out["tasks"]):
+        t["after"] = sorted({a for a in t["after"] if 0 <= a < n and a != i})
+    # No loops among the tasks' "after"s.
+    state = {}
+    def visit(i):
+        if state.get(i) == 1:
+            raise ValueError("the template's tasks wait on each other in a loop")
+        if state.get(i) != 2:
+            state[i] = 1
+            for a in out["tasks"][i]["after"]:
+                visit(a)
+            state[i] = 2
+    for i in range(n):
+        visit(i)
+    return out
+
+
+def template_from_project(project_id):
+    """A template's JSON from a project and its tasks (not the trashed ones), with dates
+    counted from the project's due date, or else its earliest task date."""
+    conn = db.get_db()
+    p = owned("projects", project_id)
+    rows = conn.execute("SELECT * FROM tasks WHERE project_id = ? AND deleted_at IS NULL "
+                        "ORDER BY position, id", (project_id,)).fetchall()
+    tasks = tasks_json(rows)
+    dates = [d for t in tasks for d in (t["start_date"], t["due_date"]) if d]
+    anchor = p["due_date"] or (min(dates) if dates else None)
+    days = lambda d: (date.fromisoformat(d) - date.fromisoformat(anchor)).days if d and anchor else None  # noqa: E731
+    index = {t["id"]: i for i, t in enumerate(tasks)}
+    return clean_template({
+        "project": {"name": p["name"], "notes": p["notes"], "area_id": p["area_id"],
+                    "sequential": p["sequential"], "due": days(p["due_date"])},
+        "tasks": [{"title": t["title"], "notes": UNCHECK_RE.sub(r"\1[ ]", t["notes"]),
+                   "state": "next" if t["state"] in ("inbox", "scheduled") else t["state"],
+                   "focus": t["focus"], "priority": t["priority"], "tags": t["tags"],
+                   "minutes": t["minutes"], "energy": t["energy"],
+                   "start": days(t["start_date"]), "start_time": t["start_time"],
+                   "due": days(t["due_date"]),
+                   "after": [index[b] for b in t["blocked_by"] if b in index]} for t in tasks]})
+
+
+def template_dict(row):
+    d = {k: row[k] for k in ("id", "name", "repeat", "next_date", "lead_days")}
+    d["data"] = json.loads(row["data"])
+    return d
+
+
+def make_project(tpl, anchor, name, today):
+    """A new project (with its tasks) from a template row; anchor is the date the template's
+    days count from (None: leave dates out). Returns the project's id."""
+    data = json.loads(tpl["data"])
+    conn = db.get_db()
+    p = data["project"]
+    on = lambda off: (date.fromisoformat(anchor) + timedelta(days=off)).isoformat() \
+        if anchor and off is not None else None  # noqa: E731
+    area = p["area_id"] if p["area_id"] and conn.execute(
+        "SELECT 1 FROM areas WHERE id = ? AND user_id = ?", (p["area_id"], g.user["id"])).fetchone() else None
+    cur = conn.execute("INSERT INTO projects (user_id, name, notes, area_id, sequential, due_date, "
+                       "template_id, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (g.user["id"], name[:500], p["notes"], area, int(p["sequential"]),
+                        on(p["due"]), tpl["id"], next_position("projects")))
+    project_id = cur.lastrowid
+    ids = []
+    for t in data["tasks"]:
+        start = on(t["start"])
+        task = {"title": t["title"], "notes": t["notes"], "focus": t["focus"],
+                "priority": t["priority"], "tags": t["tags"], "minutes": t["minutes"],
+                "energy": t["energy"], "due_date": on(t["due"]), "project_id": project_id,
+                # A task that can't start yet waits in Scheduled until its day.
+                "state": "scheduled" if start and start > today else t["state"]}
+        if task["state"] == "scheduled":
+            task.update(start_date=start, start_time=t["start_time"])
+        ids.append(insert_task(task, today))
+    for t, task_id in zip(data["tasks"], ids):
+        if t["after"]:
+            set_blockers(task_id, [ids[i] for i in t["after"]])
+    return project_id
+
+
+def instance_name(name, anchor):
+    d = date.fromisoformat(anchor)
+    return f"{name} ({d.strftime('%b')} {d.day}{'' if d.year == date.today().year else f', {d.year}'})"
+
+
+def run_templates(uid, today):
+    """Make each recurring template's project when it's due (lead_days before its date). After
+    a long gap only the latest is made, not every one that was missed."""
+    conn = db.get_db()
+    for tpl in conn.execute("SELECT * FROM templates WHERE user_id = ? AND repeat IS NOT NULL "
+                            "AND next_date IS NOT NULL", (uid,)).fetchall():
+        base = date.fromisoformat(tpl["next_date"])
+        lead = timedelta(days=tpl["lead_days"])
+        n = 0
+        while n < MAX_CATCH_UP and shift(base, tpl["repeat"], n) - lead <= date.fromisoformat(today):
+            n += 1
+        if not n:
+            continue
+        anchor = shift(base, tpl["repeat"], n - 1).isoformat()
+        make_project(tpl, anchor, instance_name(json.loads(tpl["data"])["project"]["name"], anchor), today)
+        conn.execute("UPDATE templates SET next_date = ? WHERE id = ?",
+                     (shift(base, tpl["repeat"], n).isoformat(), tpl["id"]))
+
+
+def template_settings(data, fields):
+    """Repeat settings from API data into fields (raises ValueError)."""
+    if "name" in data:
+        fields["name"] = str(data["name"]).strip()[:200] or "Template"
+    if "repeat" in data:
+        repeat = data["repeat"] or None
+        if repeat not in REPEATS | {None} and not EVERY_RE.fullmatch(str(repeat)):
+            raise ValueError("bad repeat")
+        fields["repeat"] = repeat
+    if "next_date" in data:
+        fields["next_date"] = clean_date(data["next_date"])
+    if "lead_days" in data:
+        lead = int(data["lead_days"] or 0)
+        if not 0 <= lead <= 365:
+            raise ValueError("make it between 0 and 365 days ahead")
+        fields["lead_days"] = lead
+    if fields.get("repeat") and not fields.get("next_date", True):
+        raise ValueError("a repeating template needs the next date")
+
+
+@app.post("/api/templates")
+@login_required
+def create_template():
+    """From a project ({"project_id"}), or from JSON ({"name", "data"})."""
+    data = body()
+    try:
+        tpl = template_from_project(int(data["project_id"])) if data.get("project_id") \
+            else clean_template(data.get("data"))
+        fields = {"name": data.get("name") or tpl["project"]["name"]}
+        template_settings(data | {"name": fields["name"]}, fields)
+    except (ValueError, TypeError, KeyError) as e:
+        return bad(str(e))
+    conn = db.get_db()
+    cur = conn.execute("INSERT INTO templates (user_id, name, data, repeat, next_date, lead_days) "
+                       "VALUES (?, ?, ?, ?, ?, ?)", (g.user["id"], fields["name"], json.dumps(tpl),
+                                                     fields.get("repeat"), fields.get("next_date"),
+                                                     fields.get("lead_days", 7)))
+    if data.get("project_id"):
+        conn.execute("UPDATE projects SET template_id = ? WHERE id = ?", (cur.lastrowid, int(data["project_id"])))
+    conn.commit()
+    return jsonify(template_dict(owned("templates", cur.lastrowid))), 201
+
+
+@app.patch("/api/templates/<int:template_id>")
+@login_required
+def update_template(template_id):
+    """Rename, change the tasks ({"data"}), take them again from a project ({"project_id"}),
+    or set the repeat."""
+    row = owned("templates", template_id)
+    data = body()
+    fields = {}
+    try:
+        if data.get("project_id"):
+            fields["data"] = json.dumps(template_from_project(int(data["project_id"])))
+        elif "data" in data:
+            fields["data"] = json.dumps(clean_template(data["data"]))
+        template_settings(data, fields)
+        if (fields.get("repeat", row["repeat"]) and not fields.get("next_date", row["next_date"])):
+            raise ValueError("a repeating template needs the next date")
+    except (ValueError, TypeError) as e:
+        return bad(str(e))
+    if fields:
+        conn = db.get_db()
+        conn.execute(f"UPDATE templates SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
+                     (*fields.values(), template_id))
+        conn.commit()
+    return jsonify(template_dict(owned("templates", template_id)))
+
+
+@app.delete("/api/templates/<int:template_id>")
+@login_required
+def delete_template(template_id):
+    owned("templates", template_id)
+    conn = db.get_db()
+    conn.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+    conn.commit()
+    return "", 204
+
+
+@app.post("/api/templates/<int:template_id>/use")
+@login_required
+def use_template(template_id):
+    """A new project from the template: {"name", "date"} (the date its days count from)."""
+    tpl = owned("templates", template_id)
+    data = body()
+    try:
+        anchor = clean_date(data.get("date"))
+        name = str(data.get("name") or "").strip() or json.loads(tpl["data"])["project"]["name"]
+        project_id = make_project(tpl, anchor, name, client_today())
+    except (ValueError, TypeError) as e:
+        return bad(str(e))
+    db.get_db().commit()
+    return jsonify(project_dict(owned("projects", project_id))), 201
+
+
+# --- attachments ------------------------------------------------------------
+
+ATTACHMENT_MAX = 25 * 1024 * 1024
+USER_FILES_MAX = 1024 * 1024 * 1024
+# Shown in the browser; anything else is downloaded, so a file can't run as part of the site.
+INLINE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf",
+                "text/plain"}
+
+
+def storage_used(uid):
+    """Bytes of attachments a user has, counting a file shared by several tasks once."""
+    return db.get_db().execute(
+        "SELECT COALESCE(SUM(size), 0) FROM blobs WHERE id IN "
+        "(SELECT blob_id FROM attachments WHERE user_id = ?)", (uid,)).fetchone()[0]
+
+
+def attachment_data(file_id):
+    return db.get_db().execute("SELECT b.data FROM attachments a JOIN blobs b ON b.id = a.blob_id "
+                               "WHERE a.id = ?", (file_id,)).fetchone()[0]
+
+
+@app.get("/api/storage")
+@login_required
+def storage():
+    """How much of the attachment allowance is used, and the biggest files."""
+    largest = db.get_db().execute(
+        "SELECT a.id, a.name, a.size, a.task_id, t.title, t.completed_at, t.deleted_at "
+        "FROM attachments a JOIN tasks t ON t.id = a.task_id WHERE a.user_id = ? "
+        "GROUP BY a.blob_id ORDER BY a.size DESC, a.id LIMIT 8", (g.user["id"],)).fetchall()
+    return jsonify(used=storage_used(g.user["id"]), limit=USER_FILES_MAX,
+                   largest=[dict(r) for r in largest])
+
+
+@app.post("/api/tasks/<int:task_id>/attachments")
+@login_required
+def add_attachments(task_id):
+    owned("tasks", task_id)
+    files = request.files.getlist("file")
+    if not files:
+        return bad("Choose a file.")
+    try:
+        save_files(task_id, files)
+    except ValueError as e:
+        return bad(str(e))
+    db.get_db().commit()
+    return jsonify(tasks_json([owned("tasks", task_id)])[0]), 201
+
+
+def save_files(task_id, files):
+    """Attach uploaded files to one of g.user's tasks (not committed). ValueError if one is
+    too big, or they'd take the user over their allowance."""
+    conn = db.get_db()
+    used = storage_used(g.user["id"])
+    for f in files:
+        data = f.read(ATTACHMENT_MAX + 1)
+        name = re.sub(r"[\x00-\x1f/\\]+", "_", os.path.basename(f.filename or "")).strip() or "file"
+        if len(data) > ATTACHMENT_MAX:
+            raise ValueError(f"{name} is over 25 MB.")
+        used += len(data)
+        if used > USER_FILES_MAX:
+            raise ValueError("That would take your attachments over 1 GB. Delete some first.")
+        mime = (mimetypes.guess_type(name)[0] or f.mimetype or "application/octet-stream")[:100]
+        conn.execute("INSERT INTO attachments (user_id, task_id, name, mime, size, blob_id) "
+                     "VALUES (?, ?, ?, ?, ?, ?)",
+                     (g.user["id"], task_id, name[:200], mime, len(data), db.put_blob(conn, data)))
+    conn.execute("UPDATE tasks SET updated_at = datetime('now') WHERE id = ?", (task_id,))
+
+
+@app.route("/share", methods=["GET", "POST"])
+def share():
+    """The phone's Share menu (the web manifest's share_target): what's shared becomes an
+    Inbox task, with any files attached. Every attempt is noted in SITE_PATH/debug."""
+    info = request_info()
+    try:
+        form = request.form if request.method == "POST" else request.args
+        files = request.files.getlist("files")
+    except RequestEntityTooLarge:
+        app_log("share", **info, result="Too large: over 25 MB in all")
+        raise
+    info["fields"] = {k: v[:300] for k, v in form.items()}
+    info["files"] = [{"field": k, "name": f.filename, "type": f.mimetype, "size": file_size(f)}
+                     for k, f in request.files.items(multi=True)]
+    if g.user is None:
+        app_log("share", **info, result="Not signed in: sent to the login page, so the share was lost")
+        return redirect(url_for("login"))
+    # Some apps share a file without a name: name it after its type.
+    for i, f in enumerate(files):
+        if not f.filename and file_size(f):
+            f.filename = f"shared-{i + 1}{mimetypes.guess_extension(f.mimetype or '') or ''}"
+    files = [f for f in files if f.filename]
+    title, text, link = (str(form.get(k, "")).strip() for k in ("title", "text", "url"))
+    # Apps put a shared link in "url" or somewhere in "text"; keep each piece once.
+    if not link and (found := re.search(r"https?://\S+", text)):
+        link = found[0]
+    if link:
+        text = text.replace(link, "").strip()
+    first = (text.split("\n")[0] if text else "").strip()
+    name = title or first or (urllib.parse.urlsplit(link).netloc.removeprefix("www.") if link else "") \
+        or (files[0].filename if files else "") or "Shared"
+    notes = "\n\n".join(x for x in (text if text != name else "", link) if x)
+    try:
+        task_id = insert_task({"title": name[:500], "notes": notes, "state": "inbox"}, client_today())
+        if files:
+            save_files(task_id, files)
+    except ValueError as e:
+        db.get_db().rollback()
+        app_log("share", **info, result=f"Refused: {e}")
+        return render_template("message.html", title="Couldn't add that", message=str(e)), 400
+    db.get_db().commit()
+    app_log("share", **info, result=f"Added task {task_id} ({len(files)} file(s))")
+    return redirect(url_for("index", shared=task_id))
+
+
+# --- the Android app's own requests --------------------------------------------
+# The app's Add task notification (reply in place, like a text message) and Quick Settings
+# tile post here directly, without Chrome or its cookies: Settings → Phone gives the app a key
+# of its own (handed over in an intent: link, so only this app can receive it).
+
+def device_hash(key):
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+@app.get("/api/devices")
+@login_required
+def list_devices():
+    rows = db.get_db().execute("SELECT id, name, created_at, used_at FROM devices "
+                               "WHERE user_id = ? ORDER BY id", (g.user["id"],)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.post("/api/devices")
+@login_required
+def add_device():
+    key = secrets.token_urlsafe(32)
+    name = str(body().get("name") or "Android app")[:100]
+    conn = db.get_db()
+    cur = conn.execute("INSERT INTO devices (user_id, key_hash, name) VALUES (?, ?, ?)",
+                       (g.user["id"], device_hash(key), name))
+    conn.commit()
+    return jsonify(id=cur.lastrowid, key=key), 201
+
+
+@app.delete("/api/devices/<int:device_id>")
+@login_required
+def delete_device(device_id):
+    conn = db.get_db()
+    conn.execute("DELETE FROM devices WHERE id = ? AND user_id = ?", (device_id, g.user["id"]))
+    conn.commit()
+    return "", 204
+
+
+QUICKADD_JS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quickadd_server.js")
+
+
+def read_quick_add(text, lang):
+    """Quick add's fields for text typed on the phone (#tags, !lists, dates…), read by the
+    browser's own code (quickadd_server.js), or None if Node.js couldn't run it."""
+    areas = [dict(r) for r in db.get_db().execute(
+        "SELECT id, name FROM areas WHERE user_id = ?", (g.user["id"],)).fetchall()]
+    try:
+        done = subprocess.run([shutil.which("node") or "/usr/bin/node", QUICKADD_JS],
+                              input=json.dumps({"text": text, "lang": lang, "areas": areas,
+                                                "now": request.args.get("now", "")}),
+                              capture_output=True, text=True, timeout=10,
+                              env={"TZ": user_tz(g.user), "PATH": "/usr/bin:/bin"})
+        fields = json.loads(done.stdout) if done.returncode == 0 else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        fields = None
+    if not isinstance(fields, dict) or not str(fields.get("title", "")).strip():
+        app.logger.warning("Reading a phone add failed; adding it as typed")
+        return None
+    return fields
+
+
+def added_summary(task):
+    """"Call dentist · Queue · Mon Nov 2, 3:00 PM · #phone", for the phone's notification."""
+    bits = [task["title"]]
+    if task.get("state", "inbox") != "inbox":
+        bits.append({"next": "Queue"}.get(task["state"], task["state"].capitalize()))
+    if task.get("focus"):
+        bits.append("★ today")
+    if task.get("start_date"):
+        day = date.fromisoformat(task["start_date"]).strftime("%a %b %-d")
+        if task.get("start_time"):
+            hh, mm = map(int, task["start_time"].split(":"))
+            day += f", {hh % 12 or 12}:{mm:02d} {'AM' if hh < 12 else 'PM'}"
+        bits.append(day)
+    if task.get("due_date"):
+        bits.append("due " + date.fromisoformat(task["due_date"]).strftime("%a %b %-d"))
+    if task.get("repeat"):
+        bits.append("↻")
+    bits += ["#" + t for t in task.get("tags") or []]
+    return " · ".join(bits)
+
+
+@app.post("/api/app/add")
+def app_add():
+    """A task typed into the Android app's notification or tile: the first line is read
+    like quick add (#tags, !lists, dates; see read_quick_add) and any more lines are notes."""
+    info = request_info()
+    key = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    conn = db.get_db()
+    device = conn.execute(
+        "SELECT d.id, d.user_id FROM devices d JOIN users u ON u.id = d.user_id "
+        "WHERE d.key_hash = ? AND NOT u.disabled", (device_hash(key),)).fetchone() if key else None
+    if device is None:
+        app_log("app-add", **info, result="Refused: not a connected phone")
+        return jsonify(error=f"This phone isn't connected any more. In {APP_NAME}, open Settings → "
+                             "Add from the phone, and connect it again."), 401
+    g.user = conn.execute("SELECT * FROM users WHERE id = ?", (device["user_id"],)).fetchone()
+    text = str(body().get("text", "")).strip()
+    if not text:
+        return bad("Type a task first.")
+    first, _, notes = text.partition("\n")
+    task = read_quick_add(first.strip(), str(body().get("lang", ""))[:20]) or {"title": first.strip()}
+    task |= {"title": task["title"][:500], "notes": notes.strip()}
+    task.setdefault("state", "inbox")
+    try:
+        task_id = insert_task(dict(task), client_today())
+    except (ValueError, TypeError) as e:
+        db.get_db().rollback()
+        app_log("app-add", **info, result=f"Refused: {e}")
+        return bad(str(e))
+    conn.execute("UPDATE devices SET used_at = datetime('now') WHERE id = ?", (device["id"],))
+    conn.commit()
+    app_log("app-add", **info, text=text[:300], result=f"Added task {task_id}")
+    return jsonify(id=task_id, title=task["title"], summary=added_summary(task)), 201
+
+
+def file_size(f):
+    f.stream.seek(0, os.SEEK_END)
+    size = f.stream.tell()
+    f.stream.seek(0)
+    return size
+
+
+@app.get("/api/attachments/<int:file_id>")
+@app.get("/api/attachments/<int:file_id>/<path:_name>")  # the name, for the browser's sake
+@login_required
+def get_attachment(file_id, _name=None):
+    row = owned("attachments", file_id)
+    inline = row["mime"] in INLINE_TYPES
+    res = send_file(io.BytesIO(attachment_data(file_id)),
+                    mimetype=row["mime"] if inline else "application/octet-stream",
+                    as_attachment=not inline, download_name=row["name"], etag=False,
+                    max_age=86400)
+    res.headers["X-Content-Type-Options"] = "nosniff"
+    # (Chrome won't show a PDF in a sandbox; PDFs can't reach the site's cookies anyway.)
+    if row["mime"] != "application/pdf":
+        res.headers["Content-Security-Policy"] = "sandbox; default-src 'none'; img-src 'self'; style-src 'unsafe-inline'"
+    return res
+
+
+@app.delete("/api/attachments/<int:file_id>")
+@login_required
+def delete_attachment(file_id):
+    row = owned("attachments", file_id)
+    conn = db.get_db()
+    conn.execute("DELETE FROM attachments WHERE id = ?", (file_id,))
+    conn.commit()
+    return jsonify(tasks_json([owned("tasks", row["task_id"])])[0])
+
+
+@app.errorhandler(413)
+def too_large(_e):
+    if request.path.startswith("/api/"):
+        return jsonify(error="That's over 25 MB."), 413
+    return "Too large", 413
+
+
+@app.delete("/api/tasks/<int:task_id>")
+@login_required
+def purge_task(task_id):
+    owned("tasks", task_id)
+    conn = db.get_db()
+    conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    return "", 204
+
+
+@app.post("/api/trash/empty")
+@login_required
+def empty_trash():
+    conn = db.get_db()
+    conn.execute("DELETE FROM tasks WHERE user_id = ? AND deleted_at IS NOT NULL",
+                 (g.user["id"],))
+    conn.execute("DELETE FROM projects WHERE user_id = ? AND deleted_at IS NOT NULL",
+                 (g.user["id"],))
+    conn.commit()
+    return "", 204
+
+
+@app.get("/api/logbook")
+@login_required
+def logbook():
+    rows = db.get_db().execute(
+        "SELECT * FROM tasks WHERE user_id = ? AND completed_at IS NOT NULL "
+        "AND deleted_at IS NULL ORDER BY completed_at DESC LIMIT 500",
+        (g.user["id"],)).fetchall()
+    return jsonify(tasks_json(rows))
+
+
+@app.get("/api/trash")
+@login_required
+def trash():
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE user_id = ? AND deleted_at IS NOT NULL "
+        "ORDER BY deleted_at DESC", (g.user["id"],)).fetchall()
+    projects = conn.execute(
+        "SELECT * FROM projects WHERE user_id = ? AND deleted_at IS NOT NULL "
+        "ORDER BY deleted_at DESC", (g.user["id"],)).fetchall()
+    return jsonify(tasks=tasks_json(rows), projects=[project_dict(p) for p in projects])
+
+
+# --- links -----------------------------------------------------------------
+
+def link_dict(row):
+    return {"id": row["id"], "parent_id": row["parent_id"], "name": row["name"],
+            "url": row["url"], "starred": bool(row["starred"]), "folder": row["url"] is None,
+            "icon_version": row["icon_version"]}
+
+
+def clean_url(value):
+    """A web address, with https:// added if it has no scheme; nothing else is allowed."""
+    url = str(value or "").strip()
+    if not url:
+        raise ValueError("Enter a web address.")
+    if not re.match(r"^[a-z][a-z0-9+.-]*:", url, re.I):
+        url = "https://" + url
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+        raise ValueError("Links must be web addresses (http:// or https://).")
+    return url[:2000]
+
+
+def link_parent(value, moving_id=None):
+    """Check that value is one of the user's folders, and not the item itself or inside it."""
+    if value in (None, ""):
+        return None
+    folder = owned("links", int(value))
+    if folder["url"] is not None:
+        raise ValueError("Links can only go inside folders.")
+    conn = db.get_db()
+    at = folder
+    while at is not None:
+        if at["id"] == moving_id:
+            raise ValueError("A folder can't go inside itself.")
+        at = at["parent_id"] and conn.execute("SELECT * FROM links WHERE id = ?",
+                                              (at["parent_id"],)).fetchone()
+    return folder["id"]
+
+
+def place_link(link_id, parent_id, before_id):
+    """Put a link at the end of its folder, or just before a sibling, renumbering the folder."""
+    conn = db.get_db()
+    siblings = [r["id"] for r in conn.execute(
+        "SELECT id FROM links WHERE user_id = ? AND parent_id IS ? AND id != ? "
+        "ORDER BY position, id", (g.user["id"], parent_id, link_id))]
+    at = siblings.index(before_id) if before_id in siblings else len(siblings)
+    siblings.insert(at, link_id)
+    conn.executemany("UPDATE links SET position = ? WHERE id = ?",
+                     [(i, x) for i, x in enumerate(siblings)])
+
+
+@app.post("/api/links")
+@login_required
+def create_link():
+    """Body: {"name", "url", "parent_id", "starred", "before"}; no url makes a folder."""
+    data = body()
+    try:
+        folder = bool(data.get("folder"))
+        url = None if folder else clean_url(data.get("url"))
+        name = str(data.get("name") or "").strip()[:200]
+        if not name:
+            if folder:
+                raise ValueError("Give the folder a name.")
+            name = urllib.parse.urlsplit(url).hostname.removeprefix("www.")
+        parent = link_parent(data.get("parent_id"))
+    except (ValueError, TypeError) as e:
+        return bad(str(e))
+    conn = db.get_db()
+    cur = conn.execute("INSERT INTO links (user_id, parent_id, name, url, starred) "
+                       "VALUES (?, ?, ?, ?, ?)",
+                       (g.user["id"], parent, name, url, 1 if data.get("starred") and url else 0))
+    place_link(cur.lastrowid, parent, data.get("before"))
+    conn.commit()
+    return jsonify(link_dict(owned("links", cur.lastrowid))), 201
+
+
+@app.patch("/api/links/<int:link_id>")
+@login_required
+def update_link(link_id):
+    """Change name, url, starred; or move with parent_id and/or "before" (a sibling id, or null for the end)."""
+    link = owned("links", link_id)
+    data = body()
+    fields = {}
+    try:
+        if "name" in data:
+            fields["name"] = str(data["name"] or "").strip()[:200]
+            if not fields["name"]:
+                raise ValueError("A name is needed.")
+        if "url" in data and link["url"] is not None:
+            fields["url"] = clean_url(data["url"])
+        if "starred" in data and link["url"] is not None:
+            fields["starred"] = 1 if data["starred"] else 0
+        if "parent_id" in data:
+            fields["parent_id"] = link_parent(data["parent_id"], moving_id=link_id)
+    except (ValueError, TypeError) as e:
+        return bad(str(e))
+    conn = db.get_db()
+    if fields:
+        conn.execute(f"UPDATE links SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
+                     (*fields.values(), link_id))
+    if "parent_id" in data or "before" in data:
+        place_link(link_id, fields.get("parent_id", link["parent_id"]), data.get("before"))
+    conn.commit()
+    return jsonify(link_dict(owned("links", link_id)))
+
+
+@app.delete("/api/links/<int:link_id>")
+@login_required
+def delete_link(link_id):
+    owned("links", link_id)
+    conn = db.get_db()
+    conn.execute("DELETE FROM links WHERE id = ?", (link_id,))
+    conn.commit()
+    return "", 204
+
+
+@app.post("/api/reorder/<kind>")
+@login_required
+def reorder(kind):
+    table = {"tasks": "tasks", "projects": "projects", "areas": "areas"}.get(kind)
+    ids = body().get("ids")
+    if table is None or not isinstance(ids, list):
+        abort(400)
+    conn = db.get_db()
+    for pos, row_id in enumerate(ids):
+        conn.execute(f"UPDATE {table} SET position = ? WHERE id = ? AND user_id = ?",
+                     (pos, int(row_id), g.user["id"]))
+    conn.commit()
+    return "", 204
+
+
+def project_fields(data):
+    out = {}
+    for key, value in data.items():
+        if key == "name":
+            value = str(value).strip()
+            if not value:
+                raise ValueError("name is required")
+            out[key] = value[:500]
+        elif key == "notes":
+            out[key] = str(value or "")[:20000]
+        elif key in ("sequential", "focus"):
+            out[key] = 1 if value else 0
+        elif key == "state":
+            if value not in PROJECT_STATES:
+                raise ValueError("bad state")
+            out[key] = value
+            out["completed_at"] = (time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+                                   if value == "done" else None)
+        elif key == "due_date":
+            out[key] = clean_date(value)
+        elif key == "area_id":
+            out[key] = check_ref("areas", value)
+        elif key == "deleted":
+            out["deleted_at"] = (time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+                                 if value else None)
+    return out
+
+
+@app.post("/api/projects")
+@login_required
+def create_project():
+    try:
+        fields = project_fields(body())
+    except (ValueError, TypeError) as e:
+        return bad(str(e))
+    if "name" not in fields:
+        return bad("name is required")
+    fields.setdefault("position", next_position("projects"))
+    fields["user_id"] = g.user["id"]
+    conn = db.get_db()
+    cur = conn.execute(
+        f"INSERT INTO projects ({', '.join(fields)}) VALUES ({', '.join('?' * len(fields))})",
+        tuple(fields.values()))
+    conn.commit()
+    return jsonify(project_dict(owned("projects", cur.lastrowid))), 201
+
+
+@app.patch("/api/projects/<int:project_id>")
+@login_required
+def update_project(project_id):
+    owned("projects", project_id)
+    try:
+        fields = project_fields(body())
+    except (ValueError, TypeError) as e:
+        return bad(str(e))
+    conn = db.get_db()
+    if fields:
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        conn.execute(f"UPDATE projects SET {sets} WHERE id = ?", (*fields.values(), project_id))
+    conn.commit()
+    return jsonify(project_dict(owned("projects", project_id)))
+
+
+@app.delete("/api/projects/<int:project_id>")
+@login_required
+def purge_project(project_id):
+    owned("projects", project_id)
+    conn = db.get_db()
+    conn.execute("DELETE FROM tasks WHERE project_id = ?", (project_id,))
+    conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    conn.commit()
+    return "", 204
+
+
+@app.post("/api/areas")
+@login_required
+def create_area():
+    name = str(body().get("name", "")).strip()
+    if not name:
+        return bad("name is required")
+    conn = db.get_db()
+    cur = conn.execute("INSERT INTO areas (user_id, name, position) VALUES (?, ?, ?)",
+                       (g.user["id"], name[:200], next_position("areas")))
+    conn.commit()
+    return jsonify(id=cur.lastrowid, name=name[:200]), 201
+
+
+@app.patch("/api/areas/<int:area_id>")
+@login_required
+def rename_area(area_id):
+    owned("areas", area_id)
+    name = str(body().get("name", "")).strip()
+    if not name:
+        return bad("name is required")
+    conn = db.get_db()
+    conn.execute("UPDATE areas SET name = ? WHERE id = ?", (name[:200], area_id))
+    conn.commit()
+    return jsonify(id=area_id, name=name[:200])
+
+
+# Areas and links can have an SVG icon: uploaded, or downloaded from a URL, then cleaned.
+
+def set_icon(table, row_id):
+    """Body: {"svg": "<svg…>"} for an upload, or {"url": "https://…"} to download one."""
+    owned(table, row_id)
+    data = body()
+    try:
+        if isinstance(data.get("svg"), str):
+            svg = data["svg"]
+        elif isinstance(data.get("url"), str) and data["url"].strip():
+            svg = icons.fetch_svg(data["url"].strip())
+        else:
+            return bad("Choose an SVG file or give a URL.")
+        svg = icons.clean_svg(svg)
+    except icons.IconError as e:
+        return bad(str(e))
+    version = hashlib.sha256(svg.encode()).hexdigest()[:12]
+    conn = db.get_db()
+    conn.execute(f"UPDATE {table} SET icon_svg = ?, icon_version = ? WHERE id = ?",
+                 (svg, version, row_id))
+    conn.commit()
+    return jsonify(id=row_id, icon_version=version)
+
+
+def remove_icon(table, row_id):
+    owned(table, row_id)
+    conn = db.get_db()
+    conn.execute(f"UPDATE {table} SET icon_svg = NULL, icon_version = NULL WHERE id = ?", (row_id,))
+    conn.commit()
+    return "", 204
+
+
+def serve_icon(table, row_id):
+    row = owned(table, row_id)
+    if not row["icon_svg"]:
+        abort(404)
+    # URLs carry ?v=<version>, so a changed icon gets a new URL and can be cached hard.
+    return Response(row["icon_svg"], headers=icons.SERVE_HEADERS | {
+        "Cache-Control": "private, max-age=31536000, immutable"})
+
+
+@app.put("/api/areas/<int:area_id>/icon")
+@login_required
+def set_area_icon(area_id):
+    return set_icon("areas", area_id)
+
+
+@app.delete("/api/areas/<int:area_id>/icon")
+@login_required
+def remove_area_icon(area_id):
+    return remove_icon("areas", area_id)
+
+
+@app.get("/api/areas/<int:area_id>/icon.svg")
+@login_required
+def area_icon(area_id):
+    return serve_icon("areas", area_id)
+
+
+@app.put("/api/links/<int:link_id>/icon")
+@login_required
+def set_link_icon(link_id):
+    return set_icon("links", link_id)
+
+
+@app.delete("/api/links/<int:link_id>/icon")
+@login_required
+def remove_link_icon(link_id):
+    return remove_icon("links", link_id)
+
+
+@app.get("/api/links/<int:link_id>/icon.svg")
+@login_required
+def link_icon(link_id):
+    return serve_icon("links", link_id)
+
+
+@app.delete("/api/areas/<int:area_id>")
+@login_required
+def delete_area(area_id):
+    owned("areas", area_id)
+    conn = db.get_db()
+    conn.execute("DELETE FROM areas WHERE id = ?", (area_id,))
+    conn.commit()
+    return "", 204
+
+
+@app.patch("/api/tags/<int:tag_id>")
+@login_required
+def rename_tag(tag_id):
+    owned("tags", tag_id)
+    name = str(body().get("name", "")).strip()
+    if not name:
+        return bad("name is required")
+    conn = db.get_db()
+    existing = conn.execute("SELECT id FROM tags WHERE user_id = ? AND name = ? AND id != ?",
+                            (g.user["id"], name, tag_id)).fetchone()
+    if existing:
+        # Renaming onto an existing tag merges the two.
+        conn.execute("INSERT OR IGNORE INTO task_tags SELECT task_id, ? FROM task_tags "
+                     "WHERE tag_id = ?", (existing["id"], tag_id))
+        conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
+    else:
+        conn.execute("UPDATE tags SET name = ? WHERE id = ?", (name, tag_id))
+    conn.commit()
+    return "", 204
+
+
+@app.delete("/api/tags/<int:tag_id>")
+@login_required
+def delete_tag(tag_id):
+    owned("tags", tag_id)
+    conn = db.get_db()
+    conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
+    conn.commit()
+    return "", 204
+
+
+@app.patch("/api/me/settings")
+@login_required
+def update_settings():
+    data = body()
+    settings = user_settings(g.user)
+    if "defer_options" in data:
+        opts = data["defer_options"]
+        if not isinstance(opts, list) or not 1 <= len(opts) <= 12:
+            return bad("Give between 1 and 12 defer options.")
+        opts = [str(o).strip().lower().replace(" ", "") for o in opts]
+        if bad_opts := [o for o in opts if not DEFER_RE.match(o)]:
+            return bad(f"Not understood: {', '.join(bad_opts)}. Use e.g. 30m, 2h, 3d, 1w, 1mo.")
+        settings["defer_options"] = opts
+    if "timezone" in data:
+        try:
+            ZoneInfo(str(data["timezone"]))
+        except (ZoneInfoNotFoundError, ValueError):
+            return bad("Unknown time zone.")
+        settings["timezone"] = str(data["timezone"])
+    if "expiry_notices" in data:
+        days = data["expiry_notices"]
+        if not isinstance(days, list) or len(days) > 8 or not all(
+                isinstance(d, int) and 0 <= d <= 730 for d in days):
+            return bad("Give up to 8 numbers of days, 0 to 730.")
+        settings["expiry_notices"] = sorted(set(days), reverse=True)
+    if "notify_starts" in data:
+        settings["notify_starts"] = bool(data["notify_starts"])
+    if "quiet_hours" in data:
+        quiet = str(data["quiet_hours"] or "")
+        start, _, end = quiet.partition("-")
+        if quiet and not (TIME_RE.match(start) and TIME_RE.match(end) and start != end):
+            return bad("Quiet hours must be two different times, HH:MM-HH:MM.")
+        settings["quiet_hours"] = quiet
+    if "digest_time" in data:
+        if data["digest_time"] not in ("", None) and not TIME_RE.match(str(data["digest_time"])):
+            return bad("The summary time must be HH:MM.")
+        settings["digest_time"] = data["digest_time"] or ""
+    conn = db.get_db()
+    conn.execute("UPDATE users SET settings = ? WHERE id = ?", (json.dumps(settings), g.user["id"]))
+    conn.commit()
+    return jsonify(settings)
+
+
+@app.post("/api/me/password")
+@login_required
+def change_password():
+    data = body()
+    if not check_password_hash(g.user["password_hash"], data.get("current", "")):
+        return bad("Current password is wrong.")
+    new = data.get("new", "")
+    if len(new) < MIN_PASSWORD:
+        return bad(f"New password must be at least {MIN_PASSWORD} characters.")
+    pw_hash = generate_password_hash(new)
+    conn = db.get_db()
+    conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (pw_hash, g.user["id"]))
+    conn.commit()
+    session["stamp"] = pw_hash[-12:]
+    return "", 204
+
+
+# --- admin API ------------------------------------------------------------
+
+def user_dict(row):
+    return {k: row[k] for k in ("id", "username", "display_name", "created_at", "last_login")} | {
+        "is_admin": bool(row["is_admin"]), "disabled": bool(row["disabled"])}
+
+
+@app.get("/api/admin/users")
+@admin_required
+def list_users():
+    rows = db.get_db().execute("SELECT * FROM users ORDER BY username").fetchall()
+    return jsonify([user_dict(r) for r in rows])
+
+
+@app.post("/api/admin/users")
+@admin_required
+def create_user():
+    data = body()
+    username = str(data.get("username", "")).strip()
+    password = data.get("password", "")
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]{2,64}", username):
+        return bad("Username may use letters, digits and _ . @ - (2-64 characters).")
+    if len(password) < MIN_PASSWORD:
+        return bad(f"Password must be at least {MIN_PASSWORD} characters.")
+    conn = db.get_db()
+    try:
+        cur = conn.execute(
+            "INSERT INTO users (username, display_name, password_hash, is_admin) "
+            "VALUES (?, ?, ?, ?)",
+            (username, str(data.get("display_name", "")).strip() or username,
+             generate_password_hash(password), 1 if data.get("is_admin") else 0))
+    except db.sqlite3.IntegrityError:
+        return bad("That username is taken.")
+    conn.commit()
+    row = conn.execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(user_dict(row)), 201
+
+
+@app.patch("/api/admin/users/<int:user_id>")
+@admin_required
+def update_user(user_id):
+    data = body()
+    conn = db.get_db()
+    if conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone() is None:
+        abort(404)
+    if user_id == g.user["id"] and (data.get("disabled") or data.get("is_admin") is False):
+        return bad("You can't disable or demote yourself.")
+    if "display_name" in data:
+        conn.execute("UPDATE users SET display_name = ? WHERE id = ?",
+                     (str(data["display_name"]).strip(), user_id))
+    if "is_admin" in data:
+        conn.execute("UPDATE users SET is_admin = ? WHERE id = ?",
+                     (1 if data["is_admin"] else 0, user_id))
+    if "disabled" in data:
+        conn.execute("UPDATE users SET disabled = ? WHERE id = ?",
+                     (1 if data["disabled"] else 0, user_id))
+    if data.get("password"):
+        if len(data["password"]) < MIN_PASSWORD:
+            return bad(f"Password must be at least {MIN_PASSWORD} characters.")
+        conn.execute("UPDATE users SET password_hash = ? WHERE id = ?",
+                     (generate_password_hash(data["password"]), user_id))
+    conn.commit()
+    row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return jsonify(user_dict(row))
+
+
+# --- your data, and backups --------------------------------------------------
+
+def zip_name(name, taken):
+    """A safe, unique file name inside the export zip."""
+    name = re.sub(r'[\x00-\x1f/\\:*?"<>|]+', "_", name).strip(". ") or "file"
+    stem, ext = os.path.splitext(name)
+    n, out = 1, name
+    while out.lower() in taken:
+        n += 1
+        out = f"{stem} ({n}){ext}"
+    taken.add(out.lower())
+    return out
+
+
+@app.get("/api/export")
+@login_required
+def export_data():
+    """Everything of the signed-in user's, as a zip: data.json (all of it), tasks.csv (for a
+    spreadsheet) and their attachments."""
+    uid = g.user["id"]
+    conn = db.get_db()
+    rows = lambda sql: [dict(r) for r in conn.execute(sql, (uid,))]  # noqa: E731
+    tasks = tasks_json(conn.execute("SELECT * FROM tasks WHERE user_id = ? ORDER BY id", (uid,)).fetchall())
+    projects = {p["id"]: p for p in rows("SELECT * FROM projects WHERE user_id = ? ORDER BY id")}
+    areas = {a["id"]: a for a in rows("SELECT id, name, position, icon_svg FROM areas WHERE user_id = ? ORDER BY position, id")}
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    spool = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024)
+    with zipfile.ZipFile(spool, "w", zipfile.ZIP_DEFLATED) as z:
+        taken = set()
+        for t in tasks:
+            for f in t["attachments"]:
+                f["file"] = f"attachments/{t['id']}/" + zip_name(f["name"], taken)
+                data = attachment_data(f["id"])
+                # Already-compressed files (photos, PDFs…) are stored as they are.
+                z.writestr(zipfile.ZipInfo(f["file"], time.localtime()[:6]), data,
+                           zipfile.ZIP_STORED if len(data) > 1024 * 1024 else zipfile.ZIP_DEFLATED)
+            taken.clear()
+        z.writestr("data.json", json.dumps({
+            "exported_at": utcnow(), "app": f"{APP_NAME} ({PUBLIC_URL})",
+            "user": {"username": g.user["username"], "display_name": g.user["display_name"],
+                     "settings": user_settings(g.user)},
+            "areas": list(areas.values()),
+            "tags": rows("SELECT id, name FROM tags WHERE user_id = ? ORDER BY name"),
+            "projects": list(projects.values()),
+            "tasks": tasks,
+            "series": rows("SELECT * FROM series WHERE user_id = ? ORDER BY id"),
+            "templates": [template_dict(r) for r in conn.execute(
+                "SELECT * FROM templates WHERE user_id = ? ORDER BY id", (uid,))],
+            "links": [{k: v for k, v in d.items() if k != "user_id"}
+                      for d in rows("SELECT * FROM links WHERE user_id = ? ORDER BY position, id")],
+        }, indent=1, default=str))
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(["id", "title", "list", "starred", "priority", "project", "area", "tags",
+                    "starts", "start time", "due", "repeat", "waiting for", "notes",
+                    "attachments", "created", "completed", "deleted"])
+        labels = {"next": "Queue"}
+        for t in tasks:
+            p = projects.get(t["project_id"])
+            area = areas.get(p["area_id"] if p else t["area_id"])
+            w.writerow([t["id"], t["title"], labels.get(t["state"], t["state"].title()),
+                        "yes" if t["focus"] else "", t["priority"], p["name"] if p else "",
+                        area["name"] if area else "", ", ".join(t["tags"]), t["start_date"] or "",
+                        t["start_time"] or "", t["due_date"] or "", t["repeat"] or "",
+                        t["waiting_for"], t["notes"], ", ".join(f["file"] for f in t["attachments"]),
+                        t["created_at"], t["completed_at"] or "", t["deleted_at"] or ""])
+        z.writestr("tasks.csv", "\ufeff" + out.getvalue())  # the mark tells Excel it's UTF-8
+        z.writestr("README.txt", f"""Your {APP_NAME} data, exported {stamp}.
+
+data.json    everything: tasks (open, completed and in the trash), projects, areas,
+             tags, repeating schedules (series) and links
+tasks.csv    your tasks, for a spreadsheet
+attachments/ the files attached to tasks, in a folder per task id
+""")
+    spool.seek(0)
+    return send_file(spool, mimetype="application/zip", as_attachment=True,
+                     download_name=f"entropicide-export-{g.user['username']}-{stamp}.zip", max_age=0)
+
+
+def backup_dir():
+    return backup.default_dir(app.config["DATABASE"])
+
+
+@app.get("/api/admin/backups")
+@admin_required
+def list_backups():
+    found = backup.backups(backup_dir())
+    return jsonify(dir=backup_dir(), backups=[
+        {"date": d.isoformat(), "size": os.path.getsize(p)} for d, p in found])
+
+
+@app.get("/api/admin/backup")
+@admin_required
+def download_backup():
+    """A fresh backup of the whole database (every user), for keeping on another machine."""
+    spool = tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024)
+    try:
+        backup.snapshot(app.config["DATABASE"], spool)
+    except backup.BackupError as e:
+        return bad(str(e))
+    spool.seek(0)
+    return send_file(spool, mimetype="application/gzip", as_attachment=True, max_age=0,
+                     download_name=f"entropicide-{date.today().isoformat()}.db.gz")
+
+
+@app.delete("/api/admin/users/<int:user_id>")
+@admin_required
+def delete_user(user_id):
+    if user_id == g.user["id"]:
+        return bad("You can't delete yourself.")
+    google_forget(user_id)
+    conn = db.get_db()
+    conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    conn.commit()
+    return "", 204
+
+
+# --- reminders (push notifications) ----------------------------------------
+#
+# Each device that turns notifications on (Settings) subscribes with the browser's push
+# service. A background thread checks every minute for reminders that are due: a task's
+# "Remind me" time (or a snoozed one), a timed task's start, and the morning summary.
+
+REMINDER_SECONDS = int(os.environ.get("ENTROPICIDE_REMINDER_SECONDS", "60"))
+START_GRACE = timedelta(hours=6)   # starts older than this when first seen aren't announced
+_reminder_thread = None
+
+
+def data_dir():
+    return os.path.dirname(os.path.abspath(app.config["DATABASE"]))
+
+
+def utc_stamp(dt):
+    return dt.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def snooze_until(choice, tz):
+    """UTC stamp for a snooze: "1h", "tonight" (7 pm, or an hour if it's later) or "tomorrow" (9 am)."""
+    now = datetime.now(ZoneInfo(tz))
+    if choice == "1h":
+        when = now + timedelta(hours=1)
+    elif choice == "tonight":
+        evening = now.replace(hour=19, minute=0, second=0, microsecond=0)
+        when = evening if evening - now >= timedelta(minutes=30) else now + timedelta(hours=1)
+    elif choice == "tomorrow":
+        when = (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+    else:
+        raise ValueError("snooze for 1h, tonight or tomorrow")
+    return utc_stamp(when)
+
+
+@app.post("/api/tasks/<int:task_id>/snooze")
+@login_required
+def snooze_task(task_id):
+    owned("tasks", task_id)
+    try:
+        when = snooze_until(body().get("until"), user_tz(g.user))
+    except ValueError as e:
+        return bad(str(e))
+    conn = db.get_db()
+    conn.execute("UPDATE tasks SET remind_at = ?, reminded_at = NULL, updated_at = datetime('now') "
+                 "WHERE id = ?", (when, task_id))
+    if body().get("plan"):
+        # Set from the editor's quick buttons: the reminder as meant, so later copies take it.
+        apply_task_update(owned("tasks", task_id), {"remind_at": when}, client_today())
+    conn.commit()
+    return jsonify(tasks_json([owned("tasks", task_id)])[0])
+
+
+@app.get("/api/push")
+@login_required
+def push_status():
+    devices = db.get_db().execute("SELECT endpoint, device, created_at FROM push_subscriptions "
+                                  "WHERE user_id = ? ORDER BY id", (g.user["id"],)).fetchall()
+    return jsonify(key=push.public_key(data_dir()), devices=[dict(d) for d in devices])
+
+
+@app.post("/api/push/subscribe")
+@login_required
+def push_subscribe():
+    data = body()
+    keys = data.get("keys") or {}
+    endpoint = str(data.get("endpoint", ""))
+    if not endpoint.startswith("https://") or not keys.get("p256dh") or not keys.get("auth"):
+        return bad("That isn't a push subscription.")
+    conn = db.get_db()
+    # One row per browser; it now belongs to whoever subscribed it last.
+    conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+    conn.execute("INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, device) "
+                 "VALUES (?, ?, ?, ?, ?)", (g.user["id"], endpoint[:1000], str(keys["p256dh"])[:200],
+                                            str(keys["auth"])[:100], str(data.get("device", ""))[:100]))
+    conn.commit()
+    return push_status()
+
+
+@app.post("/api/push/unsubscribe")
+@login_required
+def push_unsubscribe():
+    conn = db.get_db()
+    conn.execute("DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint = ?",
+                 (g.user["id"], str(body().get("endpoint", ""))))
+    conn.commit()
+    return push_status()
+
+
+@app.post("/api/push/test")
+@login_required
+def push_test():
+    sent = notify(g.user["id"], {"title": "Notifications are working",
+                                 "body": "Reminders will show up like this.", "tag": "test"})
+    return jsonify(sent=sent)
+
+
+def notify(uid, message):
+    """Send to each of a user's devices; returns how many it reached."""
+    conn = db.get_db()
+    sent = 0
+    for sub in conn.execute("SELECT * FROM push_subscriptions WHERE user_id = ?", (uid,)).fetchall():
+        try:
+            # The push services' contact for the sender: the site (they want just its origin).
+            push.send(data_dir(), sub, message, "https://" + urllib.parse.urlsplit(PUBLIC_URL).netloc)
+            sent += 1
+        except push.Gone:
+            conn.execute("DELETE FROM push_subscriptions WHERE id = ?", (sub["id"],))
+            conn.commit()
+        except Exception:
+            app.logger.exception("Push to user %s failed", uid)
+    return sent
+
+
+def task_message(t, title_prefix=""):
+    bits = []
+    if t["due_date"]:
+        bits.append("Due " + t["due_date"])
+    if t["notes"]:
+        bits.append(t["notes"].strip().split("\n")[0][:120])
+    return {"title": title_prefix + t["title"], "body": " · ".join(bits), "tag": f"task-{t['id']}",
+            "task": t["id"], "snooze": True}
+
+
+def quiet_spell(local, quiet):
+    """The quiet hours ("22:00-07:00") that local time is in, or that most recently began
+    before it, as (start, end) datetimes; None when there are none."""
+    if not quiet:
+        return None
+    start_hm, _, end_hm = quiet.partition("-")
+    for back in range(3):  # the spell starting today, yesterday or the day before
+        day = local.date() - timedelta(days=back)
+        at = lambda hm, d: datetime(d.year, d.month, d.day, int(hm[:2]), int(hm[3:]), tzinfo=local.tzinfo)  # noqa: E731
+        start = at(start_hm, day)
+        if start <= local:
+            end = at(end_hm, day if end_hm > start_hm else day + timedelta(days=1))
+            return start, end
+    return None
+
+
+def send_reminders(now=None):
+    """Send whatever reminders are due now (one pass of the reminder thread)."""
+    now = now or datetime.now(ZoneInfo("UTC"))
+    conn = db.get_db()
+    now_s = utc_stamp(now)
+    users = conn.execute("SELECT * FROM users WHERE disabled = 0 AND id IN "
+                         "(SELECT user_id FROM push_subscriptions)").fetchall()
+    for user in users:
+        uid, settings = user["id"], user_settings(user)
+        tz = ZoneInfo(user_tz(user))
+        local = now.astimezone(tz)
+        local_s = local.strftime("%Y-%m-%d %H:%M")
+        open_tasks = "user_id = ? AND completed_at IS NULL AND deleted_at IS NULL"
+        # Quiet hours: everything waits. Reminders stay due, and starts from the quiet hours
+        # are still sent when they end (below), so they all arrive then.
+        spell = quiet_spell(local, settings["quiet_hours"])
+        if spell and local < spell[1]:
+            continue
+        # "Remind me" times, including snoozes.
+        for t in conn.execute(f"SELECT * FROM tasks WHERE {open_tasks} AND remind_at <= ? AND "
+                              "(reminded_at IS NULL OR reminded_at < remind_at)", (uid, now_s)).fetchall():
+            conn.execute("UPDATE tasks SET reminded_at = ? WHERE id = ?", (now_s, t["id"]))
+            conn.commit()
+            notify(uid, task_message(t, "⏰ "))
+        # Timed starts.
+        if settings["notify_starts"]:
+            earliest = local - START_GRACE
+            if spell and local - spell[1] < timedelta(hours=3):
+                earliest = min(earliest, spell[0])
+            earliest = earliest.strftime("%Y-%m-%d %H:%M")
+            for t in conn.execute(
+                    f"SELECT *, start_date || ' ' || start_time AS starts FROM tasks WHERE {open_tasks} "
+                    "AND start_time IS NOT NULL AND start_date IS NOT NULL "
+                    "AND start_date || ' ' || start_time <= ? AND state NOT IN ('someday', 'later') "
+                    "AND start_notified IS NOT start_date || ' ' || start_time", (uid, local_s)).fetchall():
+                conn.execute("UPDATE tasks SET start_notified = ? WHERE id = ?", (t["starts"], t["id"]))
+                conn.commit()
+                if t["starts"] >= earliest:
+                    notify(uid, task_message(t, "Now: "))
+        # Expiry notices, in the daytime: the latest of the notice days that has been reached.
+        notices = settings["expiry_notices"]
+        if notices and 9 <= local.hour < 21:
+            for t in conn.execute(f"SELECT * FROM tasks WHERE {open_tasks} AND expires_on IS NOT NULL",
+                                  (uid,)).fetchall():
+                days = (date.fromisoformat(t["expires_on"]) - local.date()).days
+                reached = [n for n in notices if days <= n]
+                if not reached:
+                    continue
+                key = f"{t['expires_on']}:{min(reached)}"
+                if t["expiry_notified"] == key:
+                    continue
+                conn.execute("UPDATE tasks SET expiry_notified = ? WHERE id = ?", (key, t["id"]))
+                conn.commit()
+                when = ("Expired " + (f"{-days} days ago" if days < -1 else "yesterday") if days < 0
+                        else "Expires today" if days == 0 else "Expires tomorrow" if days == 1
+                        else f"Expires in {days} days")
+                notify(uid, task_message(t, when + ": ") | {"tag": f"expiry-{t['id']}"})
+        # The morning summary, once a day, at (or within 3 hours after) the chosen time.
+        digest = settings["digest_time"]
+        today = local.date().isoformat()
+        if (digest and user["digest_sent"] != today and digest <= local.strftime("%H:%M")
+                and local - local.replace(hour=int(digest[:2]), minute=int(digest[3:])) < timedelta(hours=3)):
+            conn.execute("UPDATE users SET digest_sent = ? WHERE id = ?", (today, uid))
+            conn.commit()
+            due = conn.execute(f"SELECT title, due_date FROM tasks WHERE {open_tasks} AND due_date <= ? "
+                               "ORDER BY due_date, priority DESC", (uid, today)).fetchall()
+            starred = conn.execute(f"SELECT COUNT(*) FROM tasks WHERE {open_tasks} AND focus = 1 "
+                                   "AND state NOT IN ('someday', 'later', 'scheduled')", (uid,)).fetchone()[0]
+            if due or starred:
+                late = sum(1 for d in due if d["due_date"] < today)
+                head = ("" if not due else f"{late} overdue" if late == len(due)
+                        else f"{len(due)} due ({late} overdue)" if late else f"{len(due)} due today")
+                head += (" · " if head and starred else "") + (f"{starred} starred" if starred else "")
+                notify(uid, {"title": "Today: " + head, "tag": "digest",
+                             "body": ", ".join(d["title"] for d in due[:5]) + (" …" if len(due) > 5 else "")})
+
+
+@app.before_request
+def start_reminder_thread():
+    global _reminder_thread
+    if _reminder_thread is None and REMINDER_SECONDS > 0:
+        _reminder_thread = threading.Thread(target=_reminder_loop, name="reminders", daemon=True)
+        _reminder_thread.start()
+
+
+def _reminder_loop():
+    while True:
+        time.sleep(REMINDER_SECONDS)
+        with app.app_context():
+            try:
+                send_reminders()
+            except Exception:
+                app.logger.exception("Sending reminders failed")
+            finally:
+                db.close_db()
+
+
+# --- Google Calendar --------------------------------------------------------
+#
+# Tasks with a start or due date are mirrored to a calendar in the user's Google account
+# (an "Entropicide" calendar the app makes, or one of their own such as a shared family calendar),
+# and changes made there (moving, renaming, deleting events) come back.
+# A background thread syncs every minute, and soon after any change in the app.
+
+SYNC_SECONDS = int(os.environ.get("ENTROPICIDE_GOOGLE_SYNC_SECONDS", "60"))
+OTHER_EVENTS_SECONDS = 300   # how often other calendars' events are re-read
+EVENT_DAYS = 30              # how far ahead they're read
+PUBLIC_URL = setting("PUBLIC_URL") or "https://{}/{}".format(
+    setting("SITE_HOST", "localhost"), (setting("SITE_PATH", "/").strip("/") + "/").lstrip("/"))
+_sync_wake = threading.Event()
+_sync_lock = threading.Lock()   # one sync at a time: the thread, "Sync now", disconnect
+_sync_thread = None
+
+
+def server_tz():
+    try:
+        return os.path.realpath("/etc/localtime").split("zoneinfo/", 1)[1]
+    except IndexError:
+        return "UTC"
+
+
+def user_tz(user):
+    return user_settings(user)["timezone"] or server_tz()
+
+
+def google_redirect_uri():
+    return os.environ.get("ENTROPICIDE_GOOGLE_REDIRECT_URI") or url_for("google_callback", _external=True)
+
+
+@app.get("/google/connect")
+@login_required
+def google_connect():
+    if not gcal.configured():
+        abort(404)
+    session["google_state"] = secrets.token_urlsafe(24)
+    return redirect(gcal.auth_url(google_redirect_uri(), session["google_state"]))
+
+
+@app.get("/google/callback")
+@login_required
+def google_callback():
+    state = session.pop("google_state", None)
+    back = url_for("index")
+    if not state or not secrets.compare_digest(request.args.get("state", ""), state):
+        return redirect(back + "?google=expired")
+    if "code" not in request.args:
+        return redirect(back + "?google=cancelled")
+    try:
+        tokens = gcal.exchange_code(request.args["code"], google_redirect_uri())
+    except gcal.GoogleError as e:
+        app.logger.warning("Google sign-in failed: %s", e)
+        return redirect(back + "?google=failed")
+    if not tokens.get("refresh_token"):
+        return redirect(back + "?google=failed")
+    if not gcal.has_calendar_access(tokens):
+        try:
+            gcal.revoke(tokens["refresh_token"])
+        except gcal.GoogleError:
+            pass
+        return redirect(back + "?google=noscope")
+    uid = g.user["id"]
+    conn = db.get_db()
+    old = conn.execute("SELECT * FROM google_accounts WHERE user_id = ?", (uid,)).fetchone()
+    if old and old["email"] != tokens["email"]:
+        google_forget(uid, remote=False)  # a different Google account: start over
+        old = None
+    conn.execute(
+        "INSERT INTO google_accounts (user_id, email, refresh_token, access_token, access_expires, "
+        "calendar_id, sync_token) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (user_id) DO UPDATE SET "
+        "refresh_token = excluded.refresh_token, access_token = excluded.access_token, "
+        "access_expires = excluded.access_expires, last_error = NULL",
+        (uid, tokens["email"], tokens["refresh_token"], tokens.get("access_token"),
+         time.time() + int(tokens.get("expires_in", 0)), None, None))
+    conn.commit()
+    _sync_wake.set()
+    return redirect(back + "?google=connected")
+
+
+@app.post("/api/google/sync")
+@login_required
+def google_sync_now():
+    sync_user(g.user["id"], fetch_events=True)
+    return jsonify(google_status(g.user["id"]))
+
+
+@app.post("/api/google/disconnect")
+@login_required
+def google_disconnect():
+    google_forget(g.user["id"])
+    return "", 204
+
+
+@app.get("/api/google/calendars")
+@login_required
+def google_calendars():
+    """Calendars the user could put tasks on."""
+    acct = google_account(g.user["id"])
+    if not acct:
+        abort(404)
+    try:
+        cals = gcal.writable_calendars(_access_token(acct))
+    except gcal.GoogleError as e:
+        return bad(str(e))
+    return jsonify([{"id": cid, "name": name} for cid, name in cals])
+
+
+@app.post("/api/google/calendar")
+@login_required
+def google_choose_calendar():
+    """Body: {"id": "<calendar id>"} for one of the user's calendars, or {"id": "new"}."""
+    uid = g.user["id"]
+    acct = google_account(uid)
+    choice = body().get("id")
+    if not acct or not isinstance(choice, str):
+        abort(400)
+    with _sync_lock:
+        try:
+            token = _access_token(acct)
+            name = None
+            if choice != "new":
+                name = dict(gcal.writable_calendars(token)).get(choice)
+                if name is None:
+                    return bad("You can't add events to that calendar.")
+            if choice != acct["calendar_id"]:
+                _clear_calendar(acct, token)  # take the tasks off the old one
+                conn = db.get_db()
+                conn.execute("UPDATE google_accounts SET calendar_id = ?, calendar_name = ?, "
+                             "owns_calendar = ?, sync_token = NULL WHERE user_id = ?",
+                             (None if choice == "new" else choice, name,
+                              1 if choice == "new" else 0, uid))
+                conn.commit()
+        except gcal.GoogleError as e:
+            return bad(str(e))
+    sync_user(uid, fetch_events=True)
+    return jsonify(google_status(uid))
+
+
+def google_account(uid):
+    return db.get_db().execute("SELECT * FROM google_accounts WHERE user_id = ?",
+                               (uid,)).fetchone()
+
+
+def google_status(uid):
+    acct = google_account(uid)
+    return {"connected": acct is not None, "email": acct and acct["email"],
+            "last_sync": acct and acct["last_sync"], "error": acct and acct["last_error"],
+            "calendar_chosen": bool(acct and acct["owns_calendar"] is not None),
+            "calendar_name": acct and (gcal.CALENDAR_NAME if acct["owns_calendar"]
+                                       else acct["calendar_name"]),
+            "calendar_id": acct and acct["calendar_id"],
+            "calendar_owned": bool(acct and acct["owns_calendar"])}
+
+
+def _clear_calendar(acct, token):
+    """Take the app's events off the user's current calendar (deleting it if the app made it)."""
+    conn = db.get_db()
+    uid = acct["user_id"]
+    cal = acct["calendar_id"]
+    if cal and acct["owns_calendar"]:
+        try:
+            gcal.delete_calendar(token, cal)
+        except gcal.GoogleError as e:
+            if e.status not in (404, 410):
+                raise
+    elif cal:
+        # Someone else's calendar (e.g. the family's): remove only the events the app added.
+        ids = [r[0] for r in conn.execute(
+            "SELECT gcal_event_id FROM tasks WHERE user_id = ? AND gcal_event_id IS NOT NULL "
+            "UNION SELECT event_id FROM gcal_deletions WHERE user_id = ?", (uid, uid))]
+        for event_id in ids:
+            gcal.delete_event(token, cal, event_id)
+    conn.execute("UPDATE tasks SET gcal_event_id = NULL, gcal_pushed = NULL WHERE user_id = ?",
+                 (uid,))
+    conn.execute("DELETE FROM gcal_deletions WHERE user_id = ?", (uid,))
+    conn.commit()
+
+
+def google_forget(uid, remote=True):
+    """Disconnect: take the tasks off Google's calendar (if remote) and forget the account."""
+    conn = db.get_db()
+    with _sync_lock:
+        acct = google_account(uid)
+        if acct and remote:
+            try:
+                token = _access_token(acct)
+                _clear_calendar(acct, token)
+                gcal.revoke(acct["refresh_token"])
+            except gcal.GoogleError as e:
+                app.logger.info("Google cleanup for user %s: %s", uid, e)
+        conn.execute("UPDATE tasks SET gcal_event_id = NULL, gcal_pushed = NULL WHERE user_id = ?",
+                     (uid,))
+        conn.execute("DELETE FROM gcal_deletions WHERE user_id = ?", (uid,))
+        conn.execute("DELETE FROM google_accounts WHERE user_id = ?", (uid,))
+        conn.commit()
+
+
+@app.before_request
+def start_sync_thread():
+    global _sync_thread
+    if _sync_thread is None and gcal.configured() and SYNC_SECONDS > 0:
+        _sync_thread = threading.Thread(target=_sync_loop, name="google-sync", daemon=True)
+        _sync_thread.start()
+
+
+@app.after_request
+def security_headers(response):
+    # No framing (clickjacking), no guessing content types, no full URLs sent to other sites.
+    # (Attachments and area icons set stricter policies of their own.)
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    return response
+
+
+@app.after_request
+def wake_sync(response):
+    if (request.path.startswith("/api/") and not request.path.startswith("/api/google/")
+            and request.method != "GET" and response.status_code < 400):
+        _sync_wake.set()
+    return response
+
+
+def _sync_loop():
+    while True:
+        if _sync_wake.wait(SYNC_SECONDS):
+            time.sleep(3)  # let a burst of edits (typing, drags) settle first
+        _sync_wake.clear()
+        with app.app_context():
+            for row in db.get_db().execute("SELECT user_id FROM google_accounts").fetchall():
+                try:
+                    sync_user(row["user_id"])
+                except Exception:
+                    app.logger.exception("Google sync failed for user %s", row["user_id"])
+
+
+def sync_user(uid, fetch_events=False):
+    """One round of two-way sync for a user: Google's changes first, then the app's."""
+    conn = db.get_db()
+    with _sync_lock:
+        user = conn.execute("SELECT * FROM users WHERE id = ? AND disabled = 0", (uid,)).fetchone()
+        acct = conn.execute("SELECT * FROM google_accounts WHERE user_id = ?", (uid,)).fetchone()
+        if not user or not acct:
+            return
+        saved_user = g.get("user")
+        g.user = user
+        tz = user_tz(user)
+        today = datetime.now(ZoneInfo(tz)).date().isoformat()
+        error = None
+        try:
+            # Make due repeat copies even if nobody has the app open, so they reach the calendar.
+            conn.execute("BEGIN IMMEDIATE")
+            run_series(uid, today)
+            conn.commit()
+            token = _access_token(acct)
+            owned = acct["owns_calendar"]
+            cal = acct["calendar_id"]
+            if cal is None and owned:
+                cal = _create_calendar(uid, token, tz)
+            if cal:  # until the user picks a calendar, only their events are read
+                try:
+                    _pull(uid, token, cal, owned, tz, today)
+                except gcal.GoogleError as e:
+                    if e.status != 404:
+                        raise
+                    conn.execute("UPDATE tasks SET gcal_event_id = NULL, gcal_pushed = NULL "
+                                 "WHERE user_id = ?", (uid,))
+                    conn.execute("DELETE FROM gcal_deletions WHERE user_id = ?", (uid,))
+                    if not owned:
+                        conn.execute("UPDATE google_accounts SET calendar_id = NULL, "
+                                     "owns_calendar = NULL WHERE user_id = ?", (uid,))
+                        conn.commit()
+                        raise gcal.GoogleError(f"The calendar “{acct['calendar_name']}” is gone "
+                                               "from Google. Choose another in Settings.")
+                    # The app's calendar was deleted in Google: make a new one and refill it.
+                    cal = _create_calendar(uid, token, tz)
+                    _pull(uid, token, cal, owned, tz, today)
+                _push(uid, token, cal, tz)
+            if fetch_events or time.time() - acct["events_fetched"] > OTHER_EVENTS_SECONDS:
+                _fetch_events(uid, token, cal if owned else None, tz, today)
+        except gcal.GoogleError as e:
+            conn.rollback()
+            error = str(e)
+        finally:
+            g.user = saved_user
+        conn.execute("UPDATE google_accounts SET last_error = ?, "
+                     "last_sync = CASE WHEN ? IS NULL THEN ? ELSE last_sync END WHERE user_id = ?",
+                     (error, error, utcnow(), uid))
+        conn.commit()
+
+
+def _access_token(acct):
+    if acct["access_token"] and acct["access_expires"] > time.time() + 60:
+        return acct["access_token"]
+    tokens = gcal.refresh(acct["refresh_token"])
+    conn = db.get_db()
+    conn.execute("UPDATE google_accounts SET access_token = ?, access_expires = ? WHERE user_id = ?",
+                 (tokens["access_token"], time.time() + int(tokens.get("expires_in", 3600)),
+                  acct["user_id"]))
+    conn.commit()
+    return tokens["access_token"]
+
+
+def _create_calendar(uid, token, tz):
+    cal = gcal.create_calendar(token, tz)["id"]
+    conn = db.get_db()
+    conn.execute("UPDATE google_accounts SET calendar_id = ?, calendar_name = ?, owns_calendar = 1, "
+                 "sync_token = NULL WHERE user_id = ?", (cal, gcal.CALENDAR_NAME, uid))
+    conn.commit()
+    return cal
+
+
+def _pull(uid, token, cal, owned, tz, today):
+    """Apply changes made to the tasks' calendar in Google since the last sync."""
+    conn = db.get_db()
+    sync_token = conn.execute("SELECT sync_token FROM google_accounts WHERE user_id = ?",
+                              (uid,)).fetchone()[0]
+    events, page = [], None
+    while True:
+        params = {"maxResults": 250}
+        params |= {"syncToken": sync_token} if sync_token else {"showDeleted": "true"}
+        if page:
+            params["pageToken"] = page
+        try:
+            res = gcal.list_events(token, cal, params)
+        except gcal.GoogleError as e:
+            if e.status == 410 and sync_token:  # Google expired the feed position: reread it all
+                sync_token, events, page = None, [], None
+                continue
+            raise
+        events += res.get("items", [])
+        page = res.get("nextPageToken")
+        if not page:
+            break
+    for event in events:
+        _apply_event(uid, event, token, cal, owned, tz, today)
+    conn.execute("UPDATE google_accounts SET sync_token = ? WHERE user_id = ?",
+                 (res.get("nextSyncToken"), uid))
+    conn.commit()
+
+
+def _apply_event(uid, event, token, cal, owned, tz, today):
+    conn = db.get_db()
+    task = conn.execute("SELECT * FROM tasks WHERE user_id = ? AND gcal_event_id = ?",
+                        (uid, event["id"])).fetchone()
+    if event.get("status") == "cancelled":
+        if task and not task["completed_at"] and not task["deleted_at"]:
+            # Deleted in Google: the task goes to the Trash (where it can be restored).
+            apply_task_update(task, {"deleted": True}, today)
+            conn.execute("UPDATE tasks SET gcal_event_id = NULL, gcal_pushed = NULL WHERE id = ?",
+                         (task["id"],))
+            conn.commit()
+        return
+    if event.get("recurrence") or event.get("recurringEventId"):
+        return  # repeating events made in Google aren't turned into tasks
+    when = gcal.event_when(event.get("start"), tz)
+    if when is None:
+        return
+    day, hhmm = when
+
+    if task is None:
+        mark = event.get("extendedProperties", {}).get("private", {}).get("todo_task")
+        if mark and mark.isdigit():
+            # Made by this app for a task that has since lost track of it.
+            orphan = conn.execute("SELECT * FROM tasks WHERE id = ? AND user_id = ? "
+                                  "AND gcal_event_id IS NULL", (int(mark), uid)).fetchone()
+            if orphan and gcal.snapshot(orphan):
+                conn.execute("UPDATE tasks SET gcal_event_id = ?, gcal_pushed = NULL WHERE id = ?",
+                             (event["id"], orphan["id"]))
+                conn.commit()
+            else:
+                gcal.delete_event(token, cal, event["id"])
+            return
+        if not owned:
+            return  # the calendar's own events (e.g. the family's) aren't tasks
+        # An event added to the app's own calendar in Google becomes a task.
+        title, notes = gcal.event_title(event, "start"), gcal.event_notes(event)
+        task_id = insert_task({"title": title, "notes": notes, "start_date": day,
+                               "start_time": hhmm,
+                               "state": "scheduled" if day > today else "next"}, today)
+        pushed = {"kind": "start", "title": title, "date": day, "time": hhmm, "notes": notes}
+        conn.execute("UPDATE tasks SET gcal_event_id = ?, gcal_pushed = ? WHERE id = ?",
+                     (event["id"], json.dumps(pushed), task_id))
+        conn.commit()
+        return
+
+    pushed = json.loads(task["gcal_pushed"] or "null")
+    if not pushed:
+        return  # not sent yet; the push that follows decides
+    # Three-way merge: take each of Google's changes unless the app changed that field too.
+    changes, now = {}, dict(pushed)
+    title = gcal.event_title(event, pushed["kind"])
+    if title != pushed["title"] and task["title"] == pushed["title"]:
+        changes["title"] = now["title"] = title
+    if pushed["kind"] == "due":
+        if day != pushed["date"] and task["due_date"] == pushed["date"]:
+            changes["due_date"] = now["date"] = day
+    elif ((day, hhmm) != (pushed["date"], pushed["time"])
+          and (task["start_date"], task["start_time"]) == (pushed["date"], pushed["time"])):
+        changes.update(start_date=day, start_time=hhmm)
+        now.update(date=day, time=hhmm)
+        if day > today and task["state"] in ("inbox", "next", "soon"):
+            changes["state"] = "scheduled"
+    if not changes:
+        return
+    apply_task_update(task, changes, today)
+    conn.execute("UPDATE tasks SET gcal_pushed = ? WHERE id = ?", (json.dumps(now), task["id"]))
+    conn.commit()
+
+
+def _push(uid, token, cal, tz):
+    """Send the app's changes to the user's chosen calendar."""
+    conn = db.get_db()
+    for row in conn.execute("SELECT rowid, event_id FROM gcal_deletions WHERE user_id = ?",
+                            (uid,)).fetchall():
+        gcal.delete_event(token, cal, row["event_id"])
+        conn.execute("DELETE FROM gcal_deletions WHERE rowid = ?", (row["rowid"],))
+        conn.commit()
+    tasks = conn.execute(
+        "SELECT * FROM tasks WHERE user_id = ? AND (gcal_event_id IS NOT NULL OR "
+        "(completed_at IS NULL AND deleted_at IS NULL AND "
+        "(due_date IS NOT NULL OR start_date IS NOT NULL)))", (uid,)).fetchall()
+    for task in tasks:
+        snap = gcal.snapshot(task)
+        pushed = json.loads(task["gcal_pushed"] or "null")
+        if snap == pushed and (snap is None or task["gcal_event_id"]):
+            continue
+        if snap is None:  # done, trashed, or no longer dated
+            gcal.delete_event(token, cal, task["gcal_event_id"])
+            conn.execute("UPDATE tasks SET gcal_event_id = NULL, gcal_pushed = NULL "
+                         "WHERE id = ? AND gcal_event_id = ?", (task["id"], task["gcal_event_id"]))
+            conn.commit()
+            continue
+        link = PUBLIC_URL
+        event = None
+        if task["gcal_event_id"]:
+            try:
+                event = gcal.patch_event(token, cal, task["gcal_event_id"],
+                                         gcal.event_body(snap, task["id"], tz, link, patch=True))
+            except gcal.GoogleError as e:
+                if e.status not in (404, 410):
+                    raise
+        if event is None:
+            event = gcal.insert_event(token, cal, gcal.event_body(snap, task["id"], tz, link))
+        # What was sent, not the row as it is now: an edit made meanwhile goes next round.
+        conn.execute("UPDATE tasks SET gcal_event_id = ?, gcal_pushed = ? WHERE id = ?",
+                     (event["id"], json.dumps(snap), task["id"]))
+        conn.commit()
+
+
+def _fetch_events(uid, token, skip_cal, tz, today):
+    """Cache the coming weeks' events from the user's calendars (but not the tasks' own events)."""
+    zone = ZoneInfo(tz)
+    start = datetime.combine(date.fromisoformat(today) - timedelta(days=1), datetime.min.time(), zone)
+    end = start + timedelta(days=EVENT_DAYS + 1)
+    out = []
+    for c in gcal.list_calendars(token):
+        if c["id"] == skip_cal or not c.get("selected") or c.get("hidden"):
+            continue
+        try:
+            res = gcal.list_events(token, c["id"], {
+                "timeMin": start.isoformat(), "timeMax": end.isoformat(), "singleEvents": "true",
+                "orderBy": "startTime", "maxResults": 250})
+        except gcal.GoogleError as e:
+            app.logger.info("Skipping calendar %s: %s", c.get("summary"), e)
+            continue
+        color = c.get("backgroundColor", "")
+        for ev in res.get("items", []):
+            begins = gcal.event_when(ev.get("start"), tz)
+            ends = gcal.event_when(ev.get("end"), tz)
+            if ev.get("status") == "cancelled" or not begins or gcal.is_ours(ev):
+                continue
+            last_day = ends[0] if ends else begins[0]
+            if ends and ends[1] is None:  # all-day events end the morning after their last day
+                last_day = (date.fromisoformat(ends[0]) - timedelta(days=1)).isoformat()
+            out.append({
+                "id": ev.get("id"), "title": (ev.get("summary") or "(busy)")[:300],
+                "calendar": (c.get("summaryOverride") or c.get("summary") or "")[:100],
+                "color": color if re.fullmatch(r"#[0-9a-fA-F]{6}", color) else "",
+                "date": begins[0], "time": begins[1], "last_date": max(last_day, begins[0]),
+                "end_time": ends[1] if ends else None,
+                "link": ev["htmlLink"] if str(ev.get("htmlLink", "")).startswith("https://") else "",
+            })
+    out.sort(key=lambda e: (e["date"], e["time"] or ""))
+    conn = db.get_db()
+    conn.execute("UPDATE google_accounts SET events_json = ?, events_fetched = ? WHERE user_id = ?",
+                 (json.dumps(out[:2000]), time.time(), uid))
+    conn.commit()

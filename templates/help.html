@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Help · Entropicide</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='icons/favicon.svg') }}">
+  <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='icons/favicon-32.png') }}">
+  <link rel="manifest" href="{{ url_for('web_manifest') }}">
+  <meta name="theme-color" content="#0866a8">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <script>
+    try { const pct = localStorage.getItem("entropicide.textSize") ?? localStorage.getItem("todo.textSize"); if (pct) document.documentElement.style.fontSize = pct + "%"; } catch {}
+  </script>
+</head>
+<body class="help-page">
+  <header class="help-head">
+    <a href="{{ url_for('index') }}" class="help-back">← Back to Entropicide</a>
+    <h1>Help</h1>
+  </header>
+
+  <div class="help-wrap">
+  <nav class="help-toc" aria-label="Contents">
+    <ol>
+      <li><a href="#idea">The idea</a></li>
+      <li><a href="#lists">The lists</a></li>
+      <li><a href="#quick-adding">Adding tasks</a></li>
+      <li><a href="#dates">Dates in plain words</a></li>
+      <li><a href="#editor">A task's details</a></li>
+      <li><a href="#notes">Notes and formatting</a></li>
+      <li><a href="#files">Attachments</a></li>
+      <li><a href="#projects">Projects</a></li>
+      <li><a href="#deps">Blocked by (dependencies)</a></li>
+      <li><a href="#templates">Templates and recurring projects</a></li>
+      <li><a href="#areas">Areas</a></li>
+      <li><a href="#tags">Tags and search</a></li>
+      <li><a href="#priority">Priority</a></li>
+      <li><a href="#many">Several tasks at once</a></li>
+      <li><a href="#defer">Defer</a></li>
+      <li><a href="#repeat">Repeating tasks</a></li>
+      <li><a href="#reminders">Reminders and notifications</a></li>
+      <li><a href="#expiries">Expiries</a></li>
+      <li><a href="#focus-timer">Focus timer</a></li>
+      <li><a href="#calendar">Calendar and Google</a></li>
+      <li><a href="#links">Links and the toolbar</a></li>
+      <li><a href="#settings">Settings</a></li>
+      <li><a href="#install-app">Phone app and offline</a></li>
+      <li><a href="#command-palette">Find anything (Ctrl+K)</a></li>
+      <li><a href="#keys">Keyboard shortcuts</a></li>
+      <li><a href="#routine">A daily and weekly routine</a></li>
+    </ol>
+  </nav>
+
+  <main class="help-body">
+
+  <section id="idea">
+    <h2>The idea</h2>
+    <p>Entropicide follows <em>Getting Things Done</em> (GTD): get everything out of your head into a
+      trusted place, decide what each thing is, and then work from short lists instead of one long one.</p>
+    <ol>
+      <li><strong>Capture</strong> anything the moment it comes up. It lands in the <strong>Inbox</strong>; don't sort it yet.</li>
+      <li><strong>Clarify</strong> each Inbox item: is it something to do? What's the very next physical step?
+        Is it part of a bigger outcome (a <strong>project</strong>)?</li>
+      <li><strong>Organize</strong> it into a list: the Queue if you'll do it as soon as you can, Soon or Later
+        if not yet, Waiting if someone else has it, Scheduled if it can't start until a date, Someday if maybe never.</li>
+      <li><strong>Do</strong>: work from <strong>Focus</strong> (today) and the <strong>Queue</strong>.</li>
+      <li><strong>Review</strong> weekly so the lists stay trustworthy (see <a href="#routine">routine</a>).</li>
+    </ol>
+  </section>
+
+  <section id="lists">
+    <h2>The lists</h2>
+    <p>Every task is in exactly one list (its <em>status</em>), plus it can be starred. Change the list from
+      the task's details, by dragging it onto a list in the sidebar, by right-clicking → <strong>Move to</strong>,
+      or with <code>!list</code> when adding it.</p>
+
+    <dl class="help-lists">
+      <dt>Inbox</dt>
+      <dd>Where new things land. It should be emptied often (daily is good): it's a collecting point, not a
+        place to keep things.
+        <div class="ex">“Look into solar panels” → later decide: Someday? A project?</div></dd>
+
+      <dt>★ Focus</dt>
+      <dd>What you're doing <em>today</em>. It shows starred tasks plus anything <strong>due today or overdue</strong>,
+        so nothing due slips by. Star a task (☆ on its row, right-click → Star, <code>!focus</code>, or drag it onto Focus)
+        to pull it into today's list; unstar it if the day changes. Tasks in Someday, Later, or an inactive project
+        don't show here. Sorted by priority.
+        <div class="ex">Morning: star the 3–5 Queue tasks you mean to finish today.</div></dd>
+
+      <dt>Queue</dt>
+      <dd>GTD's <em>next actions</em>: things you could do as soon as you have the time, each a concrete step.
+        This is your main working list. Sorted by priority, then your drag order.
+        <div class="ex">“Email Ana the budget draft”, not “Budget”.</div></dd>
+
+      <dt>Soon</dt>
+      <dd>Things to do in the coming weeks, but not right now. Keeps the Queue short without losing them.
+        <div class="ex">“Book the car's service” (due next month).</div></dd>
+
+      <dt>Later</dt>
+      <dd>Committed to, but not for a while. Hidden from Focus even if starred.
+        <div class="ex">“Repaint the fence” (next summer).</div></dd>
+
+      <dt>Someday</dt>
+      <dd>Maybe one day, maybe never: ideas and wishes. Look through it in the weekly review and promote or
+        delete things. Hidden from Focus.
+        <div class="ex">“Learn Italian”, “Kayak trip”.</div></dd>
+
+      <dt>Waiting</dt>
+      <dd>Things someone else has to do before you can continue. Fill in <strong>Waiting for</strong> with who or what,
+        and check the list regularly to chase things up.
+        <div class="ex">“Plumber's quote”, waiting for: Bob's Plumbing (called Mon).</div></dd>
+
+      <dt>Scheduled</dt>
+      <dd>Tasks that can't or shouldn't start until a date (and optional time). They stay out of the way here,
+        then move to the <strong>Queue</strong> by themselves when the start date (and time) arrives. Adding a
+        future date when you add a task (“tomorrow 3pm”) puts it here, and so does <a href="#defer">Defer</a>.
+        <div class="ex">“Renew passport” starting 1 March; “Call the bank” tomorrow at 9 am.</div></dd>
+
+      <dt>Recurring</dt>
+      <dd>The next copies of <a href="#repeat">repeating tasks</a>, waiting for their start date. When one arrives it
+        moves to the Queue, and the copy after it appears here. Adding a task while viewing Recurring makes it
+        repeat weekly from tomorrow, and opens it so you can change that.</dd>
+
+      <dt>All</dt>
+      <dd>Every open task, grouped by list (except repeating tasks' next copies, which stay in Recurring). Handy for
+        a review or a search across everything.</dd>
+
+      <dt>Projects</dt>
+      <dd>Outcomes that take more than one step. See <a href="#projects">Projects</a>.</dd>
+
+      <dt>Links</dt>
+      <dd>Web pages you often need. See <a href="#links">Links</a>.</dd>
+
+      <dt>Logbook</dt>
+      <dd>Completed tasks, grouped by the day you finished them, newest first, with the time. Untick a task
+        (or right-click → Mark not done) to bring it back. Drag tasks onto Logbook to complete them.</dd>
+
+      <dt>Trash</dt>
+      <dd>Deleted tasks and projects. Open one to <strong>Restore</strong> it or <strong>Delete forever</strong>;
+        <strong>Empty trash</strong> deletes them all for good.</dd>
+    </dl>
+  </section>
+
+  <section id="quick-adding">
+    <h2>Adding tasks</h2>
+    <p>Type in the box at the top of a list and press <kbd>Enter</kbd>. <kbd>Ctrl</kbd>+<kbd>Enter</kbd>
+      (<kbd>⌘</kbd>+<kbd>Enter</kbd> on a Mac) adds it and opens it, to fill in more. Press <kbd>N</kbd> anywhere to jump to the box.</p>
+    <p>The task goes into the list you're looking at: in a project it joins the project's Queue; in Focus it's
+      starred; in Scheduled it starts tomorrow. Anywhere else without a box (like Logbook), <kbd>N</kbd> takes you to the Inbox.</p>
+    <p>Short codes anywhere in the text set things as you type; typing <code>#</code>, <code>!</code> or <code>+</code>
+      offers the choices (<kbd>↑</kbd><kbd>↓</kbd> to choose, <kbd>Tab</kbd> or a click to pick).</p>
+    <table class="help-table">
+      <thead><tr><th>Type</th><th>Does</th><th>Example</th></tr></thead>
+      <tbody>
+        <tr><td><code>#tag</code></td><td>adds a tag (new tags are created)</td><td><code>Buy stamps #errand #post</code></td></tr>
+        <tr><td><code>!list</code></td><td>puts it in a list: <code>!inbox</code>, <code>!queue</code> (or <code>!next</code>), <code>!soon</code>, <code>!later</code>, <code>!someday</code>, <code>!waiting</code>, <code>!scheduled</code></td><td><code>Quote from Bob !waiting</code></td></tr>
+        <tr><td><code>!focus</code> or <code>*</code></td><td>stars it, for today</td><td><code>Call the school !focus</code></td></tr>
+        <tr><td><code>!N</code></td><td>priority N (−99 to 99)</td><td><code>Fix the leak !3</code>, <code>Tidy desk !-1</code></td></tr>
+        <tr><td><code>+area</code></td><td>puts it in an area; the start of the name is enough, and case and spaces don't matter</td><td><code>Fix shelf +home</code>, <code>Draft spec +side</code> for “Side Projects”</td></tr>
+        <tr><td>a date or time</td><td>see <a href="#dates">Dates in plain words</a></td><td><code>Dentist tomorrow 3pm</code></td></tr>
+      </tbody>
+    </table>
+    <p>All together:</p>
+    <div class="ex"><code>Call mom about Thanksgiving fri 6pm #phone +family !2</code><br>
+      → “Call mom about Thanksgiving”, starts Friday at 6 pm (Scheduled), tag <em>phone</em>, area Family, priority 2.</div>
+    <div class="ex"><code>Renew car registration due nov 30 #car !waiting</code><br>
+      → in Waiting, due 30 November.</div>
+    <p>A code that doesn't match anything stays in the title (e.g. <code>+garden</code> with no Garden area).</p>
+  </section>
+
+  <section id="dates">
+    <h2>Dates in plain words</h2>
+    <p>Write a date or time naturally and it's taken out of the title. A line under the box shows how it was read
+      (📅 Starts Tomorrow at 3:00 PM · Due Fri…) before you press Enter, so you can rephrase if needed.</p>
+    <ul>
+      <li>A date or time <strong>on its own is when the task starts</strong>. A future start puts the task in
+        <strong>Scheduled</strong> until then (unless you named a list with <code>!list</code>).</li>
+      <li>After <strong>due</strong> or <strong>by</strong> it's the <strong>due date</strong>. Due tasks show in Focus from that day.</li>
+      <li><strong>today</strong> on its own stars the task, for Focus.</li>
+      <li>A time with no date means the next time it comes round (today if it's still ahead, otherwise tomorrow).</li>
+    </ul>
+    <table class="help-table">
+      <thead><tr><th>You type</th><th>Result (on Thursday 29 Oct)</th></tr></thead>
+      <tbody>
+        <tr><td><code>Call dentist tomorrow 3pm</code></td><td>starts Fri 30 Oct, 3:00 PM</td></tr>
+        <tr><td><code>Pay rent due nov 1</code></td><td>due Sun 1 Nov</td></tr>
+        <tr><td><code>Taxes by April 15th 2027</code></td><td>due 15 Apr 2027</td></tr>
+        <tr><td><code>Gym mon 7:30am</code></td><td>starts Mon 2 Nov, 7:30 AM</td></tr>
+        <tr><td><code>Party on sat</code></td><td>starts Sat 31 Oct</td></tr>
+        <tr><td><code>Drinks this fri</code></td><td>starts Fri 30 Oct (the coming one)</td></tr>
+        <tr><td><code>Trip next friday</code></td><td>starts Fri 6 Nov (Friday of next week)</td></tr>
+        <tr><td><code>Plan next week</code></td><td>starts Mon 2 Nov</td></tr>
+        <tr><td><code>Budget next month</code></td><td>starts 1 Nov</td></tr>
+        <tr><td><code>Mow lawn this weekend</code></td><td>starts Sat 31 Oct</td></tr>
+        <tr><td><code>Renew passport in 2 weeks</code></td><td>starts Thu 12 Nov (also <code>in 3 days</code>, <code>in a month</code>, <code>in 1 year</code>)</td></tr>
+        <tr><td><code>Dinner tonight</code></td><td>today at 6:00 PM</td></tr>
+        <tr><td><code>Call Bob today</code></td><td>starred, for Focus</td></tr>
+        <tr><td><code>Report due today</code></td><td>due today (so it's in Focus)</td></tr>
+        <tr><td><code>Meeting 11/5 14:30</code></td><td>starts 5 Nov, 2:30 PM (month/day in the US)</td></tr>
+        <tr><td><code>Vote 2026-11-03</code></td><td>starts 3 Nov</td></tr>
+        <tr><td><code>Ship it fri, due 11/6</code></td><td>starts Fri 30 Oct, due Fri 6 Nov</td></tr>
+        <tr><td><code>Standup at 9</code></td><td>9:00 AM (with <code>at</code>, 7–11 is morning, 12–6 afternoon)</td></tr>
+        <tr><td><code>Lunch at noon</code></td><td>12:00 PM</td></tr>
+      </tbody>
+    </table>
+    <p><strong>Days:</strong> today, tonight, tomorrow (tmrw), weekday names (<code>friday</code>, <code>fri</code>, <code>thurs</code>…),
+      <code>this</code>/<code>next</code> + weekday, <code>next week</code>, <code>next month</code>, <code>this weekend</code>, <code>in N days/weeks/months/years</code>,
+      <code>nov 5</code>, <code>5 nov</code>, <code>november 5th 2027</code>, <code>11/5</code>, <code>11/5/27</code>, <code>2026-11-05</code>.
+      A date without a year is the next time it comes round.<br>
+      <strong>Times:</strong> <code>3pm</code>, <code>3:30pm</code>, <code>3:30 pm</code>, <code>15:00</code>, <code>noon</code>, <code>at 3</code>.</p>
+    <p><strong>Words that stay words:</strong> “sun”, “sat”, “mon” and “wed” only count as days after on/due/by/next/this or before a
+      time, so <code>Clean the sun room</code> and <code>Party sat</code> are left alone. Month names need a day next to them
+      (<code>Read May report</code> stays as it is). Only the first date is used; you can always fix it in the task's details.</p>
+  </section>
+
+  <section id="editor">
+    <h2>A task's details</h2>
+    <p>Click a task to open its details right under it, across the list; click the task again (or ✕, or <kbd>Esc</kbd>) to close them. Changes save as you go.</p>
+    <dl>
+      <dt>Title</dt><dd>Start with a verb and make it a visible next step: “Call”, “Email”, “Buy”, “Draft”.</dd>
+      <dt>Status</dt><dd>Which list it's in. Choosing Scheduled sets the start date to tomorrow if it has none; change it as needed.</dd>
+      <dt>Starts / at</dt><dd>For a Scheduled task: the day (and optional time) it moves to the Queue. Shown on Google Calendar when there's no due date.</dd>
+      <dt>Waiting for</dt><dd>For a Waiting task: who or what you're waiting on, and since when.</dd>
+      <dt>Notes</dt><dd>Anything else: details, phone numbers, links, checklists, with <a href="#notes">formatting</a>.</dd>
+      <dt>Attachments</dt><dd>Files and pictures (<a href="#files">see Attachments</a>).</dd>
+      <dt>Project</dt><dd>The project it belongs to, if any. A task in a project takes the project's area.</dd>
+      <dt>Area</dt><dd>Work, Home… (when it's not in a project).</dd>
+      <dt>Tags</dt><dd>Comma-separated; new ones are created.</dd>
+      <dt>Priority</dt><dd>A number; higher comes first in Focus and the Queue.</dd>
+      <dt>Due</dt><dd>A real deadline. The task shows in Focus from that day, red once overdue. Use start dates for “not before”, due dates only for “must be done by”.</dd>
+      <dt>Repeat / Counting from / If missed</dt><dd>See <a href="#repeat">Repeating tasks</a>.</dd>
+      <dt>Expires</dt><dd>When the thing it's about runs out (<a href="#expiries">see Expiries</a>).</dd>
+      <dt>Time and Energy</dt><dd>How long it takes and how much energy it needs, shown on the row, to help pick a task that fits the moment (“15 min, low energy” for the end of the day).</dd>
+      <dt>Star</dt><dd>In Focus today.</dd>
+    </dl>
+    <p>At the bottom: <strong>Move to trash</strong> (or Restore / Delete forever when it's already in the Trash).
+      Tick the box on a row to complete it.</p>
+  </section>
+
+  <section id="notes">
+    <h2>Notes and formatting</h2>
+    <p>Notes (and task titles) understand <strong>Markdown</strong>, a simple way to format plain text. In a task's details,
+      a preview under the notes box shows the result as you type; the list shows it on the task's row.</p>
+    <table class="help-table">
+      <thead><tr><th>Type</th><th>Shows as</th></tr></thead>
+      <tbody>
+        <tr><td><code>**bold**</code> or <code>__bold__</code></td><td><strong>bold</strong></td></tr>
+        <tr><td><code>*italic*</code> or <code>_italic_</code></td><td><em>italic</em></td></tr>
+        <tr><td><code>~~struck~~</code></td><td><del>struck</del></td></tr>
+        <tr><td><code>`code`</code></td><td>monospaced, left exactly as typed</td></tr>
+        <tr><td><code># Heading</code>, <code>## Smaller</code>, <code>### Smaller still</code></td><td>a heading line (notes only)</td></tr>
+        <tr><td><code>- item</code> (or <code>*</code>, <code>+</code>); indent two spaces for a sub-item</td><td>a bulleted list</td></tr>
+        <tr><td><code>1. first</code></td><td>a numbered list</td></tr>
+        <tr><td><code>&gt; quoted</code></td><td>a quote</td></tr>
+        <tr><td><code>---</code></td><td>a dividing line</td></tr>
+        <tr><td><code>```</code> on lines before and after</td><td>a block of text shown exactly as typed</td></tr>
+        <tr><td><code>[ ] to do</code>, <code>[x] done</code></td><td>checklist items, tickable on the row and in the preview</td></tr>
+        <tr><td><code>https://…</code>, <code>www.example.com</code>, <code>[name](https://…)</code></td><td>clickable links</td></tr>
+      </tbody>
+    </table>
+    <div class="ex"><code># Trip<br>Book **flights** by *Friday*: [airline](https://example.com)<br>- pack `charger`<br>&nbsp;&nbsp;- spare battery<br>[ ] water plants<br>[x] stop mail</code></div>
+    <p><strong>Vim keys:</strong> on a device with a keyboard, Settings → <strong>Notes editor → Vim</strong> swaps the notes
+      box for one that edits with Vim keys: normal, insert and visual modes, motions and text objects, <code>.</code>, undo
+      (<code>u</code>), <code>/</code> search, registers. <code>:w</code> saves at once (it also saves by itself as you go);
+      <code>:q</code>, <code>:wq</code> or <code>:x</code> closes the task. A line under the box shows <code>-- INSERT --</code> and so on.
+      It's set per device, so a phone can keep the plain box.</p>
+    <p>Words with underscores or stars inside them (<code>snake_case</code>, <code>2*3*4</code>) are left alone. In the list, notes show up to
+      6 lines (checklist items always show); open the task to see them all.</p>
+  </section>
+
+  <section id="files">
+    <h2>Attachments</h2>
+    <p>Attach receipts, photos, PDFs, documents (any kind of file) to a task in its details:</p>
+    <ul>
+      <li>click <strong>+ Add files</strong>, or</li>
+      <li>drag files from your computer onto the open task, or</li>
+      <li>paste an image (e.g. a screenshot) while the task is open.</li>
+    </ul>
+    <p>You can also <strong>share</strong> to Entropicide from other apps on your phone (with Entropicide installed): photos, files, web
+      pages or text go to your Inbox as a new task, files attached. See <a href="#install-app">Phone app</a>.</p>
+    <p>Pictures show as thumbnails. Click a picture, PDF or text file to view it full screen without leaving Entropicide:
+      <kbd>←</kbd>/<kbd>→</kbd> (or a swipe on a phone) go to the task's other files, click a picture for its full size,
+      <strong>−</strong>/<strong>+</strong> zoom a PDF, ⤓ downloads, and <kbd>Esc</kbd> (or the phone's Back) closes it.
+      <kbd>Ctrl</kbd>-click opens a file in a new tab instead; other kinds of file download.
+      ✕ deletes one. The task's row shows 📎 and how many files it has. Up to 25 MB per file and 1 GB in all
+      (<strong>Settings → Attachments</strong> shows how much you've used, and your largest files);
+      attachments need a connection. Files stay with the task in the Trash and are deleted with it when it's deleted for good.
+      A repeating task's next copies take its files only if you tick that (see <a href="#repeat">Repeating tasks</a>).</p>
+    <div class="ex">Warranty: attach the receipt photo to “Register the dishwasher warranty”.</div>
+  </section>
+
+  <section id="projects">
+    <h2>Projects</h2>
+    <p>A project is any outcome that needs more than one step: “Kitchen renovation”, “Plan Mom's 70th”, “File 2026 taxes”.
+      Give it a name that says what done looks like, and keep at least one next action in its Queue.</p>
+    <ul>
+      <li>Add one with <strong>+</strong> next to <em>Projects</em> in the sidebar. Open it to see and add its tasks; tasks added
+        there go to its Queue.</li>
+      <li>Move tasks into it by dragging them onto the project in the sidebar, right-click → Move to, or the task's Project field.</li>
+      <li><strong>Status:</strong> <em>Active</em> projects' tasks show in Focus and the Queue. Set a project to <em>Someday</em>
+        or <em>Later</em> to park it with everything in it (its tasks drop out of the Queue; the project shows in the Someday/Later lists).
+        <em>Completed</em> projects are listed for 30 days.</li>
+      <li><strong>Sequential:</strong> only the first Queue task of the project shows in the Queue and Focus; finishing it
+        brings up the next. Good for steps that must happen in order (“Get quotes” → “Choose builder” → “Sign contract”).
+        Order them by dragging in the project.</li>
+      <li>A project can have an area, a due date, notes and a star.</li>
+      <li>Projects you set up again and again can be saved as <a href="#templates">templates</a>, and made on a schedule.</li>
+    </ul>
+  </section>
+
+  <section id="deps">
+    <h2>Blocked by (dependencies)</h2>
+    <p>Some tasks can't start until others are done. In a task's details, type in <strong>Blocked by</strong> and pick
+      the task (or tasks) it waits on. Until they're all done, it stays out of the Queue and Focus; elsewhere (All, its
+      project) it shows 🔒 <em>after …</em>. When the last one is done, it turns up in the Queue by itself.</p>
+    <div class="ex">“Paint the bedroom”, blocked by “Buy paint” and “Patch the wall”.<br>
+      “Send invitations”, blocked by “Book the venue” and “Set the budget”, in another project.</div>
+    <p>A blocker in the Trash counts as done; ✕ on it takes it off. Tasks can't wait on each other in a loop.
+      <a href="#projects">Sequential projects</a> are the simple case: each step waits on the one before.</p>
+  </section>
+
+  <section id="templates">
+    <h2>Templates and recurring projects</h2>
+    <p>For things you do again and again: a trip, hosting a dinner, the start of school, the monthly bills.</p>
+    <h3>Save a template</h3>
+    <p>Set up a project once (its tasks, notes, checklists, tags, priorities, who's blocked by what, and dates), then in
+      its details click <strong>Save as template</strong>. Dates are kept as days from the project's date (its due date,
+      or else its earliest task date): “Book the kennel 14 days before”, “Pack the day before”. Checklists are kept unticked.</p>
+    <h3>Use it</h3>
+    <p><strong>+</strong> next to Projects (or <em>New project</em> on a template under <strong>Projects</strong>): choose the template,
+      name the project, and give its date (say, the day you leave). The tasks get their dates from it, and ones that
+      can't start yet wait in Scheduled until their day.</p>
+    <div class="ex">Template “Trip”: Book kennel (starts −14), Hold the mail (−3), Pack (due −1), Leave (blocked by Pack).
+      New project from it, “Trip to Denver” on Dec 20: the kennel task shows up in the Queue on Dec 6.</div>
+    <h3>Edit it</h3>
+    <p>Under <strong>Projects → Templates</strong>, <strong>Edit</strong>: rename it, change its tasks' days, add or remove tasks.
+      For more (notes, tags, what waits on what), make a project from it, change that, then click
+      <strong>Update template</strong> in the project's details.</p>
+    <h3>Recurring projects</h3>
+    <p>In the template editor, under <strong>Repeat</strong>, have it make a new project every week, month, year or N days.
+      Give the next date (the project's date) and how many days ahead to make it, so early tasks have time.
+      Each one is named with its date, e.g. <em>Monthly bills (Nov 1)</em>. If Entropicide isn't opened for a while, only the latest
+      is made, not every one that was missed.</p>
+    <div class="ex">“Monthly bills”, every month from Nov 1, made 5 days ahead: Pay rent (due 0), Check the bank (starts −2),
+      File the receipts (starts +3).</div>
+    <p>Repeating <em>tasks</em> are still best for single things; recurring projects are for a set of steps.</p>
+  </section>
+
+  <section id="areas">
+    <h2>Areas</h2>
+    <p>Areas are the big parts of your life: Work, Home, Family, Side Projects. They let you see only one part at a time.</p>
+    <ul>
+      <li>The <strong>area filter</strong> at the top of the sidebar: tick one or several areas (or <em>No area</em>) to show only
+        those, across every list. Untick all (or <em>Show all areas</em>) to see everything. It's remembered on each device.
+        <div class="ex">At work: tick Work. At home in the evening: tick Home and Family.</div></li>
+      <li>New tasks and projects go in the first ticked area, so they stay in view.</li>
+      <li>Create, rename and delete areas in <strong>Settings → Areas</strong>. Give each an SVG <strong>icon</strong>
+        (upload a file, or paste a URL) and it shows before its tasks.</li>
+    </ul>
+  </section>
+
+  <section id="tags">
+    <h2>Tags and search</h2>
+    <ul>
+      <li>Tags are for anything that cuts across lists and areas: where (<code>#errand</code>, <code>#hardware-store</code>),
+        how (<code>#phone</code>, <code>#computer</code>), with whom (<code>#bob</code>), or what kind (<code>#quick</code>).</li>
+      <li>The <strong>tag bar</strong> under the add box shows the tags used in the current list; click tags to show only tasks that have
+        <em>all</em> of them. Click again to turn one off.
+        <div class="ex">Going out? In the Queue, click <code>errand</code> to see everything you can do while out.</div></li>
+      <li><strong>Search</strong> (top right, or press <kbd>/</kbd>) filters the current list by title and notes. Use the <strong>All</strong> list to search everything.
+        Start with a slash for a regular expression: <code>/^call (mum|dad)/</code>, <code>/\d{3}-\d{4}/</code>,
+        <code>/receipt.*2026/</code>. It ignores case unless you type a capital letter; the box turns red
+        (and says why when you point at it) if the pattern isn't valid. It works on the Links page too.</li>
+      <li>Rename, merge (rename to an existing tag) and delete tags in <strong>Settings → Tags</strong>.</li>
+    </ul>
+  </section>
+
+  <section id="priority">
+    <h2>Priority</h2>
+    <p>Priority is a number, 0 by default. <strong>Focus</strong> and the <strong>Queue</strong> list higher numbers first;
+      within the same number, your drag order. Negative numbers sink a task below the rest.</p>
+    <ul>
+      <li>Click <strong>▲</strong>/<strong>▼</strong> on a task's row, press <kbd>+</kbd>/<kbd>−</kbd> on the open or selected tasks,
+        right-click → Priority → Increase / Decrease / Reset to 0, use the Priority field, or <code>!N</code> when adding.</li>
+      <li>Dragging a task within Focus or the Queue gives it the priority of where you drop it, so it stays where you put it.</li>
+      <li><strong>Colour:</strong> tasks above 0 are tinted red, deeper the higher the number; below 0, blue, deeper the lower.
+        Priority 0 has no tint.</li>
+    </ul>
+    <div class="ex">Keep most tasks at 0 and give only the few that really matter 1–3; use −1 for “if there's time”.</div>
+  </section>
+
+  <section id="many">
+    <h2>Several tasks at once</h2>
+    <ul>
+      <li><strong>Select:</strong> <kbd>Ctrl</kbd>/<kbd>⌘</kbd>-click tasks to pick them; <kbd>Shift</kbd>-click picks a range;
+        <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>A</kbd> picks every task shown. On a phone, press and hold a task → <em>Select</em>,
+        then tap others. <kbd>Esc</kbd> clears the selection.</li>
+      <li><strong>Act:</strong> right-click any picked task (or <em>Actions</em> in the bar above the list) to Star, Complete,
+        Duplicate, Move to, Area, Priority, Tag, Defer or Move to trash all of them. Each change can be undone from the message that follows.</li>
+      <li><strong>Drag</strong> them together: onto a list, a project, Focus (stars them), Logbook (completes them) or Trash.</li>
+      <li>Right-click (or press and hold) a single task for the same menu. <strong>Duplicate</strong> makes a copy just below it
+        (same details, tags, files and blockers; a repeating task's copy repeats the same way, on its own schedule) and
+        opens it, ready to change.</li>
+    </ul>
+    <div class="ex">Weekly review: in the Inbox, <kbd>Ctrl</kbd>+<kbd>A</kbd>, right-click → Area → Home, then drag the work ones to Work.</div>
+  </section>
+
+  <section id="defer">
+    <h2>Defer</h2>
+    <p>Defer hides a task until later: right-click → <strong>Defer</strong> and pick a time. The task goes to Scheduled and comes back
+      to the Queue when the time arrives. Hours and minutes defer to an exact time; days, weeks and months to the start of that day.
+      <em>Custom…</em> picks any date and time.</p>
+    <p>The choices are set in <strong>Settings → Defer options</strong>, e.g. <code>1h, 2h, 6h, 24h, 3d, 1w</code>
+      (m = minutes, h = hours, d = days, w = weeks, mo = months).</p>
+    <div class="ex">Can't call the office until it opens? Defer 2h. Not a priority this week? Defer 1w.</div>
+  </section>
+
+  <section id="repeat">
+    <h2>Repeating tasks</h2>
+    <p>Set <strong>Repeat</strong> in a task's details: daily, weekdays, weekly, monthly, yearly, or every N days.
+      The schedule follows the calendar, not when you complete it: each copy starts on its date, and when it does,
+      the next copy appears in <strong>Recurring</strong>.</p>
+    <p><strong>If missed</strong> decides what happens to an unfinished copy when the next one starts:</p>
+    <ul>
+      <li><strong>Keep it</strong>: it stays open alongside the new one. For things that must still be done.
+        <div class="ex">“Register the van”, yearly, keep: if it's late, it still has to happen.</div></li>
+      <li><strong>Replace it</strong>: it's logged as Missed and the new copy takes over. For routines where only the latest counts.
+        <div class="ex">“Load the dishwasher”, daily, replace.</div></li>
+    </ul>
+    <p><strong>Every N days, weeks, months or years</strong>: choose <em>Custom…</em> and type e.g. <code>9 days</code>,
+      <code>2 weeks</code>, <code>3 months</code> or <code>1 year</code>. Month repeats keep to the same day of the month
+      (the 31st becomes the last day in shorter months).</p>
+    <p><strong>When adding:</strong> <code>every day</code>, <code>every weekday</code>, <code>every week</code>,
+      <code>every other week</code>, <code>every 6 weeks</code>, <code>every month</code>, <code>every 3 months</code>,
+      <code>every year</code>, <code>every 9 days</code>, or <code>every monday</code> (weekly, from the next Monday):
+      <code>Haircut every 6 weeks</code>, <code>Gym every monday 7am</code>.</p>
+    <p><strong>Counting from</strong>: by default a repeat follows the calendar (every Monday, every 9 days from the start,
+      whether or not the last one was done). Choose <strong>When I complete it</strong> instead for things where the gap matters:
+      nothing is made on a schedule; when you complete it, the next copy is made that far from the day you did it
+      (and <em>If missed</em> no longer applies).</p>
+    <div class="ex">“Change the water filter”, every 3 months, counting from when I complete it: done late on May 20, the next
+      is due Aug 20, not on the old schedule.</div>
+    <div class="ex">“Refill pill containers”, every 9 days (replace if missed). If a refill happens early or late, change the
+      start date of the newest copy: the schedule carries on every 9 days from there.</div>
+    <p><strong>Each copy starts fresh:</strong> checklist items (<code>[x]</code>) are unticked on every new copy, so a
+      weekly cleaning list or a packing list can be ticked off again. Tick <strong>Give each new copy this task's files</strong>
+      to have its attachments (say, a printable checklist) on every copy too; they're stored only once.</p>
+    <p>Editing the <em>newest</em> copy's dates changes the schedule from then on; editing an older copy moves only that one.
+      Deferring a copy moves only that copy. To stop repeating, set Repeat to Never (or trash every copy).</p>
+  </section>
+
+  <section id="reminders">
+    <h2>Reminders and notifications</h2>
+    <p>Entropicide can send notifications to your phone or computer. Turn them on in <strong>Settings → Notifications</strong>,
+      on each device (<em>Turn on for this device</em>; <em>Send a test</em> to check). Then you get:</p>
+    <ul>
+      <li><strong>Reminders:</strong> set <strong>Remind me</strong> in a task's details to any date and time, or click
+        <em>In 1 hour</em>, <em>Tonight</em> (7 pm) or <em>Tomorrow 9 am</em>. The task shows ⏰ and the time until then.
+        On a <strong>repeating task</strong>, each new copy gets the reminder too, at the same distance from its own date:
+        “Remind me Jan 14, 9 am” on a copy starting Jan 1 becomes Jul 14, 9 am on the next one (every 6 months).
+        Setting or clearing it updates copies already waiting in Recurring; snoozing a notification moves only that copy.</li>
+      <li><strong>Starts:</strong> when a task's start time comes (e.g. <code>Call the bank tomorrow 9am</code>), if
+        <em>When a timed task starts</em> is ticked.</li>
+      <li><strong>A morning summary</strong> of what's due and overdue, and how many are starred, at the time you choose.</li>
+    </ul>
+    <p>Act on it from the notification itself: <strong>✓ Done</strong> completes the task (a repeating one's next copy
+      appears as usual), and <em>Snooze 1 hour</em> brings it back later (phones show two buttons; computers may add
+      <em>Tomorrow</em>). If that can't reach Entropicide (no connection), the notification says so. Tapping the
+      notification opens the task.</p>
+    <p><strong>Quiet hours</strong> (Settings → Notifications): nothing buzzes between the two times you choose, e.g.
+      10 pm to 7 am. Reminders and starts that fall in them aren't lost: they all arrive when the quiet hours end.</p>
+    <div class="ex">“Take the bins out” · Remind me: Tonight → at 7 pm your phone buzzes; snooze an hour if you're busy.</div>
+    <p>On an iPhone or iPad, notifications work once Entropicide is added to the Home Screen and opened from there.
+      With the Android app, allow notifications when Android asks.</p>
+  </section>
+
+  <section id="expiries">
+    <h2>Expiries</h2>
+    <p>For things that run out: passports, driving licences, insurance, warranties, registrations. Give a task an
+      <strong>Expires</strong> date in its details (or type <code>expires mar 3 2027</code> when adding it), and attach the
+      document if you like. Then:</p>
+    <ul>
+      <li>The task shows <em>Expires …</em>, amber in the last 30 days and red once expired.</li>
+      <li>An <strong>Expiries</strong> list (in the sidebar, once there's one) shows them all, soonest first.</li>
+      <li>With notifications on, you get a notice <strong>90, 30 and 7 days before, and on the day</strong> (change the days in
+        Settings → Notifications), in the daytime.</li>
+    </ul>
+    <p>Keep such tasks out of the way, in Later or a “Documents” project; when you renew, change the date
+      (and the attachment).</p>
+    <div class="ex"><code>Passport #docs !later expires jan 20 2027</code>, with a scan of the passport attached.</div>
+  </section>
+
+  <section id="focus-timer">
+    <h2>Focus timer</h2>
+    <p>To work on one task without distractions: <strong>▶ Focus timer</strong> in its details, right-click → <em>Focus timer</em>,
+      or press <kbd>T</kbd> on it. Choose 15, 25, 45 or 60 minutes (or no limit); the task fills the screen with a countdown,
+      its notes and its tickable checklist, and the screen stays on.</p>
+    <ul>
+      <li><strong>Pause</strong> (or <kbd>Space</kbd>), <strong>✓ Done</strong> (completes the task), or <strong>Stop</strong>.</li>
+      <li><kbd>Esc</kbd> (or ⌄) shrinks it to a small timer in the corner; click that to come back. It carries on through a reload.</li>
+      <li>When time's up you hear a short chime (and get a notification if Entropicide isn't on screen); then <em>+5 min</em>,
+        <em>another round</em>, complete, or stop.</li>
+      <li>The time is added to the task: ⏱ on its row and <em>Time spent</em> in its details (with Reset).</li>
+    </ul>
+  </section>
+
+  <section id="calendar">
+    <h2>Calendar and Google</h2>
+    <ul>
+      <li>The <strong>calendar icon</strong> in the toolbar shows the next two weeks: your dated tasks and your Google Calendar events.</li>
+      <li><strong>Settings → Google Calendar</strong>: connect your Google account and choose a calendar. Tasks with a due date
+        (or else a start date) appear on it as events: a shared one like <em>Family</em> so everyone sees them, or a new <em>Entropicide</em> calendar.</li>
+      <li>Sync runs both ways every minute: move or rename the event in Google and the task follows; delete it and the task goes to the Trash.
+        On your own Entropicide calendar, events you add there become tasks. On a shared calendar, other people's events are left alone.</li>
+      <li>Today's events also show at the top of <strong>Focus</strong>. <em>Sync now</em> in Settings syncs straight away;
+        <em>Disconnect</em> removes the events Entropicide added.</li>
+    </ul>
+  </section>
+
+  <section id="links">
+    <h2>Links and the toolbar</h2>
+    <ul>
+      <li>The <strong>Links</strong> list keeps web pages you use often: paste a URL, give it a name, file it in folders
+        (drag to rearrange, or drop on a folder to move it in).</li>
+      <li><strong>Star</strong> a link to put it in the <strong>toolbar</strong> across the top of every list, for one-click access.</li>
+      <li>Give a link an SVG <strong>icon</strong> (✎ → Upload icon or From URL) and the toolbar shows just the icon, saving space.</li>
+    </ul>
+    <div class="ex">Star Mail, Bank and School portal with icons; keep the rest in folders like “Bills” and “Kids”.</div>
+  </section>
+
+  <section id="settings">
+    <h2>Settings</h2>
+    <p>Click your name at the bottom of the sidebar.</p>
+    <dl>
+      <dt>Areas</dt><dd>Add, rename, delete; set icons.</dd>
+      <dt>Tags</dt><dd>Rename (to merge, rename to an existing tag) or delete.</dd>
+      <dt>Defer options</dt><dd>The choices in the Defer menu (<a href="#defer">see Defer</a>).</dd>
+      <dt>Notes editor</dt><dd><em>Plain</em> or <em>Vim</em> (Vim keys in notes), for this device only (<a href="#notes">see Notes</a>).</dd>
+      <dt>Text size</dt><dd><strong>A−</strong>/<strong>A+</strong> from 75% to 200%, for <em>this device only</em>: bigger on a tablet, smaller on a laptop. Everything scales with it.</dd>
+      <dt>Google Calendar</dt><dd>Connect, choose the calendar, sync now, disconnect.</dd>
+      <dt>Notifications</dt><dd>Turn notifications on or off for this device, send a test, and choose what you're notified
+        about: timed starts, and a morning summary at a time you pick (<a href="#reminders">see Reminders</a>).</dd>
+      <dt>Attachments</dt><dd>How much of your 1 GB you're using, and your largest files (click one's task to open it).</dd>
+      <dt>Phone app</dt><dd>A link to the install page.</dd>
+      <dt>Your data</dt><dd><strong>Download everything</strong> as a zip: all your tasks (including completed and trashed ones),
+        projects, areas, tags and links as <code>data.json</code>, your tasks as <code>tasks.csv</code> for a spreadsheet, and your attachments.</dd>
+      <dt>Backups (admins only)</dt><dd>The server backs up everything every night, keeping the last 7 days, 4 Sundays and 12 month-starts;
+        this shows when the last one was made (in red if it's more than two days old). <strong>Download a full backup now</strong>
+        to keep a copy on another computer, since the nightly ones are on the same disk as the app.</dd>
+      <dt>Change password</dt><dd>At least 8 characters.</dd>
+      <dt>Users (admins only)</dt><dd>Add people (each person's tasks are private), make them admins, disable them, reset passwords.</dd>
+    </dl>
+    <p>Also remembered per device: the area filter, the last list you were on, and collapsed link folders.</p>
+  </section>
+
+  <section id="install-app">
+    <h2>Phone app and offline</h2>
+    <ul>
+      <li><a href="{{ url_for('install') }}">Install the app</a>: an Android download, or <em>Add to Home Screen</em> from the browser
+        on any phone or computer. It's the same site, full screen, always up to date.</li>
+      <li><strong>Share to Entropicide:</strong> once installed on Android, Entropicide is in the <strong>Share</strong> menu of other apps.
+        Share a web page, some text, a photo or a file and it becomes a task in your Inbox (the page's link and text in its notes,
+        files attached), and Entropicide opens on it.
+        <div class="ex">In Chrome: ⋮ → Share → Entropicide, to keep an article for later. In Photos: Share → Entropicide, to keep a receipt.</div>
+        If a share doesn't arrive, look in Settings → Troubleshooting → <em>App log</em>: it lists every share
+        the server received and what became of it.</li>
+      <li><strong>Add without leaving what you're doing</strong> (Android app 1.0.4 or later): in the app, open
+        Settings → <strong>Add from the phone</strong> and tap <strong>Connect this phone</strong> (allow notifications if asked).
+        <ul>
+          <li>A quiet <strong>Add a task</strong> notification stays in the pull-down panel: tap <strong>Add task</strong>,
+            type, and send, as when replying to a text. The game or app you're in keeps running.</li>
+          <li>Or add the <strong>Add task</strong> tile to Quick Settings (swipe down twice, tap ✏️, drag it in): it asks
+            in a small box over whatever's on screen.</li>
+        </ul>
+        The first line is read just like quick add (<code>Call dentist tomorrow 3pm #phone !next</code>), any more lines
+        become the notes, and it goes to the Inbox unless you name a list. The notification says what happened
+        (<em>Added: Call dentist · Queue · Mon Nov 2, 3:00 PM · #phone</em>, or why not). With no signal, it waits on
+        the phone (<em>1 task waiting for a connection</em>) and sends itself when you're back online, with its dates
+        read from when you typed it. Swiped it away? Opening Entropicide brings it back; to stop it for good, Disconnect the phone
+        in Settings (the notification goes the next time it's used), or turn off its notifications in Android's settings for Entropicide.</li>
+      <li><strong>App updates:</strong> Entropicide itself is always current. When the Android app around it changes, opening it shows
+        <em>A new version of the Entropicide app is ready</em>: tap <strong>Update</strong>, open the download, and tap <strong>Update</strong>.
+        <em>Later</em> skips that version. Settings → Troubleshooting shows which version you're running (1.0.1, 1.0.2, …)
+        and whether a newer one is out.</li>
+      <li><strong>Offline:</strong> once it has been opened on a device, it opens without a connection and shows your tasks as last loaded.
+        You can keep adding, editing, completing, moving and trashing tasks and projects; a badge at the top counts the changes waiting,
+        and they're sent when the connection is back (“Back online. Your changes are saved.”). Settings, the Logbook and the Trash need a connection.</li>
+    </ul>
+  </section>
+
+  <section id="command-palette">
+    <h2>Find anything (Ctrl+K)</h2>
+    <p>Press <kbd>Ctrl</kbd>+<kbd>K</kbd> (<kbd>⌘</kbd>+<kbd>K</kbd> on a Mac), or the 🔍 button at the top, and type a few letters:</p>
+    <ul>
+      <li><strong>Go</strong> to any list, project, tag or area, or open a link: <code>que</code> → Queue, <code>kit</code> → the Kitchen project.</li>
+      <li><strong>Find a task</strong> in any list (Someday and Waiting too) and open it.</li>
+      <li><strong>Do</strong> things: <em>New task</em>, <em>New project</em>, <em>New project from “Trip”</em>, <em>Settings</em>, <em>Help</em>,
+        <em>Show all areas</em>, <em>Larger text</em>, <em>Download my data</em>.</li>
+      <li><strong>Act on the selected task(s)</strong> (or the one you're on, or open): <code>move some</code> → Move to › Someday,
+        <code>defer 1w</code>, <code>tag errand</code>, <code>star</code>, <code>complete</code>, <code>priority inc</code>, <code>area work</code>.</li>
+    </ul>
+    <p>Letters can be spread out (<code>mtg</code> finds “meeting”); what you used recently comes first.
+      <kbd>↑</kbd><kbd>↓</kbd> to choose, <kbd>Enter</kbd> to go, <kbd>Esc</kbd> to close.</p>
+  </section>
+
+  <section id="keys">
+    <h2>Keyboard shortcuts</h2>
+    <table class="help-table">
+      <tbody>
+        <tr><td><kbd>↓</kbd> / <kbd>J</kbd>, <kbd>↑</kbd> / <kbd>K</kbd></td><td>move to the next / previous task (an open task's details follow)</td></tr>
+        <tr><td><kbd>H</kbd> / <kbd>←</kbd></td><td>go to the lists on the left; there <kbd>J</kbd>/<kbd>K</kbd> (or <kbd>↓</kbd>/<kbd>↑</kbd>) show the next or previous list</td></tr>
+        <tr><td><kbd>L</kbd> / <kbd>→</kbd></td><td>back to the tasks (also <kbd>Enter</kbd> or <kbd>Esc</kbd>)</td></tr>
+        <tr><td><kbd>Enter</kbd></td><td>open the task you're on, with the cursor at the end of its notes (or close it);
+          <kbd>Esc</kbd> leaves the notes, a second <kbd>Esc</kbd> closes it (with Vim keys: <code>:q</code>)</td></tr>
+        <tr><td><kbd>X</kbd></td><td>complete it (or the selected tasks)</td></tr>
+        <tr><td><kbd>S</kbd></td><td>star or unstar it (or the selected tasks)</td></tr>
+        <tr><td><kbd>T</kbd></td><td>focus timer on it</td></tr>
+        <tr><td><kbd>N</kbd></td><td>add a task (jump to the box)</td></tr>
+        <tr><td><kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>Enter</kbd></td><td>add the task and open it</td></tr>
+        <tr><td><kbd>/</kbd></td><td>search</td></tr>
+        <tr><td><kbd>+</kbd> / <kbd>−</kbd></td><td>raise / lower the priority of the open or selected tasks</td></tr>
+        <tr><td><kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>A</kbd></td><td>select every task shown</td></tr>
+        <tr><td><kbd>Ctrl</kbd>/<kbd>⌘</kbd>-click, <kbd>Shift</kbd>-click</td><td>select tasks, a range</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>clear the selection, close the details, leave a box</td></tr>
+        <tr><td><kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd></td><td>find anything, or run a command</td></tr>
+        <tr><td><kbd>?</kbd></td><td>this help</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="routine">
+    <h2>A daily and weekly routine</h2>
+    <h3>Each day (5 minutes)</h3>
+    <ol>
+      <li>Empty the <strong>Inbox</strong>: for each item, do it if it takes under 2 minutes, otherwise move it to a list or project (or trash it).</li>
+      <li>Look at <strong>Focus</strong> (due today, today's events) and star a few <strong>Queue</strong> tasks for today.</li>
+      <li>Work from Focus. Capture anything new straight into the Inbox.</li>
+    </ol>
+    <h3>Each week (30 minutes)</h3>
+    <ol>
+      <li>Empty the Inbox (and your email, notes and pockets into it).</li>
+      <li>Go through <strong>Projects</strong>: does each active one have a next action in the Queue? Is any finished, or better parked in Someday?</li>
+      <li>Check <strong>Waiting</strong>: chase anything overdue.</li>
+      <li>Look ahead at <strong>Scheduled</strong>, <strong>Recurring</strong> and the <strong>Calendar</strong>.</li>
+      <li>Skim <strong>Soon</strong>, <strong>Later</strong> and <strong>Someday</strong>: promote what's now relevant, delete what isn't.</li>
+      <li>Trim the <strong>Queue</strong>: reprioritise; move what you won't get to soon into Soon or Later.</li>
+    </ol>
+  </section>
+
+  </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,13 @@
+[Unit]
+Description=Back up the Entropicide database (see backup.py)
+
+[Service]
+Type=oneshot
+# (install.sh puts site.conf's APP_USER here.)
+User=apache
+Group=apache
+WorkingDirectory=/opt/entropicide
+EnvironmentFile=/opt/entropicide/.env
+ExecStart=/opt/entropicide/venv/bin/python manage.py backup
+Nice=10
+IOSchedulingClass=idle

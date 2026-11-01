@@ -1,0 +1,25 @@
+# Your site's settings: copy this file to deploy/site.conf and edit it. It's read by
+# deploy/install.sh, the server and android/build.mjs (KEY=value lines; ~ is your home folder).
+
+# Where Entropicide is served: https://SITE_HOST/SITE_PATH/ (SITE_PATH can be / for the
+# whole site). After changing them: run deploy/install.sh, rebuild the Android app and deploy
+# again, and add https://SITE_HOST/SITE_PATH/google/callback to your Google OAuth client.
+SITE_HOST=tasks.example.com
+SITE_PATH=/
+
+# Who runs this site, for the privacy page (optional): a name, and an email address or a
+# web page for questions and deletion requests.
+OPERATOR=
+CONTACT=
+
+# deploy/install.sh (a server with Apache and systemd): the local port the app listens on,
+# the account it runs as, and the Apache config of the HTTPS site it's added to.
+APP_PORT=5002
+APP_USER=apache
+APACHE_VHOST=/etc/httpd/conf.d/tasks.example.com-le-ssl.conf
+
+# The Android app (android/build.mjs; optional). The package must be your own, and stay the
+# same forever: phones only update an app with the same package, signed with the same key.
+ANDROID_PACKAGE=com.example.entropicide
+ANDROID_KEY_DIR=~/.config/entropicide-android
+ANDROID_KEY_ALIAS=entropicide

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Entropicide</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='icons/favicon.svg') }}">
+  <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='icons/favicon-32.png') }}">
+  <link rel="manifest" href="{{ url_for('web_manifest') }}">
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/apple-touch-icon.png') }}">
+  <meta name="theme-color" content="#0866a8">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body class="login-page">
+  <form class="login-card" method="post" action="{{ url_for('login') }}">
+    <h1 class="login-logo"><img src="{{ url_for('static', filename='icons/logo.svg') }}" alt="Entropicide"
+      width="240" height="161"></h1>
+    {% if error %}<p class="login-error" role="alert">{{ error }}</p>{% endif %}
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Username
+      <input name="username" autocomplete="username" autocapitalize="none" required autofocus>
+    </label>
+    <label>Password
+      <input name="password" type="password" autocomplete="current-password" required>
+    </label>
+    <button type="submit" class="primary">Sign in</button>
+    <p class="muted small login-foot"><a href="{{ url_for('help_page') }}">Help</a> ·
+      <a href="{{ url_for('install') }}">Install the app</a> ·
+      <a href="{{ url_for('privacy') }}">Privacy</a></p>
+  </form>
+  <script>
+    // Signed out: forget the copy of the last account's tasks kept for offline use (sw.js).
+    if ("caches" in window) caches.keys().then((keys) => keys.forEach((k) => caches.delete(k)));
+  </script>
+</body>
+</html>

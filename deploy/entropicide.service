@@ -1,0 +1,17 @@
+[Unit]
+Description=Entropicide (GTD task manager) Flask Service
+After=network.target
+
+[Service]
+# (install.sh puts site.conf's APP_USER here.)
+User=apache
+Group=apache
+WorkingDirectory=/opt/entropicide
+EnvironmentFile=/opt/entropicide/.env
+# .env sets SCRIPT_NAME (site.conf's SITE_PATH: the web server forwards it unchanged and
+# gunicorn strips it for Flask) and APP_PORT; install.sh writes them.
+ExecStart=/opt/entropicide/venv/bin/gunicorn --workers 1 --threads 4 --bind 127.0.0.1:${APP_PORT} app:app
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

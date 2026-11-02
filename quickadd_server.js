@@ -1,7 +1,7 @@
 // Reads a task typed on the phone (the Android app's notification or tile) the way quick add
 // does in the browser, by running static/quickadd.js itself. app.py's app_add runs it as
 //   TZ=<the user's time zone> node quickadd_server.js
-// with {"text", "lang", "now", "areas": [{id, name}]} on stdin (now: when it was typed,
+// with {"text", "lang", "now", "areas": [{id, name}], "contacts": [{id, name, nicknames}]} on stdin (now: when it was typed,
 // YYYY-MM-DDTHH:MM on the phone); it writes the new task's fields
 // (title, state, tags, dates, …) as JSON. The time zone makes "today" the user's.
 "use strict";
@@ -12,7 +12,7 @@ const vm = require("node:vm");
 const input = JSON.parse(fs.readFileSync(0, "utf8"));
 const context = vm.createContext({
   navigator: { language: input.lang || "en-US" },
-  S: { data: { areas: input.areas || [] } },
+  S: { data: { areas: input.areas || [], contacts: input.contacts || [] } },
 });
 vm.runInContext(fs.readFileSync(path.join(__dirname, "static", "quickadd.js"), "utf8"), context);
 // Typed earlier (sent once the phone was back online): read dates from when it was typed.
@@ -28,6 +28,7 @@ const task = vm.runInContext(`(() => {
   if (parsed.priority) task.priority = parsed.priority;
   if (parsed.repeat) task.repeat = parsed.repeat;
   if (parsed.area_id) task.area_id = parsed.area_id;
+  if (parsed.people.length) task.people = parsed.people;
   Object.assign(task, whenFields(parsed));
   if (task.state === "scheduled" && !task.start_date) task.start_date = addDays(today(), 1);
   return task;

@@ -1,4 +1,4 @@
-"""Google Calendar: OAuth, the few Calendar API calls sync needs, and how tasks map to events.
+"""Google Calendar (and Contacts): OAuth, the few API calls sync needs, and how tasks map to events.
 
 Each user's dated tasks go on a calendar of their choice: an "Entropicide" calendar the app creates,
 or one of their own (such as a shared family calendar).
@@ -20,8 +20,12 @@ AUTH_URL = os.environ.get("ENTROPICIDE_GOOGLE_AUTH_URL", "https://accounts.googl
 TOKEN_URL = os.environ.get("ENTROPICIDE_GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 REVOKE_URL = os.environ.get("ENTROPICIDE_GOOGLE_REVOKE_URL", "https://oauth2.googleapis.com/revoke")
 API = os.environ.get("ENTROPICIDE_GOOGLE_API_URL", "https://www.googleapis.com/calendar/v3")
+PEOPLE_API = os.environ.get("ENTROPICIDE_GOOGLE_PEOPLE_URL", "https://people.googleapis.com/v1")
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
-SCOPES = "openid email " + CALENDAR_SCOPE
+CONTACTS_SCOPE = "https://www.googleapis.com/auth/contacts.readonly"  # optional
+SCOPES = f"openid email {CALENDAR_SCOPE} {CONTACTS_SCOPE}"
+NO_CONTACTS_ACCESS = ("Google didn't give Entropicide access to your contacts. Click Reconnect and "
+                      "tick the box for Google Contacts.")
 NO_CALENDAR_ACCESS = ("Google didn't give Entropicide access to your calendars. Click Reconnect and, on "
                       "Google's permissions page, tick the box for Google Calendar.")
 CALENDAR_NAME = "Entropicide"  # (made before the rename, it's called Todo)
@@ -96,6 +100,10 @@ def auth_url(redirect_uri, state):
 def has_calendar_access(tokens):
     """Whether the user ticked Calendar on Google's consent page (each scope has a checkbox)."""
     return CALENDAR_SCOPE in tokens.get("scope", CALENDAR_SCOPE).split()
+
+
+def has_contacts_access(scopes):
+    return CONTACTS_SCOPE in (scopes or "").split()
 
 
 def exchange_code(code, redirect_uri):
@@ -241,3 +249,31 @@ def event_notes(event):
     ("From Todo", before the rename)."""
     text = event.get("description") or ""
     return re.split(r"From (?:Entropicide|Todo): ", text)[0].rstrip()[:20000]
+
+
+# --- Contacts (People API) ------------------------------------------------
+
+def list_contacts(token):
+    """The user's contacts that have a name or nickname, as [{id, name, info}] where info is
+    {nicknames, phones, emails, addresses} (each phone, email or address {value, type})."""
+    out, page = [], None
+    while True:
+        params = {"personFields": "names,nicknames,phoneNumbers,emailAddresses,addresses",
+                  "pageSize": 1000}
+        if page:
+            params["pageToken"] = page
+        res = _request("GET", f"{PEOPLE_API}/people/me/connections", token=token, params=params)
+        for p in res.get("connections", []):
+            nicknames = [n["value"].strip() for n in p.get("nicknames", []) if n.get("value", "").strip()]
+            name = next((n["displayName"].strip() for n in p.get("names", [])
+                         if n.get("displayName", "").strip()), None) or (nicknames[:1] or [None])[0]
+            if not name:
+                continue
+            some = lambda key, field: [{"value": x[field].strip()[:300], "type": x.get("formattedType", "")}
+                                       for x in p.get(key, []) if x.get(field, "").strip()][:10]
+            out.append({"id": p["resourceName"], "name": name[:200], "info": {
+                "nicknames": nicknames[:10], "phones": some("phoneNumbers", "value"),
+                "emails": some("emailAddresses", "value"), "addresses": some("addresses", "formattedValue")}})
+        page = res.get("nextPageToken")
+        if not page or len(out) > 50000:
+            return out

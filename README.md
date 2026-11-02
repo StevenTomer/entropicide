@@ -11,16 +11,17 @@ repeating tasks and reminders, for you, your family or a small team.
   photos and files from your phone; add tasks from an Android notification without leaving the
   app you're in.
 - **Plan:** projects (sequential or not), areas, tags, priorities, dependencies ("blocked by"),
-  repeating tasks, project templates, expiry dates and a focus timer.
-- **Stay on it:** push reminders with ✓ Done and Snooze, a morning summary, quiet hours, and
-  two-way Google Calendar sync.
+  repeating tasks, project templates and a focus timer.
+- **Stay on it:** push reminders (at a time, or days before a deadline) with ✓ Done and Snooze,
+  a morning summary, quiet hours, and two-way Google Calendar sync.
 - **Anywhere:** works in any browser, installs as an app (an Android app too), and keeps working
   offline, sending changes when the connection is back.
 - **Yours:** one small server, one SQLite file, nightly backups, and an export of everything.
   Accounts are invite-only and each user's tasks are private.
 
 The in-app **Help** page (press `?`) explains every feature with examples; there's also a
-[feature tour](docs/features.md).
+[feature tour](docs/features.md). Other apps (an Alexa skill, Home Assistant, a phone
+shortcut) can add tasks too: see [docs/api.md](docs/api.md).
 
 ## Running it
 

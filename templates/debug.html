@@ -12,7 +12,8 @@
   <main class="login-card privacy debug">
     <h1>App log</h1>
     <p class="muted small">Every use of the Share menu, every launch of the Android app and every
-      task it adds from its notification or tile (app-add), newest
+      task added from its notification or tile, or by another app with a key (app-add) or
+      completed by one (app-complete), newest
       first (times in your time zone){% if admin %}, for all users, including shares that arrived
       signed out (other people's without what they shared or typed){% else %}: yours{% endif %}. A share that never shows up here never reached the server.
       Latest Android app: {{ apk.name if apk else "none" }}.</p>
@@ -21,7 +22,7 @@
     {% for e in entries %}
     <details class="debug-entry">
       <summary><b>{{ e.at }}</b> · {{ e.kind }} · {{ e.user }}<br>
-        {% if e.kind in ("share", "app-add") %}{{ e.detail.result }}{% else %}Android app {{ e.detail.app_version or e.detail.url }}{% endif %}</summary>
+        {% if e.kind in ("share", "app-add", "app-complete") %}{{ e.detail.result }}{% else %}Android app {{ e.detail.app_version or e.detail.url }}{% endif %}</summary>
       <pre>{{ e.detail | tojson(indent=1) }}</pre>
     </details>
     {% else %}

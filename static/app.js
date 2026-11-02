@@ -8,6 +8,9 @@ const STATE_LABEL = Object.fromEntries(STATES);
 // A task's day on the calendar: its due date, else its start date (as on Google Calendar).
 const taskDay = (t) => t.due_date || t.start_date;
 const CALENDAR_DAYS = 14;
+// Reminders before the due date, in days (the server's REMIND_BEFORE_DAYS; they come at 9 am).
+const REMIND_BEFORE = [[1, "1 day"], [2, "2 days"], [3, "3 days"], [7, "1 week"], [14, "2 weeks"], [30, "1 month"],
+  [60, "2 months"], [90, "3 months"]];
 
 // A repeating task's next copy, waiting for its start date (the Recurring list).
 const isRecurringCopy = (t) => t.state === "scheduled" && t.series_id;
@@ -475,8 +478,6 @@ function viewTasks(view) {
     if (view === "scheduled") list = byStart(list.filter((t) => !t.series_id));
   } else if (view === "recurring") {
     list = byStart(S.data.tasks.filter(isRecurringCopy));
-  } else if (view === "expiries") {
-    list = S.data.tasks.filter((t) => t.expires_on).sort((a, b) => a.expires_on.localeCompare(b.expires_on));
   } else if (view === "calendar") {
     const last = addDays(t0, CALENDAR_DAYS - 1);
     list = S.data.tasks.filter((t) => { const d = taskDay(t); return d && d >= t0 && d <= last; });
@@ -622,8 +623,6 @@ function renderNav() {
       (s === "inbox" ? navItem("focus", "★ Focus", counts.focus, "focus") : "") +
       (s === "scheduled" ? navItem("recurring", "Recurring", counts.recurring) : "")).join("") +
     navItem("all", "All", counts.all) +
-    // Expiries shows once something has an expiry date.
-    (S.data.tasks.some((t) => t.expires_on) || S.view === "expiries" ? navItem("expiries", "Expiries", viewTasks("expiries").length) : "") +
     `<div class="nav-section">
        <a href="#" class="nav-item ${S.view === "projects" ? "active" : ""}" data-view="projects">Projects</a>
        <button class="icon add-project" title="New project" aria-label="New project">+</button>
@@ -641,7 +640,6 @@ function viewTitle() {
   if (S.view === "focus") return "Focus";
   if (S.view === "projects") return "Projects";
   if (S.view === "recurring") return "Recurring";
-  if (S.view === "expiries") return "Expiries";
   if (S.view === "all") return "All";
   if (S.view === "calendar") return "Calendar";
   if (S.view === "logbook") return "Logbook";
@@ -673,17 +671,16 @@ function taskRow(t, { showState }) {
     meta.push(`<span class="blocked" title="Waiting on: ${h(waits.map((b) => b.title).join(", "))}">🔒 after ${
       h(waits[0].title)}${waits.length > 1 ? ` +${waits.length - 1}` : ""}</span>`);
   }
-  if (t.expires_on && !t.completed_at) {
-    const days = Math.round((new Date(t.expires_on + "T12:00:00") - new Date(t0 + "T12:00:00")) / 86400000);
-    meta.push(`<span class="expires ${days < 0 ? "overdue" : days <= 30 ? "due-today" : ""}" title="Expires ${h(t.expires_on)}">${
-      days < 0 ? `Expired ${fmtDate(t.expires_on)}` : `Expires ${fmtDate(t.expires_on)}`}${days >= 0 && days <= 60 ? ` (${days === 0 ? "today" : `${days}d`})` : ""}</span>`);
-  }
   if (t.spent) meta.push(`<span title="Time spent (focus timer)">⏱ ${fmtSpent(t.spent)}</span>`);
   if (reminderPending(t)) meta.push(`<span class="remind-at" title="Reminder">⏰ ${fmtRemind(t)}</span>`);
   if (t.attachments?.length) meta.push(`<span title="${h(t.attachments.map((f) => f.name).join(", "))}">📎 ${t.attachments.length}</span>`);
   if (t.minutes) meta.push(`<span>${t.minutes}m</span>`);
   if (t.energy) meta.push(`<span class="energy-${t.energy}">${t.energy}</span>`);
   for (const tag of t.tags) meta.push(`<span class="tag">${h(tag)}</span>`);
+  for (const id of t.people || []) {
+    const c = contactById(id);
+    if (c) meta.push(`<span class="person">👤 ${h(c.name)}</span>`);
+  }
   if (t.completed_at) {
     // The Logbook is grouped by day already, so there it shows the time.
     const [day, time] = localStamp(t.completed_at);
@@ -882,8 +879,7 @@ function renderList() {
   if (!list.length && S.view !== "calendar") {
     html += `<p class="empty">${S.search || S.tagFilter.size ? "Nothing matches." :
       { focus: "Star tasks to put them here.",
-        recurring: "Set a task's Repeat to see its next copy here.",
-        expiries: "Give a task an Expires date (a passport, insurance, a warranty) to see it here." }[S.view] ?? "Nothing here."}</p>`;
+        recurring: "Set a task's Repeat to see its next copy here." }[S.view] ?? "Nothing here."}</p>`;
   }
   fillList(el, html);
   renderSelectBar();
@@ -1296,13 +1292,46 @@ function parseEvery(repeat) {
   const m = /^every:(\d+)([wmy]?)$/.exec(repeat || "");
   return m && { n: Number(m[1]), unit: m[2] || "d" };
 }
+// "days:0,2,4" (Monday 0 … Sunday 6) → [0, 2, 4]: on those days of the week.
+const WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+function parseDays(repeat) {
+  const m = /^days:([0-6](,[0-6])*)$/.exec(repeat || "");
+  return m && m[1].split(",").map(Number);
+}
+const daysValue = (days) => "days:" + [...new Set(days)].sort().join(",");
+// "Mon, Wed and Fri" ("or", for the gap between copies).
+const dayList = (days, and = "and") => days.map((d) => WEEK[d]).join(", ").replace(/, ([^,]+)$/, ` ${and} $1`);
+// The day of the week of an ISO date, Monday 0.
+const weekDay = (iso) => (new Date(iso + "T12:00:00").getDay() + 6) % 7;
+// "nth:1:0" → { n: 1, day: 0 }: monthly, on the first Monday (n -1: the last).
+const WEEK_LONG = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const NTHS = [[1, "first"], [2, "second"], [3, "third"], [4, "fourth"], [-1, "last"]];
+function parseNth(repeat) {
+  const m = /^nth:(-1|[1-4]):([0-6])$/.exec(repeat || "");
+  return m && { n: Number(m[1]), day: Number(m[2]) };
+}
+const nthName = (n) => NTHS.find(([k]) => k === n)[1];
+// The nth weekday of the month that an ISO date is (a fifth one: the last).
+function nthOf(iso) {
+  const n = Math.ceil(Number(iso.slice(8, 10)) / 7);
+  return `nth:${n > 4 ? -1 : n}:${weekDay(iso)}`;
+}
+
 function repeatLabel(repeat) {
+  const days = parseDays(repeat);
+  if (days) return `every ${dayList(days)}`;
+  const nth = parseNth(repeat);
+  if (nth) return `every ${nthName(nth.n)} ${WEEK_LONG[nth.day]} of the month`;
   const e = parseEvery(repeat);
   if (!e) return repeat;
   return e.n === 1 ? `every ${EVERY_UNITS[e.unit]}` : `every ${e.n} ${EVERY_UNITS[e.unit]}s`;
 }
 // How far apart copies are: "a week", "2 weeks", "the next weekday".
 function repeatGap(repeat) {
+  const days = parseDays(repeat);
+  if (days) return `the next ${dayList(days, "or")}`;
+  const nth = parseNth(repeat);
+  if (nth) return `the ${nthName(nth.n)} ${WEEK_LONG[nth.day]} of the next month`;
   const e = parseEvery(repeat);
   if (e) return e.n === 1 ? `a ${EVERY_UNITS[e.unit]}` : `${e.n} ${EVERY_UNITS[e.unit]}s`;
   return { daily: "a day", weekdays: "the next weekday", weekly: "a week", monthly: "a month", yearly: "a year" }[repeat] || repeat;
@@ -1317,8 +1346,26 @@ function readEvery(text) {
 
 function repeatOptions(current) {
   return [...REPEATS.map((r) => [r, r || "Never"]),
-    ...(parseEvery(current) ? [[current, repeatLabel(current)]] : []),
+    ...(parseEvery(current) || parseDays(current) || parseNth(current) ? [[current, repeatLabel(current)]] : []),
+    ["days", "On certain days of the week…"],
+    ["nth", "Monthly on a weekday (first Monday…)…"],
     ["every", "Custom: every N days, weeks, months…"]];
+}
+
+// Which weekday of the month an nth:… repeat is on: two menus (first … last, Monday … Sunday).
+function nthPicker(repeat) {
+  const nth = parseNth(repeat);
+  return nth ? `<div class="two nth-pick">
+    <label>On the <select class="nth-n">${options(NTHS, nth.n)}</select></label>
+    <label>day <select class="nth-day">${options(WEEK_LONG.map((d, i) => [i, d]), nth.day)}</select></label>
+  </div>` : "";
+}
+
+// The days of the week of a days:… repeat, as buttons to switch each on or off.
+function weekDaysPicker(repeat) {
+  const on = parseDays(repeat);
+  return on ? `<div class="week-days" role="group" aria-label="Repeat on">${WEEK.map((d, i) =>
+    `<button type="button" class="wd ${on.includes(i) ? "on" : ""}" data-wd="${i}" aria-pressed="${on.includes(i)}">${d}</button>`).join("")}</div>` : "";
 }
 
 function repeatNote(t) {
@@ -1371,17 +1418,19 @@ function renderDetail() {
   const t = item;
   const projOpts = [["", "No project"], ...S.data.projects
     .filter((p) => p.state !== "done" || p.id === t.project_id).map((p) => [p.id, p.name])];
+  // The rarer details fold away under More, open when any is set (or as last left on this device).
+  const more = [t.priority ? `priority ${t.priority}` : "", t.minutes ? `${t.minutes}m` : "",
+    t.energy ? `${t.energy} energy` : "", t.blocked_by?.length ? `blocked by ${t.blocked_by.length}` : "",
+    t.spent ? `${fmtSpent(t.spent)} spent` : ""].filter(Boolean);
   el.innerHTML = `
     <div class="detail-head"><span>${t.completed_at ? "Completed" : t.deleted_at ? "In trash" : "Task"}</span>
-      <button class="icon close" aria-label="Close">✕</button></div>
+      <span><button class="icon d-star ${t.focus ? "on" : ""}" title="${t.focus ? "In Focus: click to take it out" : "Put it in Focus"} (S)"
+        aria-pressed="${!!t.focus}">★ Focus</button>
+      <button class="icon close" aria-label="Close">✕</button></span></div>
     <input class="d-title" data-field="title" value="${h(t.title)}" aria-label="Title">
     <div class="state-picker">${STATES.map(([s, label]) =>
       `<button data-state="${s}" class="${t.state === s ? "on" : ""}">${label}</button>`).join("")}</div>
     <div class="d-cols"><div class="d-main">
-    ${t.state === "scheduled" ? `<div class="two">
-      <label>Starts <input type="date" data-field="start_date" value="${h(t.start_date || "")}"></label>
-      <label>at (optional) <input type="time" data-field="start_time" value="${h(t.start_time || "")}"></label>
-    </div>` : ""}
     ${t.state === "waiting" ? `<label>Waiting for <input data-field="waiting_for" value="${h(t.waiting_for)}" placeholder="Who or what"></label>` : ""}
     <textarea data-field="notes" placeholder="Notes" rows="6">${h(t.notes)}</textarea>
     <div class="notes md-preview" ${MD_HINT.test(t.notes) ? "" : "hidden"}>${notesHtml(t.notes, { locked: !!(t.completed_at || t.deleted_at) })}</div>
@@ -1389,39 +1438,50 @@ function renderDetail() {
       [name](https://…). <a href="${BASE}/help#notes" target="_blank" rel="noopener">More</a></p>
     ${attachmentsSection(t)}
     </div><div class="d-side">
-    <label>Expires <input type="date" data-field="expires_on" value="${h(t.expires_on || "")}"
-      title="For passports, insurance, warranties…: you get notices before this date (Settings → Notifications)"></label>
-    ${t.spent ? `<p class="muted small spent">Time spent: ${fmtSpent(t.spent)} · <button type="button" class="link reset-spent">Reset</button></p>` : ""}
-    ${reminderField(t)}
-    ${blockersField(t)}
-    <label>Project <select data-field="project_id">${options(projOpts, t.project_id)}</select></label>
-    ${t.project_id ? "" : `<label>Area <select data-field="area_id">${options(areaOpts, t.area_id)}</select></label>`}
-    <label>Tags <input data-field="tags" value="${h(t.tags.join(", "))}" list="tag-list" placeholder="comma, separated"></label>
-    <datalist id="tag-list">${S.data.tags.map((x) => `<option value="${h(x.name)}">`).join("")}</datalist>
-    <label>Priority <input type="number" data-field="priority" step="1" min="-${PRIORITY_MAX}" max="${PRIORITY_MAX}" value="${t.priority}"></label>
-    <label>Due <input type="date" data-field="due_date" value="${h(t.due_date || "")}"></label>
-    <label>Repeat <select data-field="repeat">${options(repeatOptions(t.repeat), t.repeat)}</select></label>
-    ${t.repeat ? `<label>Counting from <select data-field="repeat_from">${options(
-      [["calendar", "The calendar (on schedule)"], ["done", "When I complete it"]], t.repeat_from)}</select></label>
-      ${t.repeat_from === "done" ? "" : `<label>If missed <select data-field="on_miss">${options(
-      [["keep", "Keep it, alongside the new one"], ["replace", "Replace it with the new one"]], t.on_miss)}</select></label>`}
-      <label class="check"><input type="checkbox" data-field="carry_files" ${t.carry_files ? "checked" : ""}>
-        Give each new copy this task's files</label>
-      <p class="muted small">${repeatNote(t)}</p>` : ""}
-    <div class="two">
-      <label>Time <select data-field="minutes">${options(
-        [["", "—"], [5, "5m"], [15, "15m"], [30, "30m"], [60, "1h"], [120, "2h"], [240, "4h"]], t.minutes)}</select></label>
-      <label>Energy <select data-field="energy">${options(
-        [["", "—"], ["low", "Low"], ["medium", "Medium"], ["high", "High"]], t.energy)}</select></label>
-    </div>
-    <label class="check"><input type="checkbox" data-field="focus" ${t.focus ? "checked" : ""}> Focus</label>
+    <section class="d-group" aria-label="Where it belongs">
+      <label>Project <select data-field="project_id">${options(projOpts, t.project_id)}</select></label>
+      ${t.project_id ? "" : `<label>Area <select data-field="area_id">${options(areaOpts, t.area_id)}</select></label>`}
+      <label>Tags <input data-field="tags" value="${h(t.tags.join(", "))}" list="tag-list" placeholder="comma, separated"></label>
+      <datalist id="tag-list">${S.data.tags.map((x) => `<option value="${h(x.name)}">`).join("")}</datalist>
+      ${peopleField(t)}
+    </section>
+    <section class="d-group" aria-label="When">
+      <h3>When</h3>
+      <div class="two">
+        <label title="Not before: it waits in Scheduled until then">Starts <input type="date" data-field="start_date" value="${h(t.start_date || "")}"></label>
+        <label>at <input type="time" data-field="start_time" value="${h(t.start_time || "")}" ${t.start_date ? "" : "disabled"}></label>
+      </div>
+      <label title="Must be done by: in Focus from that day, red once overdue">Due <input type="date" data-field="due_date" value="${h(t.due_date || "")}"></label>
+      ${reminderField(t)}
+      <label>Repeat <select data-field="repeat">${options(repeatOptions(t.repeat), t.repeat)}</select></label>
+      ${weekDaysPicker(t.repeat)}${nthPicker(t.repeat)}
+      ${t.repeat ? `<label>Counting from <select data-field="repeat_from">${options(
+        [["calendar", "The calendar (on schedule)"], ["done", "When I complete it"]], t.repeat_from)}</select></label>
+        ${t.repeat_from === "done" ? "" : `<label>If missed <select data-field="on_miss">${options(
+        [["keep", "Keep it, alongside the new one"], ["replace", "Replace it with the new one"]], t.on_miss)}</select></label>`}
+        <label class="check"><input type="checkbox" data-field="carry_files" ${t.carry_files ? "checked" : ""}>
+          Give each new copy this task's files</label>
+        <p class="muted small">${repeatNote(t)}</p>` : ""}
+    </section>
+    <details class="d-group d-more" ${more.length || load("editorMore", "") === "open" ? "open" : ""}>
+      <summary><h3>More</h3> <span class="muted small">${h(more.join(" · ") || "priority, time, energy, blocked by")}</span></summary>
+      <label>Priority <input type="number" data-field="priority" step="1" min="-${PRIORITY_MAX}" max="${PRIORITY_MAX}" value="${t.priority}"></label>
+      <div class="two">
+        <label>Time <select data-field="minutes">${options(
+          [["", "—"], [5, "5m"], [15, "15m"], [30, "30m"], [60, "1h"], [120, "2h"], [240, "4h"]], t.minutes)}</select></label>
+        <label>Energy <select data-field="energy">${options(
+          [["", "—"], ["low", "Low"], ["medium", "Medium"], ["high", "High"]], t.energy)}</select></label>
+      </div>
+      ${blockersField(t)}
+      ${t.spent ? `<p class="muted small spent">Time spent: ${fmtSpent(t.spent)} · <button type="button" class="link reset-spent">Reset</button></p>` : ""}
+    </details>
     </div></div>
     <div class="detail-actions">
       ${t.deleted_at
         ? '<button class="restore-task">Restore</button><button class="danger purge-task">Delete forever</button>'
         : '<button class="start-timer" title="Work on this with a timer (T)">▶ Focus timer</button><button class="danger delete-task">Move to trash</button>'}
     </div>
-    <p class="muted small">Created ${fmtDate(t.created_at.slice(0, 10))}</p>`;
+    <p class="muted small">Created ${fmtDate(utcToLocalInput(t.created_at).slice(0, 10))}</p>`;
   el.notesReady = enhanceNotes(el);
 }
 
@@ -1500,6 +1560,7 @@ async function focusNotes() {
 
 function setView(view) {
   S.view = view;
+  S.selected = null;  // (a different list: the open task's details close)
   S.picked.clear();
   save("view", view);
   S.tagFilter.clear();
@@ -1542,10 +1603,11 @@ function renderQuickWhen() {
   }
   if (f.focus) parts.push("★ Today (Focus)");
   if (f.due_date) parts.push("Due " + dayHeading(f.due_date));
-  if (f.expires_on) parts.push("Expires " + dayHeading(f.expires_on));
   if (parsed.repeat) parts.push("↻ " + repeatLabel(parsed.repeat));
-  el.hidden = !parts.length;
-  el.textContent = "📅 " + parts.join(" · ");
+  const people = parsed.people.map((id) => contactById(id).name);
+  el.hidden = !parts.length && !people.length;
+  el.textContent = [parts.length ? "📅 " + parts.join(" · ") : "", people.length ? "👤 " + people.join(", ") : ""]
+    .filter(Boolean).join("  ");
 }
 
 async function quickAdd(text, { open = false } = {}) {
@@ -1568,6 +1630,7 @@ async function quickAdd(text, { open = false } = {}) {
   if (parsed.focus) task.focus = true;
   if (parsed.priority) task.priority = parsed.priority;
   if (parsed.repeat) task.repeat = parsed.repeat;
+  if (parsed.people.length) task.people = parsed.people;
   Object.assign(task, whenFields(parsed));
   if (task.state === "scheduled" && !task.start_date) task.start_date = addDays(today(), 1);
   // A task in a project takes the project's area.
@@ -1978,8 +2041,22 @@ function saveDate(input) {
     toast("That date doesn't look right.");
     return;
   }
+  if (input.dataset.field === "start_date" && sel.kind === "task") return saveStart(item, input.value);
   // Dates don't change the panel's layout, so keep it (and the user's focus) as is.
   saveField(input);
+}
+
+// A start date in the future schedules the task (it waits in Scheduled); clearing it, or
+// one that has come, puts a scheduled task in the Queue.
+async function saveStart(t, start) {
+  const changes = { start_date: start || null };
+  if (!start) changes.start_time = null;
+  const later = start && (start > today() || (start === today() && t.start_time && `${start}T${t.start_time}` > nowStamp()));
+  if (later && t.state !== "scheduled") changes.state = "scheduled";
+  else if (!later && t.state === "scheduled") changes.state = "next";
+  $("#detail").dataset.key = "";  // (the status, and the time box, change)
+  await patchTask(t.id, changes);
+  if (t.series_id) await refresh();
 }
 
 // ---- dependencies ("Blocked by") ---------------------------------------------
@@ -2003,6 +2080,47 @@ function depMatches(t, q) {
   if (!q) return [];
   return S.data.tasks.filter((x) => x.id !== t.id && !t.blocked_by?.includes(x.id) &&
     x.title.toLowerCase().includes(q)).slice(0, 6);
+}
+
+// ---- people (Google Contacts) ---------------------------------------------------
+// A task can name contacts from the read-only copy of the user's Google Contacts (@Mom in
+// quick add, or People in the editor); the editor shows how to reach them.
+
+const contactById = (id) => S.data.contacts?.find((c) => c.id === id);
+const dialable = (number) => number.replace(/[^\d+*#,;]/g, "");
+
+function peopleField(t) {
+  if (!S.data.contacts?.length && !t.people?.length) return "";
+  const remove = '<button type="button" class="icon del-person" aria-label="Remove">✕</button>';
+  const cards = (t.people || []).map((id) => {
+    const c = contactById(id);
+    if (!c) return `<div class="person-card" data-person="${h(id)}"><div class="person-name">
+      <span class="muted">Not in your Google Contacts now</span>${remove}</div></div>`;
+    const lines = [
+      ...c.phones.map((p) => `<a href="tel:${h(dialable(p.value))}">📞 ${h(p.value)}</a>${
+        p.type ? ` <span class="muted small">${h(p.type)}</span>` : ""} · <a href="sms:${h(dialable(p.value))}">Text</a>`),
+      ...c.emails.map((e) => `<a href="mailto:${h(e.value)}">✉ ${h(e.value)}</a>`),
+      ...c.addresses.map((a) => `<a href="https://www.google.com/maps/search/?api=1&query=${
+        h(encodeURIComponent(a.value))}" target="_blank" rel="noopener">📍 ${h(a.value.replace(/\s*\n\s*/g, ", "))}</a>`),
+    ];
+    return `<div class="person-card" data-person="${h(id)}"><div class="person-name"><strong>${h(c.name)}</strong>${remove}</div>
+      ${lines.map((l) => `<div>${l}</div>`).join("") || '<div class="muted small">No phone, email or address</div>'}</div>`;
+  }).join("");
+  return `<div class="people"><label>People <input class="people-search" placeholder="Add a contact…" autocomplete="off"></label>
+    <div class="people-results"></div>${cards}</div>`;
+}
+
+function peopleMatches(t, q) {
+  q = q.trim().toLowerCase();
+  if (!q) return [];
+  const fits = (name) => name.toLowerCase().startsWith(q) || name.toLowerCase().split(/\s+/).some((w) => w.startsWith(q));
+  return (S.data.contacts || []).filter((c) => !t.people?.includes(c.id) &&
+    (fits(c.name) || c.nicknames.some(fits))).slice(0, 6);
+}
+
+async function setPeople(id, ids) {
+  $("#detail").dataset.key = "";
+  await patchTask(id, { people: ids });
 }
 
 async function setBlockers(id, ids) {
@@ -2184,8 +2302,15 @@ const fmtRemind = (t) => { const v = utcToLocalInput(t.remind_at); return fmtWhe
 
 function reminderField(t) {
   if (t.completed_at || t.deleted_at) return "";
+  // One reminder: at a time, or some days before the due date (moving with it).
+  const mode = t.remind_before && t.due_date ? String(t.remind_before) : reminderPending(t) ? "time" : "";
+  const before = t.due_date ? REMIND_BEFORE.map(([d, label]) => [d, `${label} before it's due`]) : [];
   return `<div class="remind">
-    <label>Remind me <input type="datetime-local" data-field="remind_at" value="${utcToLocalInput(reminderPending(t) ? t.remind_at : "")}"></label>
+    <label>Remind me <select class="remind-mode">${options([["", "—"], ["time", "At a time…"], ...before], mode)}${
+      t.due_date ? "" : "<option disabled>Before it's due (set a due date first)</option>"}</select></label>
+    <input type="datetime-local" data-field="remind_at" aria-label="Remind me at" ${mode === "time" ? "" : "hidden"}
+      value="${utcToLocalInput(reminderPending(t) ? t.remind_at : "")}">
+    ${mode !== "time" && reminderPending(t) ? `<p class="muted small remind-when">⏰ ${fmtRemind(t)}</p>` : ""}
     <div class="remind-quick">
       <button type="button" class="link snooze" data-until="1h">In 1 hour</button>
       <button type="button" class="link snooze" data-until="tonight">Tonight</button>
@@ -2194,6 +2319,17 @@ function reminderField(t) {
     </div>
     ${S.data.user.push_devices ? "" : '<p class="muted small hint">Turn on notifications in Settings to get reminders.</p>'}
   </div>`;
+}
+
+async function remindMode(select) {
+  if (select.value === "time") {
+    const at = $('.remind input[data-field="remind_at"]', $("#detail"));
+    at.hidden = false;
+    at.focus();
+    return;
+  }
+  $("#detail").dataset.key = "";
+  await patchTask(S.selected.id, select.value ? { remind_before: Number(select.value) } : { remind_at: null, remind_before: null });
 }
 
 async function snoozeTask(id, until) {
@@ -2211,7 +2347,7 @@ async function snoozeTask(id, until) {
 // things used recently come first.
 
 const PAL_LISTS = [["inbox", "Inbox"], ["focus", "Focus"], ["next", "Queue"], ["soon", "Soon"], ["later", "Later"],
-  ["someday", "Someday"], ["waiting", "Waiting"], ["scheduled", "Scheduled"], ["recurring", "Recurring"], ["expiries", "Expiries"],
+  ["someday", "Someday"], ["waiting", "Waiting"], ["scheduled", "Scheduled"], ["recurring", "Recurring"],
   ["all", "All"], ["calendar", "Calendar"], ["projects", "Projects"], ["links", "Links"], ["logbook", "Logbook"], ["trash", "Trash"]];
 const pal = { items: [], shown: [], pick: 0 };
 const palRecent = () => { try { return JSON.parse(load("palRecent", "[]")); } catch { return []; } };
@@ -2653,6 +2789,14 @@ function askEveryDays(select) {
 function bindDetail() {
   const el = $("#detail");
   el.addEventListener("input", (e) => {
+    if (e.target.matches(".people-search")) {
+      const t = taskById(S.selected.id);
+      $(".people-results", el).innerHTML = peopleMatches(t, e.target.value).map((c) =>
+        `<button type="button" class="link add-person" data-person="${h(c.id)}">${h(c.name)}${
+          c.nicknames.length ? ` <span class="muted small">${h(c.nicknames.join(", "))}</span>` : ""}</button>`).join("") ||
+        (e.target.value.trim() ? '<span class="muted small">No contact matches.</span>' : "");
+      return;
+    }
     if (e.target.matches(".dep-search")) {
       const t = taskById(S.selected.id);
       $(".dep-results", el).innerHTML = depMatches(t, e.target.value).map((x) =>
@@ -2676,7 +2820,20 @@ function bindDetail() {
     const sel = S.selected;
     saveTimer = setTimeout(() => saveField(input, sel), 600);
   });
+  // (toggle doesn't bubble)
+  el.addEventListener("toggle", (e) => {
+    if (e.target.matches(".d-more")) save("editorMore", e.target.open ? "open" : "");
+  }, true);
   el.addEventListener("change", async (e) => {
+    if (e.target.matches(".remind-mode")) {
+      remindMode(e.target);
+      return;
+    }
+    if (e.target.matches(".nth-n, .nth-day")) {
+      $("#detail").dataset.key = "";
+      await patchTask(S.selected.id, { repeat: `nth:${$(".nth-n", el).value}:${$(".nth-day", el).value}` });
+      return refresh();
+    }
     if (e.target.matches(".file-input")) {
       uploadFiles(S.selected.id, [...e.target.files]);
       return;
@@ -2703,6 +2860,20 @@ function bindDetail() {
       return;
     }
     if (input.dataset.field === "repeat" && input.value === "every" && !askEveryDays(input)) return;
+    if (input.dataset.field === "repeat" && input.value === "nth") {
+      // Starts as the weekday of the task's date (the 2nd Tuesday, say); the menus below change it.
+      const t = taskById(S.selected.id);
+      const value = nthOf(t.start_date || t.due_date || today());
+      if (![...input.options].some((o) => o.value === value)) input.add(new Option(repeatLabel(value), value), input.options.length - 3);
+      input.value = value;
+    }
+    if (input.dataset.field === "repeat" && input.value === "days") {
+      // Starts as the day of the task's date (or today); the buttons below add the others.
+      const t = taskById(S.selected.id);
+      const value = daysValue([weekDay(t.start_date || t.due_date || today())]);
+      if (![...input.options].some((o) => o.value === value)) input.add(new Option(repeatLabel(value), value), input.options.length - 2);
+      input.value = value;
+    }
     if (input.type === "datetime-local") {
       // Saved when complete; the panel is redrawn to offer Clear.
       if (input.value && !validDate(input.value.slice(0, 10))) return;
@@ -2758,8 +2929,26 @@ function bindDetail() {
     const b = e.target.closest("button");
     if (!b) return;
     const sel = S.selected;
-    if (b.dataset.until) snoozeTask(sel.id, b.dataset.until);
+    if (b.dataset.wd) {
+      const days = parseDays(taskById(sel.id).repeat) || [];
+      const d = Number(b.dataset.wd);
+      const next = days.includes(d) ? days.filter((x) => x !== d) : [...days, d];
+      if (!next.length) return toast("Pick at least one day (or set Repeat to Never).");
+      $("#detail").dataset.key = "";
+      await patchTask(sel.id, { repeat: daysValue(next) });
+      await refresh();
+    }
+    else if (b.classList.contains("d-star")) {
+      $("#detail").dataset.key = "";
+      await patchTask(sel.id, { focus: !taskById(sel.id).focus });
+    }
+    else if (b.dataset.until) snoozeTask(sel.id, b.dataset.until);
     else if (b.classList.contains("add-dep")) setBlockers(sel.id, [...(taskById(sel.id).blocked_by || []), Number(b.dataset.dep)]);
+    else if (b.classList.contains("add-person")) setPeople(sel.id, [...(taskById(sel.id).people || []), b.dataset.person]);
+    else if (b.classList.contains("del-person")) {
+      const gone = b.closest("[data-person]").dataset.person;
+      setPeople(sel.id, taskById(sel.id).people.filter((id) => id !== gone));
+    }
     else if (b.classList.contains("del-dep")) {
       const gone = Number(b.closest("[data-dep]").dataset.dep);
       setBlockers(sel.id, taskById(sel.id).blocked_by.filter((id) => id !== gone));
@@ -2768,7 +2957,7 @@ function bindDetail() {
     else if (b.classList.contains("reset-spent")) { $("#detail").dataset.key = ""; await patchTask(sel.id, { spent: 0 }); }
     else if (b.classList.contains("start-timer")) openTimer(sel.id);
     else if (b.classList.contains("update-template")) saveAsTemplate(sel.id, true);
-    else if (b.classList.contains("clear-remind")) { $("#detail").dataset.key = ""; await patchTask(sel.id, { remind_at: null }); }
+    else if (b.classList.contains("clear-remind")) { $("#detail").dataset.key = ""; await patchTask(sel.id, { remind_at: null, remind_before: null }); }
     else if (b.classList.contains("add-files")) $(".file-input", el).click();
     else if (b.classList.contains("del-file")) deleteFile(sel.id, Number(b.closest("[data-file]").dataset.file));
     else if (b.classList.contains("close")) { S.selected = null; render(); }
@@ -2889,11 +3078,6 @@ async function openSettings() {
         <input type="time" class="quiet-from" value="${h(me.settings.quiet_hours.split("-")[0] || "22:00")}" aria-label="Quiet from">
         to <input type="time" class="quiet-to" value="${h(me.settings.quiet_hours.split("-")[1] || "07:00")}" aria-label="Quiet until">;
         they arrive when they end</label>
-      <form class="inline expiry-notices">
-        <label>Expiry notices, days before (0: on the day)
-          <input name="days" value="${h(me.settings.expiry_notices.join(", "))}" aria-label="Expiry notice days"></label>
-        <button>Save</button>
-      </form>
     </section>
 
     <section class="storage">
@@ -2917,6 +3101,16 @@ async function openSettings() {
       <p class="muted small">Connect the Android app to add tasks from its notification (reply in place, like
         a text message) or its <b>Add task</b> Quick Settings tile, without leaving the app you're in.</p>
       <div class="device-state small">…</div>
+    </section>
+
+    <section class="api-keys">
+      <h3>Add from other apps</h3>
+      <p class="muted small">Give another app or gadget a key of its own to add tasks: an Alexa skill, Home
+        Assistant, a phone shortcut, a script. It sends the text of the task, read just like quick add.
+        A key can also be allowed to read your lists (Focus, Queue, …), to say or show what's due, and
+        to complete tasks.
+        <a href="${BASE}/help#add-api" target="_blank" rel="noopener">How</a></p>
+      <div class="api-key-state small">…</div>
     </section>
 
     <section>
@@ -2963,6 +3157,7 @@ async function openSettings() {
   if (me.is_admin) fillBackupStatus();
   fillAppVersion();
   fillDevices();
+  fillApiKeys();
   fillPushState();
   fillStorage();
 }
@@ -3068,6 +3263,7 @@ async function fillBackupStatus() {
 
 async function fillCalendarChoice() {
   const sel = $("#dialog .g-calendar");
+  if (!sel) return;  // (Google sign-in since turned off on the server)
   const g = S.data.google;
   let cals;
   try { cals = await api("GET", "/google/calendars"); } catch { sel.innerHTML = "<option>Couldn't load calendars</option>"; return; }
@@ -3086,7 +3282,8 @@ function googleSection() {
   } else if (!g.connected) {
     body = `<p class="muted small">Puts tasks that have a start or due date on a Google calendar of your
       choice and keeps the two in step: move, rename or delete a task's event there and the task follows.
-      Your calendars' events show in Focus and in a Calendar list.</p>
+      Your calendars' events show in Focus and in a Calendar list. Your contacts (read only) can be named
+      in tasks, with @Mom, to call, text, email or find them from there.</p>
       <button class="primary g-connect">Connect Google Calendar</button>`;
   } else {
     const where = !g.calendar_chosen ? ""
@@ -3104,8 +3301,14 @@ function googleSection() {
       ${g.calendar_chosen ? "" : '<p class="error small">Choose a calendar to start syncing your tasks.</p>'}
       <p class="muted small">${where} Syncs every minute and shortly after each change. Deleting a task's
         event in Google moves the task to the Trash.</p>
+      <p class="muted small">${g.contacts
+        ? `Contacts: ${S.data.contacts.length} copied from Google, read only (refreshed every hour, and
+           by Sync now), to name in tasks with @: @Mom. Disconnecting deletes the copy.`
+        : "To name your Google Contacts in tasks (@Mom), click Reconnect and tick the box for Google Contacts."}</p>
+      ${g.contacts_error ? `<p class="error small">${h(g.contacts_error)}</p>` : ""}
       <div class="inline">
-        ${g.error?.includes("Reconnect") ? '<button class="primary g-connect">Reconnect</button>' : ""}
+        ${g.error?.includes("Reconnect") || !g.contacts || g.contacts_error?.includes("Reconnect")
+          ? '<button class="primary g-connect">Reconnect</button>' : ""}
         <button class="g-sync">Sync now</button>
         <button class="link danger g-disconnect">Disconnect</button>
       </div>`;
@@ -3121,13 +3324,7 @@ function bindSettings() {
     if (f.method === "dialog") return;
     e.preventDefault();
     const data = Object.fromEntries(new FormData(f));
-    if (f.classList.contains("expiry-notices")) {
-      const days = data.days.split(/[,\s]+/).filter(Boolean).map(Number);
-      if (days.some((d) => !Number.isInteger(d) || d < 0)) return toast("Use whole numbers of days, e.g. 90, 30, 7, 0.");
-      S.data.user.settings = await api("PATCH", "/me/settings", { expiry_notices: days });
-      f.days.value = S.data.user.settings.expiry_notices.join(", ");
-      toast("Expiry notices saved.");
-    } else if (f.classList.contains("defer-opts")) {
+    if (f.classList.contains("defer-opts")) {
       const opts = data.defer.split(",").map((s) => s.trim()).filter(Boolean);
       S.data.user.settings = await api("PATCH", "/me/settings", { defer_options: opts });
       f.defer.value = S.data.user.settings.defer_options.join(", ");
@@ -3284,15 +3481,19 @@ function bangWords() {
 function updateSuggest() {
   const input = $("#quick-add-input");
   const before = input.value.slice(0, input.selectionStart);
-  const m = /(^|\s)([!#+])([^\s!#+]*)$/.exec(before);
+  const m = /(^|\s)([!#+@])([^\s!#+@]*)$/.exec(before);
   suggest.items = [];
   if (m && input.selectionStart === input.selectionEnd) {
     const [, , sigil, typed] = m;
     const pool = sigil === "!" ? bangWords()
       : sigil === "+" ? S.data.areas.map((a) => [a.name.replace(/\s+/g, ""), "area"])
+      : sigil === "@" ? (S.data.contacts || []).flatMap((c) => [c.name, ...c.nicknames].map((name) =>
+        [name.replace(/\s+/g, ""), name === c.name ? "contact" : c.name, name]))
       : S.data.tags.map((t) => [t.name, "tag"]);
+    // (A contact also comes up by a later word of its name: @smi for Bob Smith.)
+    const fits = (w, full = w) => [w, ...full.split(/\s+/).slice(1)].some((x) => x.toLowerCase().startsWith(typed.toLowerCase()));
     suggest.items = pool
-      .filter(([w]) => w.toLowerCase().startsWith(typed.toLowerCase()) && w !== typed)
+      .filter(([w, , full]) => fits(w, full) && w !== typed)
       .slice(0, 8)
       .map(([w, hint]) => ({ text: sigil + w, hint }));
     suggest.start = before.length - typed.length - 1;
@@ -3907,8 +4108,7 @@ function bind() {
       e.preventDefault();
       // On Links, N adds a link; other lists without a quick-add bar hand off to the Inbox.
       if (S.view === "links") return $("#link-add")?.elements.url.focus();
-      if ($("#quick-add").hidden) setView("inbox");
-      $("#quick-add-input").focus();
+      focusQuickAdd();
     }
     else if (e.key === "/") { e.preventDefault(); $("#search").focus(); }
     else if (e.key === "?") { e.preventDefault(); location.href = BASE + "/help"; }
@@ -3990,9 +4190,9 @@ async function fillDevices() {
   const el = $(".device-state");
   if (!el) return;
   let list = [];
-  try { list = await api("GET", "/devices", undefined, { quiet: true }); } catch {}
+  try { list = (await api("GET", "/devices", undefined, { quiet: true })).filter((d) => d.kind === "phone"); } catch {}
   const mine = runningAppVersion();
-  const when = (at) => at ? fmtDate(at.slice(0, 10)).replace(/^(Today|Yesterday)$/, (w) => w.toLowerCase()) : "never";
+  const when = (at) => at ? fmtDate(utcToLocalInput(at).slice(0, 10)).replace(/^(Today|Yesterday)$/, (w) => w.toLowerCase()) : "never";
   el.innerHTML = `${list.length ? `<ul class="device-list">${list.map((d) => `<li data-device="${d.id}">
       ${h(d.name)}: connected ${h(when(d.created_at))}, last used ${h(when(d.used_at))}
       <button type="button" class="link disconnect">Disconnect</button></li>`).join("")}</ul>` : ""}
@@ -4009,6 +4209,47 @@ async function fillDevices() {
     if (!confirm("Disconnect that phone? Its notification and tile stop adding tasks until it's connected again.")) return;
     await api("DELETE", `/devices/${b.closest("[data-device]").dataset.device}`);
     fillDevices();
+  });
+}
+
+// Settings → Add from other apps: keys for POST /api/add (docs/api.md). A new key is shown
+// once, here; only its hash is kept.
+async function fillApiKeys(made) {
+  const el = $(".api-key-state");
+  if (!el) return;
+  let list = [];
+  try { list = (await api("GET", "/devices", undefined, { quiet: true })).filter((d) => d.kind === "api"); } catch {}
+  const when = (at) => at ? fmtDate(utcToLocalInput(at).slice(0, 10)).replace(/^(Today|Yesterday)$/, (w) => w.toLowerCase()) : "never";
+  const url = new URL(BASE + "/api/add", location.href).href;
+  el.innerHTML = `${list.length ? `<ul class="device-list">${list.map((d) => `<li data-device="${d.id}">
+      ${h(d.name)} (${["adds", d.can_read && "reads", d.can_complete && "completes"].filter(Boolean).join(", ")}): made ${h(when(d.created_at))}, last used ${h(when(d.used_at))}
+      <button type="button" class="link disconnect">Revoke</button></li>`).join("")}</ul>` : ""}
+    ${made ? `<div class="new-key"><p>The key for <b>${h(made.name)}</b>. Copy it now: it isn't shown again.</p>
+      <input readonly class="key-value" value="${h(made.key)}" aria-label="New key">
+      <p class="muted">Send tasks to <code>${h(url)}</code> with the header
+        <code>Authorization: Bearer</code> and the key. Try it:</p>
+      <pre class="key-example">curl -d "Buy milk tomorrow #errand" -H "Authorization: Bearer ${h(made.key)}" ${h(url)}</pre>
+      ${made.can_read ? `<p class="muted">And read a list (focus, queue, inbox, soon, later, someday, waiting, scheduled):</p>
+      <pre class="key-example">curl -H "Authorization: Bearer ${h(made.key)}" ${h(url.replace(/add$/, "read/focus"))}</pre>` : ""}
+      ${made.can_complete ? `<p class="muted">And complete a task (by what it's called, or its id):</p>
+      <pre class="key-example">curl -d "buy milk" -H "Authorization: Bearer ${h(made.key)}" ${h(url.replace(/add$/, "complete"))}</pre>` : ""}</div>` : ""}
+    <form class="new-api-key"><div class="inline"><input name="name" placeholder="What it's for (e.g. Alexa)" maxlength="100" required>
+      <button>Make a key</button></div>
+      <label class="check"><input type="checkbox" name="can_read"> Can also read my lists (for “what's due today?”)</label>
+      <label class="check"><input type="checkbox" name="can_complete"> Can also complete tasks (for “I finished …”)</label></form>`;
+  $(".key-value", el)?.select();
+  $(".new-api-key", el).addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = e.target.elements.name.value.trim();
+    const can_read = e.target.elements.can_read.checked;
+    const can_complete = e.target.elements.can_complete.checked;
+    const { key } = await api("POST", "/devices", { name, kind: "api", can_read, can_complete });
+    fillApiKeys({ name, key, can_read, can_complete });
+  });
+  for (const b of el.querySelectorAll(".disconnect")) b.addEventListener("click", async () => {
+    if (!confirm("Revoke that key? Whatever uses it can't add tasks any more.")) return;
+    await api("DELETE", `/devices/${b.closest("[data-device]").dataset.device}`);
+    fillApiKeys();
   });
 }
 
@@ -4071,6 +4312,11 @@ async function checkAppUpdate(params) {
   document.body.append(bar);
 }
 
+function focusQuickAdd() {
+  if ($("#quick-add").hidden) setView("inbox");
+  $("#quick-add-input").focus();
+}
+
 async function afterLoad() {
   if (timer) { if (timer.runFrom) keepAwake(); renderTimer(); }
   // Opened from a notification (?task=) or the Share menu (?shared=); or, with the app
@@ -4082,6 +4328,11 @@ async function afterLoad() {
     history.replaceState(null, "", location.pathname);
     if (params.get("shared")) toast("Added to your Inbox.");
     openTask(opened);
+  }
+  // The installed app's New task shortcut (the manifest's shortcuts).
+  if (params.has("new")) {
+    history.replaceState(null, "", location.pathname);
+    focusQuickAdd();
   }
   // The Android app asking to be connected (its notification or tile, before it has a key).
   if (params.has("connect")) {

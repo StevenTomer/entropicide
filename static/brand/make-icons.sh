@@ -3,6 +3,7 @@
 #   logo.svg, logo-name.svg, symbol.svg, favicon.svg   adapt to dark mode (navy turns light)
 #   icon-*.png, maskable, apple-touch    the symbol on white, for home screens and the Android app
 #   badge-96.png, monochrome-512.png     white silhouettes, for Android's status bar
+#   relief.svg                           the symbol in bas-relief, the app's background
 # Needs inkscape and ImageMagick. Run it after changing the SVGs: ./static/brand/make-icons.sh
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -36,6 +37,30 @@ open(out, "w").write(re.sub(r'viewBox="[^"]+"', f'viewBox="{crop}"', svg, count=
 PY
 adapt symbol.svg "$OUT/symbol.svg"
 adapt icon-small.svg "$OUT/favicon.svg"
+
+# The app's background: the symbol in bas-relief, in greys only (the page fades it). Each part is
+# raised on its own, lit from the top left; the gold faces are the lit ones, the blue ones shaded.
+python3 - symbol.svg "$OUT/relief.svg" <<'PY'
+import re, sys
+svg = open(sys.argv[1]).read()
+body = re.search(r"<g>(.*)</g>", svg, re.S)[1]
+body = re.sub(r'<path d="M99 5 L99 193"[^>]*/>', "", body)  # (the faint centre line)
+grey = {"#F5AB13": "#d4d4d4", "#D88A00": "#a8a8a8", "#45A9D8": "#9c9c9c",
+        "#0866A8": "#7c7c7c", "#09254A": "#8c8c8c"}
+body = re.sub(r'(fill|stroke)="(#[0-9A-Fa-f]{6})"',
+              lambda m: f'{m[1]}="{grey[m[2].upper()]}" filter="url(#r)"', body)
+relief = """<filter id="r" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+<feGaussianBlur in="SourceAlpha" stdDeviation=".5" result="b"/>
+<feOffset in="b" dx=".8" dy=".8" result="d"/><feOffset in="b" dx="-.8" dy="-.8" result="u"/>
+<feComposite in="b" in2="d" operator="arithmetic" k2="1" k3="-1" result="hi"/>
+<feComposite in="b" in2="u" operator="arithmetic" k2="1" k3="-1" result="lo"/>
+<feFlood flood-color="#fff" flood-opacity=".8"/><feComposite in2="hi" operator="in" result="hi"/>
+<feFlood flood-color="#222" flood-opacity=".8"/><feComposite in2="lo" operator="in" result="lo"/>
+<feMerge><feMergeNode in="SourceGraphic"/><feMergeNode in="lo"/><feMergeNode in="hi"/></feMerge>
+</filter>"""
+open(sys.argv[2], "w").write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">'
+                             f'<defs>{relief}</defs><g>{body}</g></svg>\n')
+PY
 
 render() { inkscape "$1" -o "$2" -w "$3" -h "$3" >/dev/null 2>&1; }
 render symbol.svg "$TMP/symbol.png" 1024

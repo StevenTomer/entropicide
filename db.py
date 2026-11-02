@@ -142,7 +142,22 @@ CREATE TABLE IF NOT EXISTS google_accounts (
     events_fetched REAL NOT NULL DEFAULT 0,
     last_sync      TEXT,
     last_error     TEXT,
-    connected_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    connected_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    -- what Google allowed (space-separated scopes, from its latest token); contacts are read
+    -- only if Contacts is among them, every hour or so
+    scopes           TEXT,
+    contacts_fetched REAL NOT NULL DEFAULT 0,
+    contacts_error   TEXT
+);
+
+-- A read-only copy of the user's Google Contacts, replaced on each refresh and deleted on
+-- Disconnect. Tasks name them in tasks.people.
+CREATE TABLE IF NOT EXISTS contacts (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    id      TEXT NOT NULL,  -- Google's resource name, people/c…
+    name    TEXT NOT NULL,
+    info    TEXT NOT NULL,  -- JSON: nicknames, phones, emails, addresses
+    PRIMARY KEY (user_id, id)
 );
 
 -- Events whose tasks were deleted outright; sync removes them from Google.
@@ -215,6 +230,12 @@ CREATE TABLE IF NOT EXISTS devices (
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     key_hash   TEXT NOT NULL UNIQUE,
     name       TEXT NOT NULL DEFAULT '',
+    -- phone: the Android app; api: a key made in Settings for anything else (POST /api/add)
+    kind       TEXT NOT NULL DEFAULT 'phone',
+    -- an api key that may also read the user's lists (GET /api/read/…), and complete tasks
+    -- (POST /api/complete)
+    can_read     INTEGER NOT NULL DEFAULT 0,
+    can_complete INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     used_at    TEXT
 );
@@ -258,9 +279,9 @@ DEFAULT_ON_MISS = {"daily": "replace", "weekdays": "replace", "weekly": "replace
 
 
 def default_on_miss(repeat):
-    """Frequent repeats replace a missed copy; monthly and yearly ones (and every N months
-    or years) keep it."""
-    if repeat and repeat.startswith("every:") and repeat[-1] in "my":
+    """Frequent repeats replace a missed copy; monthly and yearly ones (every N months or
+    years, and the nth weekday of the month, too) keep it."""
+    if repeat and ((repeat.startswith("every:") and repeat[-1] in "my") or repeat.startswith("nth:")):
         return "keep"
     return DEFAULT_ON_MISS.get(repeat, "replace")
 
@@ -301,12 +322,18 @@ def migrate(conn):
         if name not in area_cols:
             conn.execute(f"ALTER TABLE areas ADD COLUMN {name} TEXT")
     google_cols = {r["name"] for r in conn.execute("PRAGMA table_info(google_accounts)")}
-    for name in ("calendar_name TEXT", "owns_calendar INTEGER"):
+    for name in ("calendar_name TEXT", "owns_calendar INTEGER", "scopes TEXT",
+                 "contacts_fetched REAL NOT NULL DEFAULT 0", "contacts_error TEXT"):
         if name.split()[0] not in google_cols:
             conn.execute(f"ALTER TABLE google_accounts ADD COLUMN {name}")
     # Connections from before the calendar could be chosen used the app's own.
     conn.execute("UPDATE google_accounts SET owns_calendar = 1, calendar_name = 'Todo' "
                  "WHERE calendar_id IS NOT NULL AND owns_calendar IS NULL")
+    device_cols = {r["name"] for r in conn.execute("PRAGMA table_info(devices)")}
+    for name, ddl in (("kind", "TEXT NOT NULL DEFAULT 'phone'"), ("can_read", "INTEGER NOT NULL DEFAULT 0"),
+                      ("can_complete", "INTEGER NOT NULL DEFAULT 0")):
+        if name not in device_cols:
+            conn.execute(f"ALTER TABLE devices ADD COLUMN {name} {ddl}")
     user_cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
     if "settings" not in user_cols:
         conn.execute("ALTER TABLE users ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'")
@@ -329,14 +356,18 @@ def migrate(conn):
                       ("remind_plan", "TEXT"),
                       ("reminded_at", "TEXT"),
                       ("start_notified", "TEXT"),
-                      # When the thing it's about expires (a passport, a warranty), and the
-                      # notice last sent about it ("date:days before").
-                      ("expires_on", "TEXT"),
-                      ("expiry_notified", "TEXT"),
+                      # A reminder set as days before the due date (remind_at follows it); none
+                      # for one set at a time.
+                      ("remind_before", "INTEGER"),
+                      # The contacts it's about: a JSON list of contacts.id.
+                      ("people", "TEXT NOT NULL DEFAULT '[]'"),
                       # Seconds spent on it with the focus timer.
                       ("spent", "INTEGER NOT NULL DEFAULT 0")):
         if name not in cols:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
+    for name in ("expires_on", "expiry_notified"):  # (expiry dates, since removed)
+        if name in cols:
+            conn.execute(f"ALTER TABLE tasks DROP COLUMN {name}")
     if "repeat" in cols:
         # Before series existed, each open task carried its own repeat setting.
         for t in conn.execute("SELECT * FROM tasks WHERE repeat IS NOT NULL "

@@ -16,8 +16,9 @@ In brief:
   (e.g. register the van) or *replace* it, logged as Missed (e.g. load the dishwasher).
   Editing the newest copy's dates changes the schedule from then on; editing an older
   copy moves only that one. Set Repeat to Never, or trash every copy, to stop it.
-  Repeat can be daily, weekdays, weekly, monthly, yearly, or every N days, weeks, months or years
-  (quick add: `every 6 weeks`, `every 3 months`, `every monday`).
+  Repeat can be daily, weekdays, weekly, monthly, yearly, on certain days of the week, or every
+  N days, weeks, months or years, or a weekday of the month (quick add: `every 6 weeks`,
+  `every 3 months`, `every monday`, `every mon, wed and fri`, `every last friday`).
   Adding a task while viewing Recurring makes it repeat weekly from tomorrow; the editor
   opens on Repeat so you can change that.
 - **Projects** can be *sequential*, so only their first action shows in the Queue.
@@ -64,10 +65,16 @@ In brief:
   task follows; delete it and the task goes to the Trash. On the app's own calendar, events you
   add become tasks; on a shared calendar its other events are left alone. Events from your
   calendars show in **Focus** (today) and the **Calendar** (next two weeks; the calendar icon in the toolbar).
+- **People** (with Google connected): a read-only copy of your Google Contacts, refreshed hourly
+  and deleted on Disconnect. `@Mom` in quick add (suggested as you type; `@BobSmith` for a full
+  name) or *People* in the editor names contacts on a task; the row shows the name and the
+  editor their phone numbers (call, text), email addresses and addresses (map).
 - **Text size** (Settings → Text size, 75–200%) is kept per device, so a tablet can use larger
   text than a laptop. The whole layout scales with it.
 - **Phone app** (Settings → Phone app, or `/install` on your site): an Android download (if the
   site has one: see [android.md](android.md)), or *Install* / *Add to Home Screen* from the browser.
+- **New task shortcut:** right-click the installed app's taskbar or dock icon (press and hold on
+  Android) → *New task* opens it ready to type one (`?new`, the manifest's `shortcuts`).
 - **Add from the phone** (Android app): a notification you reply to in place, and a Quick Settings
   tile, add tasks without leaving the app you're in; what you type is read like quick add, and it
   waits on the phone when there's no signal.
@@ -80,6 +87,10 @@ In brief:
   1 hour, tonight, tomorrow), timed starts, and a morning summary, as Web Push notifications
   with ✓ Done and Snooze buttons, and quiet hours that hold them overnight. The server's VAPID key is `data/vapid_private.pem` (made on first use;
   if it's lost, devices must turn notifications on again).
+- **Add from other apps** (Settings → Add from other apps): a key per app; `POST /api/add` with
+  the task's text, read like quick add; a key allowed to read gets `GET /api/read/focus` (or any
+  list) with a summary to say, and one allowed to complete gets `POST /api/complete` ("call the
+  dentist" finds *Call dentist*) ([api.md](api.md): curl, Alexa, Home Assistant, Shortcuts).
 - **Share menu:** the installed app (Android) takes shared pages, text, photos and files as new
   Inbox tasks (`/share`, the manifest's `share_target`).
 - **Repeating tasks** start each copy with its checklist unticked, and can carry their
@@ -93,8 +104,8 @@ In brief:
   including the right-click actions on the selected tasks.
 - **Repeat from completion:** a repeat can count from when a copy is completed instead of the
   calendar; the next copy is made then.
-- **Expiries:** an *Expires* date on a task (passport, insurance…), an Expiries list, and notices
-  (default 90, 30, 7 days before and on the day).
+- **Reminders before the due date:** *Remind me* can be a time, or a day to three months
+  before the due date; either way it moves when the due date does.
 - **Focus timer:** one task full screen with a countdown; the time is added to the task.
 - **Keys:** `↑`/`↓` or `j`/`k` move through tasks, `h`/`l` (`←`/`→`) to the lists on the left and
   back (there `j`/`k` change the list), `Enter` opens, `x` completes, `s` stars, `t` focus timer, `n` new task, `/` search, `Esc` clear the selection or close the editor, `Ctrl/⌘-A` select all, `+`/`-` raise/lower priority.

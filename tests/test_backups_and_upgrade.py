@@ -53,3 +53,14 @@ def test_old_and_new_header(user_client):
     assert client.post("/api/tasks", json={"title": "a"}, headers={"X-Requested-With": "todo"}).status_code == 201
     assert client.post("/api/tasks", json={"title": "b"}, headers=H).status_code == 201
     assert client.post("/api/tasks", json={"title": "c"}).status_code == 403
+
+
+def test_expiry_columns_dropped(tmp_path):
+    path = str(tmp_path / "old.db")
+    entropicide.db.init_db(path)
+    conn = entropicide.db.connect(path)
+    conn.execute("ALTER TABLE tasks ADD COLUMN expires_on TEXT")
+    conn.execute("ALTER TABLE tasks ADD COLUMN expiry_notified TEXT")
+    entropicide.db.migrate(conn)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
+    assert "expires_on" not in cols and "remind_before" in cols

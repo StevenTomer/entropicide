@@ -1,5 +1,6 @@
 import calendar
 import csv
+import difflib
 import hashlib
 import io
 import json
@@ -37,6 +38,35 @@ PROJECT_STATES = {"active", "someday", "later", "done"}
 REPEATS = set(db.DEFAULT_ON_MISS)
 # every N days (every:9), weeks (every:2w), months (every:3m) or years (every:1y); N up to 999
 EVERY_RE = re.compile(r"every:([1-9][0-9]{0,2})([wmy]?)")
+# on certain days of the week, Monday 0 to Sunday 6, in order: days:0,2,4 is Mon, Wed and Fri
+DAYS_RE = re.compile(r"days:[0-6](,[0-6]){0,6}")
+
+
+def week_days(repeat):
+    """The days of the week of a days:… repeat (Monday 0), or None for other repeats."""
+    if not DAYS_RE.fullmatch(str(repeat or "")):
+        return None
+    days = [int(d) for d in repeat[5:].split(",")]
+    return days if days == sorted(set(days)) else None
+
+
+# monthly, on the nth (1 to 4, or -1 for the last) given day of the week (Monday 0):
+# nth:1:0 is the first Monday of each month, nth:-1:4 the last Friday
+NTH_RE = re.compile(r"nth:(-1|[1-4]):([0-6])")
+
+
+def valid_repeat(repeat):
+    return (repeat in REPEATS | {None} or bool(EVERY_RE.fullmatch(str(repeat)))
+            or week_days(repeat) is not None or bool(NTH_RE.fullmatch(str(repeat))))
+
+
+def nth_weekday(year, month, nth, weekday):
+    """The nth (or, for -1, the last) weekday (Monday 0) of a month."""
+    if nth > 0:
+        first = date(year, month, 1)
+        return first + timedelta(days=(weekday - first.weekday()) % 7 + 7 * (nth - 1))
+    last = date(year, month, calendar.monthrange(year, month)[1])
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
 ON_MISS = {"keep", "replace"}
 ENERGIES = {"low", "medium", "high"}
 PRIORITY_MAX = 99
@@ -51,9 +81,10 @@ DEFAULT_SETTINGS = {"defer_options": ["1h", "2h", "6h", "24h", "3d", "1w"], "tim
                     "notify_starts": True, "digest_time": "08:00",
                     # No notifications in these hours ("22:00-07:00"; "" for none): they're
                     # sent when they end.
-                    "quiet_hours": "",
-                    # Days before an expiry date to send a notice (0: on the day).
-                    "expiry_notices": [90, 30, 7, 0]}
+                    "quiet_hours": ""}
+# Reminders before a due date: the days a task can choose, and the time of day they come.
+REMIND_BEFORE_DAYS = (1, 2, 3, 7, 14, 30, 60, 90)
+REMIND_BEFORE_TIME = "09:00"
 STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$")
 # Checked checklist lines in notes ("[x] ..."), unchecked on each new repeat.
 UNCHECK_RE = re.compile(r"^(\s*(?:[-*]\s*)?)\[[xX]\]", re.MULTILINE)
@@ -176,10 +207,14 @@ def load_user():
 REQUESTED_WITH = {"entropicide", "todo"}
 
 
+KEY_ONLY = {"/api/add", "/api/complete"}
+
+
 @app.before_request
 def csrf_check():
-    # API writes must carry a custom header, which a cross-site form can't send.
-    if (request.path.startswith("/api/") and request.method != "GET"
+    # API writes must carry a custom header, which a cross-site form can't send. (Not
+    # /api/add or /api/complete, which go by their key alone, never the signed-in user's cookie.)
+    if (request.path.startswith("/api/") and request.method != "GET" and request.path not in KEY_ONLY
             and request.headers.get("X-Requested-With") not in REQUESTED_WITH):
         abort(403)
 
@@ -276,6 +311,9 @@ def web_manifest():
         share_target={"action": url_for("share"), "method": "POST", "enctype": "multipart/form-data",
                       "params": {"title": "title", "text": "text", "url": "url",
                                  "files": [{"name": "files", "accept": ["*/*"]}]}},
+        # Right-click the taskbar or dock icon (long-press on Android) → New task (app.js afterLoad).
+        shortcuts=[{"name": "New task", "url": url_for("index", new=1),
+                    "icons": [{"src": icon("icon-192.png"), "sizes": "192x192", "type": "image/png"}]}],
         id=home, start_url=home, scope=home, name=APP_NAME, short_name=APP_NAME,
         description="From chaos to clarity: tasks, GTD style", display="standalone",
         background_color="#ffffff", theme_color="#0866a8",
@@ -465,6 +503,7 @@ def task_dict(row, tags, series):
     d["focus"] = bool(d["focus"])
     d["missed"] = bool(d["missed"])
     d["tags"] = tags.get(row["id"], [])
+    d["people"] = json.loads(d["people"])
     s = series.get(row["series_id"])
     d["repeat"] = s["repeat"] if s else None
     d["on_miss"] = s["on_miss"] if s else None
@@ -623,6 +662,9 @@ def check_ref(table, value):
     return int(value)
 
 
+PERSON_RE = re.compile(r"people/\w{1,100}")
+
+
 def task_fields(data):
     """Validate the editable task fields present in data."""
     out = {}
@@ -640,8 +682,12 @@ def task_fields(data):
             out[key] = value
         elif key == "focus":
             out[key] = 1 if value else 0
-        elif key in ("due_date", "start_date", "expires_on"):
+        elif key in ("due_date", "start_date"):
             out[key] = clean_date(value)
+        elif key == "remind_before":
+            if value not in (None, "") and int(value) not in REMIND_BEFORE_DAYS:
+                raise ValueError("remind_before must be one of " + ", ".join(map(str, REMIND_BEFORE_DAYS)))
+            out[key] = int(value) if value not in (None, "") else None
         elif key == "start_time":
             if value not in (None, "") and not TIME_RE.match(str(value)):
                 raise ValueError("times must be HH:MM")
@@ -665,6 +711,12 @@ def task_fields(data):
             out[key] = float(value)
         elif key == "spent":
             out[key] = max(0, min(10_000_000, int(value or 0)))
+        elif key == "people":
+            # Contacts (their ids); unchecked against the copy, which may be refreshing or gone.
+            if not isinstance(value, list) or len(value) > 20 or not all(
+                    isinstance(x, str) and PERSON_RE.fullmatch(x) for x in value):
+                raise ValueError("people must be a list of contact ids")
+            out[key] = json.dumps(list(dict.fromkeys(value)))
         elif key == "remind_at":
             # When to send a reminder, in UTC ("YYYY-MM-DD HH:MM:SS"), or none.
             if value in (None, ""):
@@ -700,6 +752,18 @@ def shift(d, repeat, n):
         return add_months(d, n)
     if repeat == "yearly":
         return add_months(d, 12 * n)
+    if nth := NTH_RE.fullmatch(repeat):
+        if n == 0:
+            return d
+        month = add_months(d.replace(day=1), n)
+        return nth_weekday(month.year, month.month, int(nth[1]), int(nth[2]))
+    if days := week_days(repeat):
+        step = timedelta(days=1 if n >= 0 else -1)
+        for _ in range(abs(n)):
+            d += step
+            while d.weekday() not in days:
+                d += step
+        return d
     for _ in range(n):  # weekdays
         d += timedelta(days=1)
         while d.weekday() >= 5:
@@ -778,6 +842,8 @@ def end_series(series_id, today, keep_id=None):
 def carried_reminder(template, start, due):
     """A later copy's reminder: the template copy's (as set, not snoozed), at the same
     distance from its start (or due) date, in the user's local time. None if there's none."""
+    if template["remind_before"] and due:
+        return remind_before_due(due, template["remind_before"])
     plan = template["remind_plan"]
     anchor, new_anchor = template["start_date"] or template["due_date"], start or due
     if not plan or not anchor or not new_anchor:
@@ -788,19 +854,63 @@ def carried_reminder(template, start, due):
     return utc_stamp((datetime.fromisoformat(new_anchor) + offset).replace(tzinfo=tz))
 
 
+def remind_before_due(due, days):
+    """The UTC stamp for a reminder days before the due date, at REMIND_BEFORE_TIME local time."""
+    day = date.fromisoformat(due) - timedelta(days=days)
+    at = datetime.fromisoformat(f"{day.isoformat()}T{REMIND_BEFORE_TIME}")
+    return utc_stamp(at.replace(tzinfo=ZoneInfo(user_tz(g.user))))
+
+
+def shift_stamp(stamp, days):
+    """A UTC stamp moved by whole days, keeping its local time of day."""
+    tz = ZoneInfo(user_tz(g.user))
+    local = datetime.fromisoformat(stamp.replace(" ", "T")).replace(tzinfo=ZoneInfo("UTC")).astimezone(tz)
+    return utc_stamp((local.replace(tzinfo=None) + timedelta(days=days)).replace(tzinfo=tz))
+
+
+NO_TASK = {"remind_before": None, "due_date": None, "remind_plan": None, "remind_at": None}
+
+
+def reminder_follows(task, fields):
+    """The reminder's part of a change to a task (NO_TASK for a new one): one set as days
+    before the due date is worked out from it, and one set at a time moves with the due date,
+    by as many days."""
+    if "remind_at" in fields and "remind_before" not in fields:
+        fields["remind_before"] = None  # set at a time now
+    before = fields.get("remind_before", task["remind_before"])
+    old_due, due = task["due_date"], fields.get("due_date", task["due_date"])
+    if before and ("remind_before" in fields or "due_date" in fields):
+        if not due and "remind_before" in fields:
+            raise ValueError("a reminder before the due date needs a due date")
+        if due:
+            at = remind_before_due(due, before)
+            fields.update(remind_at=at, remind_plan=at, reminded_at=None)
+        else:
+            fields["remind_before"] = None  # the due date is gone: it stays at its time
+    elif ("due_date" in fields and "remind_at" not in fields and task["remind_plan"]
+          and old_due and due and due != old_due):
+        days = (date.fromisoformat(due) - date.fromisoformat(old_due)).days
+        fields["remind_plan"] = shift_stamp(task["remind_plan"], days)
+        if task["remind_at"]:
+            fields["remind_at"] = shift_stamp(task["remind_at"], days)
+            if fields["remind_at"] > utcnow():
+                fields["reminded_at"] = None  # (moved to the future: it comes again)
+
+
 def copy_occurrence(s, template, index, start, due, today):
     """A series' next copy, made from its newest one (so edits carry forward), with fresh
     checklists; returns its id."""
     conn = db.get_db()
     cur = conn.execute(
         "INSERT INTO tasks (user_id, project_id, area_id, title, notes, state, focus, "
-        "due_date, start_date, waiting_for, energy, minutes, priority, expires_on, series_id, "
-        "series_index, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "due_date, start_date, waiting_for, energy, minutes, priority, remind_before, people, "
+        "series_id, series_index, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (s["user_id"], template["project_id"], template["area_id"], template["title"],
          UNCHECK_RE.sub(r"\1[ ]", template["notes"]),
          "scheduled" if start and start > today else "next", template["focus"],
          due, start, template["waiting_for"], template["energy"], template["minutes"],
-         template["priority"], template["expires_on"], s["id"], index, template["position"]))
+         template["priority"], template["remind_before"], template["people"], s["id"], index,
+         template["position"]))
     conn.execute("INSERT INTO task_tags SELECT ?, tag_id FROM task_tags WHERE task_id = ?",
                  (cur.lastrowid, template["id"]))
     if remind := carried_reminder(template, start, due):
@@ -888,7 +998,7 @@ def run_series(uid, today):
 def repeat_args(data):
     repeat = data.get("repeat") or None
     on_miss = data.get("on_miss") or None
-    if repeat not in REPEATS | {None} and not EVERY_RE.fullmatch(str(repeat)):
+    if not valid_repeat(repeat):
         raise ValueError("bad repeat")
     if on_miss not in ON_MISS | {None}:
         raise ValueError("bad on_miss")
@@ -897,11 +1007,9 @@ def repeat_args(data):
 
 # --- data API -------------------------------------------------------------
 
-@app.get("/api/data")
-@login_required
-def all_data():
-    uid = g.user["id"]
-    today, now = client_now()
+def catch_up(uid, today, now):
+    """Bring the user's lists up to date (today, now: their local date and HH:MM): make due
+    repeat copies and recurring projects, and move scheduled tasks that have started to the Queue."""
     conn = db.get_db()
     # Locked so two tabs loading at once can't both create the same occurrence.
     conn.execute("BEGIN IMMEDIATE")
@@ -912,6 +1020,15 @@ def all_data():
                  "AND completed_at IS NULL AND (start_date < ? OR (start_date = ? AND "
                  "(start_time IS NULL OR start_time <= ?)))", (uid, today, today, now))
     conn.commit()
+
+
+@app.get("/api/data")
+@login_required
+def all_data():
+    uid = g.user["id"]
+    today, now = client_now()
+    conn = db.get_db()
+    catch_up(uid, today, now)
     tasks = conn.execute(
         "SELECT * FROM tasks WHERE user_id = ? AND completed_at IS NULL AND deleted_at IS NULL "
         "ORDER BY position, id", (uid,)).fetchall()
@@ -927,6 +1044,7 @@ def all_data():
     return jsonify(
         google=google_status(uid) | {"available": gcal.configured()},
         events=json.loads(acct["events_json"]) if acct else [],
+        contacts=contacts_json(uid),
         user={"id": uid, "username": g.user["username"],
               "push_devices": conn.execute("SELECT COUNT(*) FROM push_subscriptions WHERE user_id = ?",
                                            (uid,)).fetchone()[0],
@@ -957,6 +1075,7 @@ def insert_task(data, today):
     """Create a task for g.user from API-style data; returns its id."""
     data.setdefault("state", "inbox")
     fields = task_fields(data)
+    reminder_follows(NO_TASK, fields)
     repeat, on_miss = repeat_args(data)
     if "title" not in fields:
         raise ValueError("title is required")
@@ -1003,7 +1122,7 @@ def duplicate_task(task_id):
     nxt = conn.execute("SELECT MIN(position) FROM tasks WHERE user_id = ? AND position > ?",
                        (g.user["id"], t["position"])).fetchone()[0]
     cols = ["project_id", "area_id", "title", "notes", "state", "focus", "due_date", "start_date",
-            "start_time", "waiting_for", "energy", "minutes", "priority", "expires_on"]
+            "start_time", "waiting_for", "energy", "minutes", "priority", "people"]
     cur = conn.execute(
         f"INSERT INTO tasks (user_id, position, {', '.join(cols)}) VALUES (?, ?, {', '.join('?' * len(cols))})",
         (g.user["id"], (t["position"] + nxt) / 2 if nxt is not None else t["position"] + 1,
@@ -1050,6 +1169,7 @@ def apply_task_update(task, data, today):
     task_id = task["id"]
     was_done = task["completed_at"]
     fields = task_fields(data)
+    reminder_follows(task, fields)
     repeat, on_miss = repeat_args(data)
     conn = db.get_db()
     if "completed" in data:
@@ -1103,14 +1223,14 @@ def apply_task_update(task, data, today):
                          "AND deleted_at IS NULL AND updated_at = created_at", (s["id"], task["series_index"] + 1))
             conn.execute("UPDATE series SET latest = (SELECT MAX(series_index) FROM tasks WHERE series_id = ?) "
                          "WHERE id = ?", (s["id"], s["id"]))
-    if "remind_at" in data and task["series_id"]:
+    if ("remind_at" in data or "remind_before" in data) and task["series_id"]:
         # Later copies already made take the new reminder too (or lose it, if cleared).
         for later in conn.execute("SELECT * FROM tasks WHERE series_id = ? AND series_index > ? AND "
                                   "completed_at IS NULL AND deleted_at IS NULL",
                                   (task["series_id"], task["series_index"])).fetchall():
             remind = carried_reminder(task, later["start_date"], later["due_date"])
-            conn.execute("UPDATE tasks SET remind_at = ?, remind_plan = ?, reminded_at = NULL WHERE id = ?",
-                         (remind, remind, later["id"]))
+            conn.execute("UPDATE tasks SET remind_at = ?, remind_plan = ?, reminded_at = NULL, remind_before = ? "
+                         "WHERE id = ?", (remind, remind, task["remind_before"], later["id"]))
     if "carry_files" in data:
         conn.execute("UPDATE series SET carry_files = ? WHERE id = "
                      "(SELECT series_id FROM tasks WHERE id = ?)", (1 if data["carry_files"] else 0, task_id))
@@ -1281,7 +1401,7 @@ def template_settings(data, fields):
         fields["name"] = str(data["name"]).strip()[:200] or "Template"
     if "repeat" in data:
         repeat = data["repeat"] or None
-        if repeat not in REPEATS | {None} and not EVERY_RE.fullmatch(str(repeat)):
+        if not valid_repeat(repeat):
             raise ValueError("bad repeat")
         fields["repeat"] = repeat
     if "next_date" in data:
@@ -1483,10 +1603,12 @@ def share():
     return redirect(url_for("index", shared=task_id))
 
 
-# --- the Android app's own requests --------------------------------------------
+# --- adding tasks with a key: the Android app, and anything else -----------------
 # The app's Add task notification (reply in place, like a text message) and Quick Settings
-# tile post here directly, without Chrome or its cookies: Settings → Phone gives the app a key
-# of its own (handed over in an intent: link, so only this app can receive it).
+# tile post to /api/app/add directly, without Chrome or its cookies: Settings → Add from the
+# phone gives the app a key of its own (handed over in an intent: link, so only this app can
+# receive it). Settings → Add from other apps makes keys for anything else (an Alexa skill,
+# Home Assistant, a phone shortcut, a script), which post to /api/add; see docs/api.md.
 
 def device_hash(key):
     return hashlib.sha256(key.encode()).hexdigest()
@@ -1495,7 +1617,7 @@ def device_hash(key):
 @app.get("/api/devices")
 @login_required
 def list_devices():
-    rows = db.get_db().execute("SELECT id, name, created_at, used_at FROM devices "
+    rows = db.get_db().execute("SELECT id, name, kind, can_read, can_complete, created_at, used_at FROM devices "
                                "WHERE user_id = ? ORDER BY id", (g.user["id"],)).fetchall()
     return jsonify([dict(r) for r in rows])
 
@@ -1504,10 +1626,13 @@ def list_devices():
 @login_required
 def add_device():
     key = secrets.token_urlsafe(32)
-    name = str(body().get("name") or "Android app")[:100]
+    kind = "api" if body().get("kind") == "api" else "phone"
+    name = str(body().get("name") or "").strip()[:100] or ("Android app" if kind == "phone" else "API key")
+    can_read = int(kind == "api" and bool(body().get("can_read")))
+    can_complete = int(kind == "api" and bool(body().get("can_complete")))
     conn = db.get_db()
-    cur = conn.execute("INSERT INTO devices (user_id, key_hash, name) VALUES (?, ?, ?)",
-                       (g.user["id"], device_hash(key), name))
+    cur = conn.execute("INSERT INTO devices (user_id, key_hash, name, kind, can_read, can_complete) "
+                       "VALUES (?, ?, ?, ?, ?, ?)", (g.user["id"], device_hash(key), name, kind, can_read, can_complete))
     conn.commit()
     return jsonify(id=cur.lastrowid, key=key), 201
 
@@ -1524,7 +1649,7 @@ def delete_device(device_id):
 QUICKADD_JS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quickadd_server.js")
 
 
-def read_quick_add(text, lang):
+def read_quick_add(text, lang, now=""):
     """Quick add's fields for text typed on the phone (#tags, !lists, dates…), read by the
     browser's own code (quickadd_server.js), or None if Node.js couldn't run it."""
     areas = [dict(r) for r in db.get_db().execute(
@@ -1532,7 +1657,8 @@ def read_quick_add(text, lang):
     try:
         done = subprocess.run([shutil.which("node") or "/usr/bin/node", QUICKADD_JS],
                               input=json.dumps({"text": text, "lang": lang, "areas": areas,
-                                                "now": request.args.get("now", "")}),
+                                                "contacts": contacts_json(g.user["id"]),
+                                                "now": now}),
                               capture_output=True, text=True, timeout=10,
                               env={"TZ": user_tz(g.user), "PATH": "/usr/bin:/bin"})
         fields = json.loads(done.stdout) if done.returncode == 0 else None
@@ -1565,27 +1691,61 @@ def added_summary(task):
     return " · ".join(bits)
 
 
-@app.post("/api/app/add")
-def app_add():
-    """A task typed into the Android app's notification or tile: the first line is read
-    like quick add (#tags, !lists, dates; see read_quick_add) and any more lines are notes."""
-    info = request_info()
+def key_device():
+    """The phone or app whose key (Authorization: Bearer …) this request carries, or None;
+    sets g.user to its user."""
     key = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
     conn = db.get_db()
     device = conn.execute(
-        "SELECT d.id, d.user_id FROM devices d JOIN users u ON u.id = d.user_id "
+        "SELECT d.id, d.user_id, d.name, d.can_read, d.can_complete FROM devices d JOIN users u ON u.id = d.user_id "
         "WHERE d.key_hash = ? AND NOT u.disabled", (device_hash(key),)).fetchone() if key else None
+    if device:
+        g.user = conn.execute("SELECT * FROM users WHERE id = ?", (device["user_id"],)).fetchone()
+    return device
+
+
+def add_request():
+    """What /api/add was sent: JSON, a form, or plain text (just the task)."""
+    if request.is_json:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            abort(400)
+        return data
+    if request.mimetype == "multipart/form-data":
+        return request.form.to_dict()
+    raw = request.get_data(as_text=True)
+    if request.mimetype == "application/x-www-form-urlencoded":
+        # text=…&notes=…, or just the task as it is (what curl -d "Buy milk" sends)
+        fields = urllib.parse.parse_qs(raw, keep_blank_values=True)
+        if "text" in fields:
+            return {k: v[0] for k, v in fields.items()}
+    return {"text": raw}
+
+
+@app.post("/api/add")
+@app.post("/api/app/add")  # (the Android app's address for it)
+def app_add():
+    """Add a task with a key from Settings (the Android app's, or one made for another app):
+    Authorization: Bearer KEY, and "text" read like quick add (#tags, !lists, dates, @people;
+    see read_quick_add), its first line the task and any more lines notes. Optional: "notes",
+    "lang" (for 11/5-style dates) and "now" (when it was typed: YYYY-MM-DDTHH:MM, the user's
+    time). Answers 201 with the task's id, title and a one-line summary to show or say."""
+    info = request_info()
+    conn = db.get_db()
+    device = key_device()
     if device is None:
-        app_log("app-add", **info, result="Refused: not a connected phone")
-        return jsonify(error=f"This phone isn't connected any more. In {APP_NAME}, open Settings → "
-                             "Add from the phone, and connect it again."), 401
-    g.user = conn.execute("SELECT * FROM users WHERE id = ?", (device["user_id"],)).fetchone()
-    text = str(body().get("text", "")).strip()
+        app_log("app-add", **info, result="Refused: no key, or one that was disconnected")
+        return jsonify(error=f"Not connected any more. In {APP_NAME}, open Settings → Add from the phone "
+                             "(or Add from other apps) and connect it again."), 401
+    data = add_request()
+    text = str(data.get("text", "")).strip()
     if not text:
         return bad("Type a task first.")
     first, _, notes = text.partition("\n")
-    task = read_quick_add(first.strip(), str(body().get("lang", ""))[:20]) or {"title": first.strip()}
-    task |= {"title": task["title"][:500], "notes": notes.strip()}
+    notes = "\n\n".join(n for n in (notes.strip(), str(data.get("notes") or "").strip()) if n)
+    task = read_quick_add(first.strip(), str(data.get("lang", ""))[:20],
+                          str(data.get("now") or request.args.get("now", ""))) or {"title": first.strip()}
+    task |= {"title": task["title"][:500], "notes": notes[:20000]}
     task.setdefault("state", "inbox")
     try:
         task_id = insert_task(dict(task), client_today())
@@ -1595,8 +1755,224 @@ def app_add():
         return bad(str(e))
     conn.execute("UPDATE devices SET used_at = datetime('now') WHERE id = ?", (device["id"],))
     conn.commit()
-    app_log("app-add", **info, text=text[:300], result=f"Added task {task_id}")
+    app_log("app-add", **info, via=device["name"], text=text[:300], result=f"Added task {task_id}")
     return jsonify(id=task_id, title=task["title"], summary=added_summary(task)), 201
+
+
+# Lists another app can read with a key that may (GET /api/read/<list>), as the sidebar
+# names them; "next" is the Queue's own name.
+READ_LISTS = {"focus": "Focus", "queue": "Queue", "next": "Queue", "inbox": "Inbox", "soon": "Soon",
+              "later": "Later", "someday": "Someday", "waiting": "Waiting", "scheduled": "Scheduled"}
+
+
+@app.get("/api/read/<name>")
+def read_list(name):
+    """One of the user's lists, for another app with a key that may read (Settings → Add from
+    other apps): the tasks as the sidebar list shows them (Focus and the Queue skip blocked
+    tasks and inactive projects, highest priority first), and "summary", a sentence to show
+    or say. ?area=Name keeps to one area; ?limit=N (default 50) caps the tasks sent and
+    ?say=N (default 5) how many the summary names. See docs/api.md."""
+    device = key_device()
+    if device is None:
+        return jsonify(error=f"Not connected any more. In {APP_NAME}, open Settings → Add from other apps "
+                             "and make a new key."), 401
+    if not device["can_read"]:
+        return jsonify(error="This key can add tasks but not read them. In Settings → Add from other "
+                             "apps, make a new key with “Can also read my lists” ticked."), 403
+    if name.lower() not in READ_LISTS:
+        return jsonify(error="No such list. Choose from: " + ", ".join(sorted(set(READ_LISTS) - {"next"}))), 404
+    name = name.lower()
+    uid = g.user["id"]
+    local = datetime.now(ZoneInfo(user_tz(g.user)))
+    today = local.date().isoformat()
+    catch_up(uid, today, local.strftime("%H:%M"))
+    conn = db.get_db()
+    conn.execute("UPDATE devices SET used_at = datetime('now') WHERE id = ?", (device["id"],))
+    conn.commit()
+    tasks = tasks_json(conn.execute(
+        "SELECT * FROM tasks WHERE user_id = ? AND completed_at IS NULL AND deleted_at IS NULL "
+        "ORDER BY position, id", (uid,)).fetchall())
+    projects = {p["id"]: p for p in conn.execute(
+        "SELECT * FROM projects WHERE user_id = ? AND deleted_at IS NULL", (uid,))}
+    areas = {a["id"]: a["name"] for a in conn.execute("SELECT id, name FROM areas WHERE user_id = ?", (uid,))}
+    area_of = lambda t: projects[t["project_id"]]["area_id"] if t["project_id"] in projects else t["area_id"]  # noqa: E731
+    shown = list_tasks(name, tasks, projects, today)
+    if request.args.get("area"):
+        want = request.args["area"].strip().lower()
+        ids = [i for i, n in areas.items() if n.lower() == want]
+        if not ids:
+            return jsonify(error="No such area: " + request.args["area"]), 404
+        shown = [t for t in shown if area_of(t) == ids[0]]
+    limit = max(1, min(200, request.args.get("limit", 50, type=int)))
+    say = max(1, min(20, request.args.get("say", 5, type=int)))
+    contacts = {c["id"]: c["name"] for c in conn.execute("SELECT id, name FROM contacts WHERE user_id = ?", (uid,))}
+    out = [{"id": t["id"], "title": t["title"], "list": "Queue" if t["state"] == "next" else t["state"].capitalize(),
+            "focus": t["focus"], "priority": t["priority"], "due_date": t["due_date"],
+            "overdue": bool(t["due_date"] and t["due_date"] < today),
+            "start_date": t["start_date"], "start_time": t["start_time"],
+            "project": projects[t["project_id"]]["name"] if t["project_id"] in projects else None,
+            "area": areas.get(area_of(t)), "tags": t["tags"],
+            "people": [contacts[p] for p in t["people"] if p in contacts]} for t in shown]
+    return jsonify(list=READ_LISTS[name], count=len(out), tasks=out[:limit],
+                   summary=spoken_list(READ_LISTS[name], out, today, say))
+
+
+# Words left out when matching what was said to a task's title ("call the dentist" is "Call dentist").
+FILLER = {"the", "a", "an", "my", "to", "for", "of", "on", "about", "with", "and", "at", "in"}
+
+
+def words(text):
+    return re.findall(r"[\w']+", re.sub(r"[*_~`]+", "", text.lower()))
+
+
+@app.post("/api/complete")
+def complete_by_key():
+    """Complete a task for another app with a key that may (Settings → Add from other apps):
+    {"text": what was said} finds the open task it means, {"id": N} names one. "check": true
+    only finds it (to ask "Complete Call the dentist?" first); "undo": true (with "id") puts a
+    completed task back. Answers {"task": {id, title}, "summary": a sentence to say}, or 404
+    (nothing like it) or 409 (several: "matches", to ask which). See docs/api.md."""
+    info = request_info()
+    device = key_device()
+    if device is None:
+        return jsonify(error=f"Not connected any more. In {APP_NAME}, open Settings → Add from other apps "
+                             "and make a new key."), 401
+    if not device["can_complete"]:
+        return jsonify(error="This key can't complete tasks. In Settings → Add from other apps, make a new "
+                             "key with “Can also complete tasks” ticked."), 403
+    data = add_request()
+    uid = g.user["id"]
+    conn = db.get_db()
+    local = datetime.now(ZoneInfo(user_tz(g.user)))
+    today = local.date().isoformat()
+    catch_up(uid, today, local.strftime("%H:%M"))
+    if data.get("id") not in (None, ""):
+        try:
+            task = conn.execute("SELECT * FROM tasks WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+                                (int(data["id"]), uid)).fetchone()
+        except (TypeError, ValueError):
+            task = None
+        if task is None:
+            return jsonify(error="No such task.", summary="I couldn't find that task."), 404
+        if data.get("undo"):
+            if task["completed_at"]:
+                apply_task_update(task, {"completed": False}, today)
+                app_log("app-complete", **info, via=device["name"], result=f"Undid task {task['id']}")
+            return jsonify(task={"id": task["id"], "title": task["title"]},
+                           summary=f"OK, {said_title(task)} is back on your list.")
+        if task["completed_at"]:
+            return jsonify(task={"id": task["id"], "title": task["title"]},
+                           summary=f"{said_title(task)} was already done.")
+    else:
+        text = str(data.get("text", "")).strip()
+        if not words(text):
+            return bad("Say which task.")
+        found = match_task(uid, text, today)
+        if not found:
+            return jsonify(error="No open task matches.", summary=f"I couldn't find a task like {text}."), 404
+        if len(found) > 1:
+            names = [said_title(t) for t in found[:3]]
+            return jsonify(error="More than one task matches.",
+                           matches=[{"id": t["id"], "title": t["title"]} for t in found[:10]],
+                           summary="Which one: " + ", ".join(names[:-1]) + ", or " + names[-1] + "?"), 409
+        task = found[0]
+    if data.get("check"):
+        return jsonify(task={"id": task["id"], "title": task["title"]}, summary=f"Complete {said_title(task)}?")
+    apply_task_update(task, {"completed": True}, today)
+    conn.execute("UPDATE devices SET used_at = datetime('now') WHERE id = ?", (device["id"],))
+    conn.commit()
+    app_log("app-complete", **info, via=device["name"], text=str(data.get("text", ""))[:300],
+            result=f"Completed task {task['id']}")
+    return jsonify(task={"id": task["id"], "title": task["title"]}, summary=f"Done: {said_title(task)}.")
+
+
+def said_title(task):
+    return re.sub(r"[*_~`]+", "", task["title"]).strip()
+
+
+def match_task(uid, text, today):
+    """The open tasks text (as said aloud) most likely means, best first: one title that's
+    the same (ignoring case, punctuation and little words), else those with all its words
+    (or their starts), else the nearest by spelling. Copies of one repeating task count as one
+    (the oldest that's started), and tasks that are current (Focus, Queue, Inbox, Soon,
+    Waiting) beat ones that are scheduled or put off."""
+    rows = db.get_db().execute(
+        "SELECT * FROM tasks WHERE user_id = ? AND completed_at IS NULL AND deleted_at IS NULL "
+        "ORDER BY position, id", (uid,)).fetchall()
+    said = [w for w in words(text) if w not in FILLER] or words(text)
+    key = lambda t: [w for w in words(t["title"]) if w not in FILLER] or words(t["title"])  # noqa: E731
+    found = [t for t in rows if key(t) == said]
+    if not found:
+        found = [t for t in rows if all(any(w.startswith(s) for w in key(t)) for s in said)]
+    if not found:
+        close = sorted(((difflib.SequenceMatcher(None, " ".join(said), " ".join(key(t))).ratio(), t) for t in rows),
+                       key=lambda x: -x[0])
+        if close and close[0][0] >= 0.75:
+            best = close[0][0]
+            found = [t for score, t in close if score >= best - 0.05]
+    # One per repeating series (its oldest open copy), and current tasks first.
+    seen, out = set(), []
+    current = lambda t: t["state"] not in ("scheduled", "someday", "later")  # noqa: E731
+    for t in sorted(found, key=lambda t: (not current(t), t["start_date"] or "", t["due_date"] or "9999", t["id"])):
+        if t["series_id"] and t["series_id"] in seen:
+            continue
+        seen.add(t["series_id"])
+        out.append(t)
+    if len(out) > 1 and current(out[0]) and not current(out[1]):
+        out = [t for t in out if current(t)]
+    if len(out) > 1 and len({said_title(t).lower() for t in out}) == 1:
+        out = out[:1]  # the same title more than once (e.g. one put off): the most current
+    return out
+
+
+def list_tasks(name, tasks, projects, today):
+    """A list's tasks, as the browser's viewTasks (app.js) works them out."""
+    def active(t):
+        p = projects.get(t["project_id"])
+        return not p or p["state"] == "active"
+    # Blocked: waiting on an open task, or not the first Next action of a sequential project.
+    open_ids = {t["id"] for t in tasks}
+    blocked = {t["id"] for t in tasks if any(b in open_ids for b in t["blocked_by"])}
+    seen = set()
+    for t in tasks:
+        p = projects.get(t["project_id"])
+        if p and p["sequential"] and t["state"] == "next":
+            if p["id"] in seen:
+                blocked.add(t["id"])
+            seen.add(p["id"])
+    by_priority = lambda ts: sorted(ts, key=lambda t: -t["priority"])  # noqa: E731 (stable: keeps their order)
+    if name == "focus":
+        return by_priority([t for t in tasks if ((t["focus"] and t["state"] != "scheduled")
+                                                 or (t["due_date"] and t["due_date"] <= today))
+                            and t["state"] not in ("someday", "later") and active(t) and t["id"] not in blocked])
+    if name in ("queue", "next"):
+        return by_priority([t for t in tasks if t["state"] == "next" and active(t) and t["id"] not in blocked])
+    shown = [t for t in tasks if t["state"] == name]
+    if name == "scheduled":  # (upcoming copies of repeating tasks are in Recurring)
+        shown = sorted((t for t in shown if not t["series_id"]),
+                       key=lambda t: (t["start_date"] or "", t["start_time"] or ""))
+    return shown
+
+
+def spoken_list(name, tasks, today, say):
+    """"Focus has 3 tasks: Pay rent, overdue; Call Mom, due today; and Buy milk." """
+    if not tasks:
+        return f"Nothing in {name}."
+    def said(t):
+        title = re.sub(r"[*_~`]+", "", t["title"]).strip()
+        if t["overdue"]:
+            return title + ", overdue"
+        if t["due_date"] == today:
+            return title + ", due today"
+        return title
+    named = [said(t) for t in tasks[:say]]
+    more = len(tasks) - len(named)
+    head = f"{name} has {len(tasks)} task{'s' * (len(tasks) != 1)}: "
+    if more:
+        return head + "; ".join(named) + f"; and {more} more."
+    if len(named) == 1:
+        return head + named[0] + "."
+    return head + "; ".join(named[:-1]) + "; and " + named[-1] + "."
 
 
 def file_size(f):
@@ -2052,12 +2428,6 @@ def update_settings():
         except (ZoneInfoNotFoundError, ValueError):
             return bad("Unknown time zone.")
         settings["timezone"] = str(data["timezone"])
-    if "expiry_notices" in data:
-        days = data["expiry_notices"]
-        if not isinstance(days, list) or len(days) > 8 or not all(
-                isinstance(d, int) and 0 <= d <= 730 for d in days):
-            return bad("Give up to 8 numbers of days, 0 to 730.")
-        settings["expiry_notices"] = sorted(set(days), reverse=True)
     if "notify_starts" in data:
         settings["notify_starts"] = bool(data["notify_starts"])
     if "quiet_hours" in data:
@@ -2438,7 +2808,10 @@ def send_reminders(now=None):
                               "(reminded_at IS NULL OR reminded_at < remind_at)", (uid, now_s)).fetchall():
             conn.execute("UPDATE tasks SET reminded_at = ? WHERE id = ?", (now_s, t["id"]))
             conn.commit()
-            notify(uid, task_message(t, "⏰ "))
+            days = t["remind_before"] and t["due_date"] and (date.fromisoformat(t["due_date"]) - local.date()).days
+            when = ("Due today: " if days == 0 else "Due tomorrow: " if days == 1
+                    else f"Due in {days} days: " if days and days > 1 else "")
+            notify(uid, task_message(t, "⏰ " + when))
         # Timed starts.
         if settings["notify_starts"]:
             earliest = local - START_GRACE
@@ -2454,24 +2827,6 @@ def send_reminders(now=None):
                 conn.commit()
                 if t["starts"] >= earliest:
                     notify(uid, task_message(t, "Now: "))
-        # Expiry notices, in the daytime: the latest of the notice days that has been reached.
-        notices = settings["expiry_notices"]
-        if notices and 9 <= local.hour < 21:
-            for t in conn.execute(f"SELECT * FROM tasks WHERE {open_tasks} AND expires_on IS NOT NULL",
-                                  (uid,)).fetchall():
-                days = (date.fromisoformat(t["expires_on"]) - local.date()).days
-                reached = [n for n in notices if days <= n]
-                if not reached:
-                    continue
-                key = f"{t['expires_on']}:{min(reached)}"
-                if t["expiry_notified"] == key:
-                    continue
-                conn.execute("UPDATE tasks SET expiry_notified = ? WHERE id = ?", (key, t["id"]))
-                conn.commit()
-                when = ("Expired " + (f"{-days} days ago" if days < -1 else "yesterday") if days < 0
-                        else "Expires today" if days == 0 else "Expires tomorrow" if days == 1
-                        else f"Expires in {days} days")
-                notify(uid, task_message(t, when + ": ") | {"tag": f"expiry-{t['id']}"})
         # The morning summary, once a day, at (or within 3 hours after) the chosen time.
         digest = settings["digest_time"]
         today = local.date().isoformat()
@@ -2521,6 +2876,7 @@ def _reminder_loop():
 
 SYNC_SECONDS = int(os.environ.get("ENTROPICIDE_GOOGLE_SYNC_SECONDS", "60"))
 OTHER_EVENTS_SECONDS = 300   # how often other calendars' events are re-read
+CONTACTS_SECONDS = 3600      # and contacts
 EVENT_DAYS = 30              # how far ahead they're read
 PUBLIC_URL = setting("PUBLIC_URL") or "https://{}/{}".format(
     setting("SITE_HOST", "localhost"), (setting("SITE_PATH", "/").strip("/") + "/").lstrip("/"))
@@ -2583,11 +2939,12 @@ def google_callback():
         old = None
     conn.execute(
         "INSERT INTO google_accounts (user_id, email, refresh_token, access_token, access_expires, "
-        "calendar_id, sync_token) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (user_id) DO UPDATE SET "
+        "calendar_id, sync_token, scopes) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (user_id) DO UPDATE SET "
         "refresh_token = excluded.refresh_token, access_token = excluded.access_token, "
-        "access_expires = excluded.access_expires, last_error = NULL",
+        "access_expires = excluded.access_expires, scopes = excluded.scopes, last_error = NULL, "
+        "contacts_fetched = 0",
         (uid, tokens["email"], tokens["refresh_token"], tokens.get("access_token"),
-         time.time() + int(tokens.get("expires_in", 0)), None, None))
+         time.time() + int(tokens.get("expires_in", 0)), None, None, tokens.get("scope", "")))
     conn.commit()
     _sync_wake.set()
     return redirect(back + "?google=connected")
@@ -2665,7 +3022,14 @@ def google_status(uid):
             "calendar_name": acct and (gcal.CALENDAR_NAME if acct["owns_calendar"]
                                        else acct["calendar_name"]),
             "calendar_id": acct and acct["calendar_id"],
-            "calendar_owned": bool(acct and acct["owns_calendar"])}
+            "calendar_owned": bool(acct and acct["owns_calendar"]),
+            "contacts": bool(acct and gcal.has_contacts_access(acct["scopes"])),
+            "contacts_error": acct and acct["contacts_error"]}
+
+
+def contacts_json(uid):
+    return [{"id": r["id"], "name": r["name"]} | json.loads(r["info"]) for r in db.get_db().execute(
+        "SELECT * FROM contacts WHERE user_id = ? ORDER BY name COLLATE NOCASE", (uid,))]
 
 
 def _clear_calendar(acct, token):
@@ -2707,6 +3071,7 @@ def google_forget(uid, remote=True):
         conn.execute("UPDATE tasks SET gcal_event_id = NULL, gcal_pushed = NULL WHERE user_id = ?",
                      (uid,))
         conn.execute("DELETE FROM gcal_deletions WHERE user_id = ?", (uid,))
+        conn.execute("DELETE FROM contacts WHERE user_id = ?", (uid,))
         conn.execute("DELETE FROM google_accounts WHERE user_id = ?", (uid,))
         conn.commit()
 
@@ -2794,6 +3159,9 @@ def sync_user(uid, fetch_events=False):
                 _push(uid, token, cal, tz)
             if fetch_events or time.time() - acct["events_fetched"] > OTHER_EVENTS_SECONDS:
                 _fetch_events(uid, token, cal if owned else None, tz, today)
+            acct = conn.execute("SELECT * FROM google_accounts WHERE user_id = ?", (uid,)).fetchone()
+            if fetch_events or time.time() - acct["contacts_fetched"] > CONTACTS_SECONDS:
+                _fetch_contacts(uid, token, acct["scopes"])
         except gcal.GoogleError as e:
             conn.rollback()
             error = str(e)
@@ -2810,11 +3178,31 @@ def _access_token(acct):
         return acct["access_token"]
     tokens = gcal.refresh(acct["refresh_token"])
     conn = db.get_db()
-    conn.execute("UPDATE google_accounts SET access_token = ?, access_expires = ? WHERE user_id = ?",
+    conn.execute("UPDATE google_accounts SET access_token = ?, access_expires = ?, "
+                 "scopes = COALESCE(?, scopes) WHERE user_id = ?",
                  (tokens["access_token"], time.time() + int(tokens.get("expires_in", 3600)),
-                  acct["user_id"]))
+                  tokens.get("scope"), acct["user_id"]))
     conn.commit()
     return tokens["access_token"]
+
+
+def _fetch_contacts(uid, token, scopes):
+    """Replace the user's copy of their Google Contacts (or drop it, without access)."""
+    conn = db.get_db()
+    people, error = [], None
+    if gcal.has_contacts_access(scopes):
+        try:
+            people = gcal.list_contacts(token)
+        except gcal.GoogleError as e:
+            people, error = None, gcal.NO_CONTACTS_ACCESS if e.status == 403 and isinstance(
+                e, gcal.AuthRevoked) else str(e)
+    if people is not None:
+        conn.execute("DELETE FROM contacts WHERE user_id = ?", (uid,))
+        conn.executemany("INSERT OR IGNORE INTO contacts (user_id, id, name, info) VALUES (?, ?, ?, ?)",
+                         [(uid, p["id"], p["name"], json.dumps(p["info"])) for p in people])
+    conn.execute("UPDATE google_accounts SET contacts_fetched = ?, contacts_error = ? WHERE user_id = ?",
+                 (time.time(), error, uid))
+    conn.commit()
 
 
 def _create_calendar(uid, token, tz):

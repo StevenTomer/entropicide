@@ -14,6 +14,7 @@
   --overdue: #c93636;
   --today: #b86e00;
   --radius: 0.375rem;
+  --relief: 0.11;  /* how strongly the background compass shows */
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -31,6 +32,7 @@
     --danger: #ef6b6b;
     --overdue: #ef6b6b;
     --today: #e7a640;
+    --relief: 0.03;
     color-scheme: dark;
   }
 }
@@ -41,6 +43,16 @@ body {
   background: var(--bg);
   color: var(--text);
   font: 0.875rem/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+/* The compass in bas-relief, faintly behind everything (static/brand/make-icons.sh makes it). */
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background: url(icons/relief.svg) center / min(85vmin, 48rem) no-repeat;
+  opacity: var(--relief);
+}
+/* In the app, it's centred in the list's pane, beside the sidebar. */
+@media (min-width: 761px) {
+  body:has(#sidebar)::before { left: 14.375rem; background-size: min(85vmin, 48rem, 92%); }
 }
 button, input, select, textarea { font: inherit; color: inherit; }
 input, select, textarea {
@@ -74,7 +86,7 @@ button.icon { background: none; border: none; padding: 0.25rem 0.5rem; color: va
 #sidebar {
   width: 14.375rem;
   flex-shrink: 0;
-  background: var(--side);
+  background: color-mix(in srgb, var(--side) 45%, transparent);
   border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
@@ -85,7 +97,7 @@ button.icon { background: none; border: none; padding: 0.25rem 0.5rem; color: va
 #detail {
   container-type: inline-size;
   margin: 0.125rem 0 0.75rem;
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 85%, transparent);
   border: 1px solid var(--line);
   border-left: 3px solid var(--accent);
   border-radius: var(--radius);
@@ -151,7 +163,7 @@ button.icon { background: none; border: none; padding: 0.25rem 0.5rem; color: va
 /* ---- main ---- */
 /* Starred links, across the top of every list. */
 #toolbar { display: flex; gap: 0.375rem; padding: 0.5rem 1.25rem; border-bottom: 1px solid var(--line);
-  overflow-x: auto; scrollbar-width: thin; background: var(--panel); }
+  overflow-x: auto; scrollbar-width: thin; background: color-mix(in srgb, var(--panel) 45%, transparent); }
 #toolbar[hidden] { display: none; }
 #toolbar a { flex-shrink: 0; padding: 0.1875rem 0.6875rem; border-radius: 0.75rem; border: 1px solid var(--line);
   background: var(--bg); color: var(--text); text-decoration: none; font-size: 0.8125rem; white-space: nowrap;
@@ -194,7 +206,7 @@ button.icon { background: none; border: none; padding: 0.25rem 0.5rem; color: va
 body.is-dragging-link .link-end { display: block; }
 #topbar { display: flex; align-items: center; gap: 0.75rem; padding: 0.875rem 1.25rem 0.5rem; }
 #topbar h1 { flex: 1; margin: 0; font-size: 1.25rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#search { width: 12.5rem; }
+#search { width: 12.5rem; background: transparent; }
 #search.bad { outline: 2px solid #d33; outline-offset: -1px; }
 #menu-btn { display: none; font-size: 1.125rem; }
 #quick-add { padding: 0 1.25rem 0.5rem; position: relative; }
@@ -212,7 +224,7 @@ body.is-dragging-link .link-end { display: block; }
 }
 #suggest div { display: flex; justify-content: space-between; gap: 1rem; padding: 0.375rem 0.625rem; border-radius: 0.3125rem; cursor: pointer; }
 #suggest div.on, #suggest div:hover { background: var(--hover); }
-#quick-add-input { padding: 0.5625rem 0.75rem; }
+#quick-add-input { padding: 0.5625rem 0.75rem; background: transparent; }  /* (shows the compass behind) */
 #quick-when { padding: 0.25rem 0.75rem 0; }
 #tag-bar { padding: 0 1.25rem; display: flex; flex-wrap: wrap; gap: 0.375rem; }
 #tag-bar:not(:empty) { padding-bottom: 0.5rem; }
@@ -315,6 +327,12 @@ body.is-dragging-link .link-end { display: block; }
 .att-icon { width: 2.75rem; text-align: center; font-size: 1.25rem; }
 .att-name { flex: 1; min-width: 0; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; }
 .att-name:hover { text-decoration: underline; }
+.new-key { margin: 0.5rem 0; padding: 0.5rem; border: 1px solid var(--line); border-radius: 0.375rem; }
+.new-key .key-value { width: 100%; font-family: monospace; }
+.new-key .key-example { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.75rem; margin: 0; }
+.new-api-key { margin-top: 0.5rem; }
+.new-api-key .inline input { flex: 1; }
+.new-api-key label.check { margin-top: 0.375rem; }
 .device-list { margin: 0.25rem 0 0.5rem; padding-left: 1.125rem; }
 
 /* File viewer (attachments) */
@@ -357,7 +375,24 @@ body.is-dragging-link .link-end { display: block; }
 #detail .hint { margin: 0.125rem 0 0; }
 .detail-head { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: .04em; }
 .d-title { font-size: 1rem; font-weight: 600; margin-top: 0.375rem; }
+.detail-head > span:last-child { display: flex; align-items: center; gap: 0.25rem; }
+.d-star { font-size: 0.75rem; text-transform: none; letter-spacing: 0; border: 1px solid var(--line); border-radius: 0.75rem;
+  padding: 0.125rem 0.625rem; }
+.d-star.on { color: var(--star); border-color: var(--star); }
+/* The side column's groups: where it belongs, when, and the rarer details (folded under More). */
+.d-group + .d-group { border-top: 1px solid var(--line); margin-top: 0.75rem; padding-top: 0.25rem; }
+.d-group h3 { margin: 0.5rem 0 0; font-size: 0.6875rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.d-more summary { cursor: pointer; display: flex; align-items: baseline; gap: 0.5rem; padding: 0.125rem 0; }
+.d-more summary h3 { display: inline; margin-right: 0.125rem; }
+.d-more summary::before { content: "▸"; color: var(--muted); font-size: 0.75rem; }
+.d-more[open] summary::before { content: "▾"; }
+.d-more summary::-webkit-details-marker { display: none; }
+.d-more summary { list-style: none; }
+.d-more summary .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .state-picker { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.625rem; }
+.week-days { display: flex; gap: 0.25rem; margin: -0.25rem 0 0.625rem; }
+.week-days .wd { flex: 1; padding: 0.1875rem 0; font-size: 0.75rem; }
+.week-days .wd.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .state-picker button { padding: 0.1875rem 0.5625rem; font-size: 0.75rem; }
 .state-picker button.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0.625rem; }
@@ -490,6 +525,7 @@ table.users td button { display: block; margin-bottom: 0.125rem; }
     position: fixed;
     inset: 0 auto 0 0;
     z-index: 20;
+    background: var(--side);
     transform: translateX(-100%);
     transition: transform .15s;
     box-shadow: 0.125rem 0 0.75rem rgba(0, 0, 0, .15);
@@ -575,6 +611,8 @@ div.inline { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; 
 /* Reminders */
 .remind .remind-quick { display: flex; flex-wrap: wrap; gap: 0.25rem 0.875rem; margin-top: -0.375rem; font-size: 0.8125rem; }
 .remind-at { color: var(--today); }
+.remind input[data-field="remind_at"] { margin: -0.25rem 0 0.5rem; }
+.remind .remind-when { margin: -0.25rem 0 0.5rem; }
 
 /* Settings: notifications and storage */
 .push-buttons { display: flex; align-items: center; gap: 1rem; }
@@ -596,6 +634,18 @@ div.inline { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; 
 .dep-chip .icon { padding: 0 0.375rem; font-size: 0.75rem; }
 .dep-results { display: flex; flex-direction: column; align-items: flex-start; gap: 0.125rem; margin-top: 0.25rem; font-size: 0.875rem; }
 .dep-results .link { text-align: left; }
+
+/* People (Google Contacts) */
+.meta .person { color: var(--muted); }
+.people { margin: 0.625rem 0; }
+.people label { margin-bottom: 0.25rem !important; }
+.people-results { display: flex; flex-direction: column; align-items: flex-start; gap: 0.125rem; margin-bottom: 0.25rem; font-size: 0.875rem; }
+.people-results .link { text-align: left; }
+.person-card { padding: 0.375rem 0.5rem; margin-top: 0.375rem; border: 1px solid var(--line); border-radius: 0.375rem;
+  background: var(--side); font-size: 0.875rem; overflow-wrap: anywhere; }
+.person-card .person-name { display: flex; justify-content: space-between; align-items: center; }
+.person-card .icon { padding: 0 0.25rem; font-size: 0.75rem; }
+.person-card a { color: inherit; }
 
 /* Templates */
 .row.template { align-items: center; }
@@ -627,8 +677,7 @@ div.inline { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; 
 .pal-hint { flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.8125rem; color: var(--muted); }
 .pal-foot { margin: 0.375rem 0.25rem 0; }
 
-/* Expiries and time spent */
-.expires.due-today { color: var(--today); }
+/* Time spent */
 .d-side .spent { margin: -0.25rem 0 0.25rem; }
 
 /* Focus timer */

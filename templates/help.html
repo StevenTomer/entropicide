@@ -39,7 +39,6 @@
       <li><a href="#defer">Defer</a></li>
       <li><a href="#repeat">Repeating tasks</a></li>
       <li><a href="#reminders">Reminders and notifications</a></li>
-      <li><a href="#expiries">Expiries</a></li>
       <li><a href="#focus-timer">Focus timer</a></li>
       <li><a href="#calendar">Calendar and Google</a></li>
       <li><a href="#links">Links and the toolbar</a></li>
@@ -147,7 +146,7 @@
       (<kbd>⌘</kbd>+<kbd>Enter</kbd> on a Mac) adds it and opens it, to fill in more. Press <kbd>N</kbd> anywhere to jump to the box.</p>
     <p>The task goes into the list you're looking at: in a project it joins the project's Queue; in Focus it's
       starred; in Scheduled it starts tomorrow. Anywhere else without a box (like Logbook), <kbd>N</kbd> takes you to the Inbox.</p>
-    <p>Short codes anywhere in the text set things as you type; typing <code>#</code>, <code>!</code> or <code>+</code>
+    <p>Short codes anywhere in the text set things as you type; typing <code>#</code>, <code>!</code>, <code>+</code> or <code>@</code>
       offers the choices (<kbd>↑</kbd><kbd>↓</kbd> to choose, <kbd>Tab</kbd> or a click to pick).</p>
     <table class="help-table">
       <thead><tr><th>Type</th><th>Does</th><th>Example</th></tr></thead>
@@ -157,6 +156,7 @@
         <tr><td><code>!focus</code> or <code>*</code></td><td>stars it, for today</td><td><code>Call the school !focus</code></td></tr>
         <tr><td><code>!N</code></td><td>priority N (−99 to 99)</td><td><code>Fix the leak !3</code>, <code>Tidy desk !-1</code></td></tr>
         <tr><td><code>+area</code></td><td>puts it in an area; the start of the name is enough, and case and spaces don't matter</td><td><code>Fix shelf +home</code>, <code>Draft spec +side</code> for “Side Projects”</td></tr>
+        <tr><td><code>@name</code></td><td>names a contact from your Google Contacts (see <a href="#calendar">Calendar and Google</a>); the start of a name or nickname is enough, and the name stays in the title</td><td><code>Call @mom about Sunday</code>, <code>Lunch with @BobSmith</code></td></tr>
         <tr><td>a date or time</td><td>see <a href="#dates">Dates in plain words</a></td><td><code>Dentist tomorrow 3pm</code></td></tr>
       </tbody>
     </table>
@@ -215,24 +215,39 @@
 
   <section id="editor">
     <h2>A task's details</h2>
-    <p>Click a task to open its details right under it, across the list; click the task again (or ✕, or <kbd>Esc</kbd>) to close them. Changes save as you go.</p>
+    <p>Click a task to open its details right under it, across the list; click the task again (or ✕, or <kbd>Esc</kbd>) to close them. Changes save as you go.
+      At the top: the title, which list it's in, and <strong>★ Focus</strong>. On the left, notes and files; on the right,
+      where it belongs, <strong>When</strong>, and <strong>More</strong> (folded away until you use it).</p>
     <dl>
       <dt>Title</dt><dd>Start with a verb and make it a visible next step: “Call”, “Email”, “Buy”, “Draft”.</dd>
       <dt>Status</dt><dd>Which list it's in. Choosing Scheduled sets the start date to tomorrow if it has none; change it as needed.</dd>
-      <dt>Starts / at</dt><dd>For a Scheduled task: the day (and optional time) it moves to the Queue. Shown on Google Calendar when there's no due date.</dd>
+      <dt>★ Focus</dt><dd>In Focus today (the same as the star on its row, or <kbd>S</kbd>).</dd>
       <dt>Waiting for</dt><dd>For a Waiting task: who or what you're waiting on, and since when.</dd>
       <dt>Notes</dt><dd>Anything else: details, phone numbers, links, checklists, with <a href="#notes">formatting</a>.</dd>
       <dt>Attachments</dt><dd>Files and pictures (<a href="#files">see Attachments</a>).</dd>
       <dt>Project</dt><dd>The project it belongs to, if any. A task in a project takes the project's area.</dd>
       <dt>Area</dt><dd>Work, Home… (when it's not in a project).</dd>
       <dt>Tags</dt><dd>Comma-separated; new ones are created.</dd>
-      <dt>Priority</dt><dd>A number; higher comes first in Focus and the Queue.</dd>
-      <dt>Due</dt><dd>A real deadline. The task shows in Focus from that day, red once overdue. Use start dates for “not before”, due dates only for “must be done by”.</dd>
-      <dt>Repeat / Counting from / If missed</dt><dd>See <a href="#repeat">Repeating tasks</a>.</dd>
-      <dt>Expires</dt><dd>When the thing it's about runs out (<a href="#expiries">see Expiries</a>).</dd>
-      <dt>Time and Energy</dt><dd>How long it takes and how much energy it needs, shown on the row, to help pick a task that fits the moment (“15 min, low energy” for the end of the day).</dd>
-      <dt>Star</dt><dd>In Focus today.</dd>
+      <dt>People</dt><dd>Contacts the task is about (with Google Contacts connected): type to add one. Each shows
+        their phone numbers (tap to call, or <em>Text</em>), email addresses and addresses (opens the map).</dd>
     </dl>
+    <h3>When</h3>
+    <dl>
+      <dt>Starts / at</dt><dd>“Not before”: the day (and optional time) it's for. A start date in the future puts it in
+        Scheduled until then, when it moves to the Queue; clearing it puts it back in the Queue. Shown on Google Calendar
+        when there's no due date.</dd>
+      <dt>Due</dt><dd>“Must be done by”: a real deadline. The task shows in Focus from that day, red once overdue.</dd>
+      <dt>Remind me</dt><dd>A notification at a time you choose, or a day to three months before the due date; it moves
+        with the due date (<a href="#reminders">see Reminders</a>).</dd>
+      <dt>Repeat / Counting from / If missed</dt><dd>See <a href="#repeat">Repeating tasks</a>.</dd>
+    </dl>
+    <h3>More</h3>
+    <dl>
+      <dt>Priority</dt><dd>A number; higher comes first in Focus and the Queue.</dd>
+      <dt>Time and Energy</dt><dd>How long it takes and how much energy it needs, shown on the row, to help pick a task that fits the moment (“15 min, low energy” for the end of the day).</dd>
+      <dt>Blocked by</dt><dd>Other tasks it has to wait for (<a href="#deps">see Blocked by</a>).</dd>
+    </dl>
+    <p>More opens by itself when any of these is set, and its heading lists them (“priority 3 · 15m”).</p>
     <p>At the bottom: <strong>Move to trash</strong> (or Restore / Delete forever when it's already in the Trash).
       Tick the box on a row to complete it.</p>
   </section>
@@ -417,7 +432,8 @@
 
   <section id="repeat">
     <h2>Repeating tasks</h2>
-    <p>Set <strong>Repeat</strong> in a task's details: daily, weekdays, weekly, monthly, yearly, or every N days.
+    <p>Set <strong>Repeat</strong> in a task's details: daily, weekdays, weekly, monthly, yearly, on certain days of the
+      week, on a weekday of the month (the first Monday, the last Friday), or every N days.
       The schedule follows the calendar, not when you complete it: each copy starts on its date, and when it does,
       the next copy appears in <strong>Recurring</strong>.</p>
     <p><strong>If missed</strong> decides what happens to an unfinished copy when the next one starts:</p>
@@ -430,10 +446,17 @@
     <p><strong>Every N days, weeks, months or years</strong>: choose <em>Custom…</em> and type e.g. <code>9 days</code>,
       <code>2 weeks</code>, <code>3 months</code> or <code>1 year</code>. Month repeats keep to the same day of the month
       (the 31st becomes the last day in shorter months).</p>
+    <p><strong>On certain days of the week</strong> (Mon, Wed and Fri, say): choose <em>On certain days of the week…</em>,
+      then switch days on and off with the buttons under it. Each copy is on the next of those days.</p>
+    <p><strong>A weekday of the month</strong> (the first Monday, the second Tuesday, the last Friday): choose
+      <em>Monthly on a weekday…</em>; it starts as the one the task's date is, and the two menus under it change it.
+      Missed copies are kept, as with other monthly repeats.</p>
     <p><strong>When adding:</strong> <code>every day</code>, <code>every weekday</code>, <code>every week</code>,
       <code>every other week</code>, <code>every 6 weeks</code>, <code>every month</code>, <code>every 3 months</code>,
-      <code>every year</code>, <code>every 9 days</code>, or <code>every monday</code> (weekly, from the next Monday):
-      <code>Haircut every 6 weeks</code>, <code>Gym every monday 7am</code>.</p>
+      <code>every year</code>, <code>every 9 days</code>, <code>every monday</code> (weekly, from the next Monday), or
+      several days, <code>every mon, wed and fri</code>, or a weekday of the month, <code>every first monday</code>,
+      <code>every 2nd tue</code>, <code>every last friday of the month</code>:
+      <code>Haircut every 6 weeks</code>, <code>Gym every mon wed fri 7am</code>.</p>
     <p><strong>Counting from</strong>: by default a repeat follows the calendar (every Monday, every 9 days from the start,
       whether or not the last one was done). Choose <strong>When I complete it</strong> instead for things where the gap matters:
       nothing is made on a schedule; when you complete it, the next copy is made that far from the day you did it
@@ -454,8 +477,12 @@
     <p>Entropicide can send notifications to your phone or computer. Turn them on in <strong>Settings → Notifications</strong>,
       on each device (<em>Turn on for this device</em>; <em>Send a test</em> to check). Then you get:</p>
     <ul>
-      <li><strong>Reminders:</strong> set <strong>Remind me</strong> in a task's details to any date and time, or click
-        <em>In 1 hour</em>, <em>Tonight</em> (7 pm) or <em>Tomorrow 9 am</em>. The task shows ⏰ and the time until then.
+      <li><strong>Reminders:</strong> set <strong>Remind me</strong> in a task's details, under its due date:
+        <em>At a time…</em> for any date and time, or (when it has a due date) from <em>1 day</em> to <em>3 months before
+        it's due</em>, at 9 am. Or click <em>In 1 hour</em>, <em>Tonight</em> (7 pm) or <em>Tomorrow 9 am</em>. The task
+        shows ⏰ and the time until then. <strong>A reminder moves with the due date:</strong> push the deadline back a
+        week and the reminder goes a week later too (one set before it's due is simply worked out again).
+        A notification for one set before it's due says how long is left (“⏰ Due in 30 days: Renew passport”).
         On a <strong>repeating task</strong>, each new copy gets the reminder too, at the same distance from its own date:
         “Remind me Jan 14, 9 am” on a copy starting Jan 1 becomes Jul 14, 9 am on the next one (every 6 months).
         Setting or clearing it updates copies already waiting in Recurring; snoozing a notification moves only that copy.</li>
@@ -474,21 +501,6 @@
       With the Android app, allow notifications when Android asks.</p>
   </section>
 
-  <section id="expiries">
-    <h2>Expiries</h2>
-    <p>For things that run out: passports, driving licences, insurance, warranties, registrations. Give a task an
-      <strong>Expires</strong> date in its details (or type <code>expires mar 3 2027</code> when adding it), and attach the
-      document if you like. Then:</p>
-    <ul>
-      <li>The task shows <em>Expires …</em>, amber in the last 30 days and red once expired.</li>
-      <li>An <strong>Expiries</strong> list (in the sidebar, once there's one) shows them all, soonest first.</li>
-      <li>With notifications on, you get a notice <strong>90, 30 and 7 days before, and on the day</strong> (change the days in
-        Settings → Notifications), in the daytime.</li>
-    </ul>
-    <p>Keep such tasks out of the way, in Later or a “Documents” project; when you renew, change the date
-      (and the attachment).</p>
-    <div class="ex"><code>Passport #docs !later expires jan 20 2027</code>, with a scan of the passport attached.</div>
-  </section>
 
   <section id="focus-timer">
     <h2>Focus timer</h2>
@@ -512,6 +524,10 @@
         (or else a start date) appear on it as events: a shared one like <em>Family</em> so everyone sees them, or a new <em>Entropicide</em> calendar.</li>
       <li>Sync runs both ways every minute: move or rename the event in Google and the task follows; delete it and the task goes to the Trash.
         On your own Entropicide calendar, events you add there become tasks. On a shared calendar, other people's events are left alone.</li>
+      <li><strong>Contacts:</strong> the same connection keeps a read-only copy of your Google Contacts (refreshed every
+        hour), so a task can name people: <code>@Mom</code> in quick add, or <em>People</em> in its details. Their name shows on the
+        task's row, and its details have buttons to call, text, email or map them. Connected before Contacts was
+        added? Click <em>Reconnect</em> in Settings and tick the box for Google Contacts.</li>
       <li>Today's events also show at the top of <strong>Focus</strong>. <em>Sync now</em> in Settings syncs straight away;
         <em>Disconnect</em> removes the events Entropicide added.</li>
     </ul>
@@ -578,6 +594,14 @@
         the phone (<em>1 task waiting for a connection</em>) and sends itself when you're back online, with its dates
         read from when you typed it. Swiped it away? Opening Entropicide brings it back; to stop it for good, Disconnect the phone
         in Settings (the notification goes the next time it's used), or turn off its notifications in Android's settings for Entropicide.</li>
+      <li id="add-api"><strong>Add from other apps</strong> (Alexa, Home Assistant, a phone shortcut, a script): in Settings →
+        <strong>Add from other apps</strong>, name what it's for and click <strong>Make a key</strong>. Copy the key straight away
+        (it's shown once). The other app then sends the task's text to the address shown there, with the key, and it's
+        read just like quick add: <code>Buy milk tomorrow #errand</code>. Tick <em>Can also read my lists</em> for a key that
+        may also fetch Focus, the Queue or another list (for "Alexa, ask … what's due today?"), and <em>Can also complete
+        tasks</em> for one that may tick them off by name ("… I finished call the dentist"). <em>Revoke</em> stops a key working.
+        Each add appears in the <em>App log</em>. Setting one up (with examples for Alexa, Home Assistant and iPhone
+        Shortcuts) is in <a href="https://github.com/StevenTomer/entropicide/blob/main/docs/api.md">docs/api.md</a>.</li>
       <li><strong>App updates:</strong> Entropicide itself is always current. When the Android app around it changes, opening it shows
         <em>A new version of the Entropicide app is ready</em>: tap <strong>Update</strong>, open the download, and tap <strong>Update</strong>.
         <em>Later</em> skips that version. Settings → Troubleshooting shows which version you're running (1.0.1, 1.0.2, …)

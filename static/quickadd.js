@@ -46,6 +46,20 @@ function areaByWord(word) {
   return starts.length === 1 ? starts[0] : null;
 }
 
+// People in quick add: @Mom, or @BobSmith for "Bob Smith" (a contact's name or nickname, read
+// like areas); the start of one is enough when only one contact begins that way.
+// Returns {contact, name}: name is what the title says, the contact's own if typed in full.
+function contactByWord(word) {
+  const w = areaWord(word);
+  if (!w) return null;
+  const names = (S.data.contacts || []).flatMap((c) =>
+    [c.name, ...(c.nicknames || [])].map((name) => ({ contact: c, name })));
+  const exact = names.find((n) => areaWord(n.name) === w);
+  if (exact) return exact;
+  const starts = new Set(names.filter((n) => areaWord(n.name).startsWith(w)).map((n) => n.contact));
+  return starts.size === 1 ? { contact: [...starts][0], name: word } : null;
+}
+
 // ---- dates in quick add -------------------------------------------------
 // "Call dentist tomorrow 3pm", "Pay rent due nov 1", "Gym mon at 7:30am", "Renew in 2 weeks".
 // A date or time on its own is when the task starts; after "due" or "by" it's the due date.
@@ -153,8 +167,26 @@ function matchTime(words, i, at) {
   return null;
 }
 
+// The next date (after today) that's the nth (-1: last) weekday (Monday 0) of its month.
+function nextNth(nth, day) {
+  const t = today();
+  for (let k = 0; k < 3; k++) {
+    const first = new Date(Number(t.slice(0, 4)), Number(t.slice(5, 7)) - 1 + k, 1, 12);
+    let d;
+    if (nth > 0) d = new Date(first.getFullYear(), first.getMonth(), 1 + ((day - (first.getDay() + 6) % 7 + 7) % 7) + 7 * (nth - 1), 12);
+    else {
+      const last = new Date(first.getFullYear(), first.getMonth() + 1, 0, 12);
+      d = new Date(last.getFullYear(), last.getMonth(), last.getDate() - (((last.getDay() + 6) % 7 - day + 7) % 7), 12);
+    }
+    const iso = isoDate(d.getFullYear(), d.getMonth(), d.getDate());
+    if (iso > t) return iso;
+  }
+}
+
 // After "every": "day", "weekday", "week", "2 weeks", "other month", "3 months", "year",
-// "9 days", or a day of the week ("every monday": weekly, from the next Monday).
+// "9 days", or a day of the week ("every monday": weekly, from the next Monday), or several
+// ("every mon, wed and fri": on those days, from the next of them), or a weekday of the month
+// ("every first monday", "every 2nd tue", "every last friday (of the month)").
 function matchRepeat(words, i) {
   const [w = "", w2 = ""] = words.slice(i, i + 2);
   const named = { day: "daily", weekday: "weekdays", week: "weekly", month: "monthly", year: "yearly" };
@@ -165,9 +197,26 @@ function matchRepeat(words, i) {
     const u = unit(w2);
     return { repeat: n === 1 ? named[u] : everyValue(n, u[0] === "d" ? "d" : u[0]), len: 2 };
   }
-  const day = weekdayOf(w, true);
-  if (day >= 0) return { repeat: "weekly", date: addDays(today(), daysUntil(day)), len: 1 };
-  return null;
+  const nth = { first: 1, "1st": 1, second: 2, "2nd": 2, third: 3, "3rd": 3, fourth: 4, "4th": 4, last: -1 }[w];
+  const nthDay = nth ? weekdayOf(w2, true) : -1;
+  if (nthDay >= 0) {
+    const tail = words.slice(i + 2, i + 5).join(" ");
+    const len = 2 + (/^of (the|every|each) month\b/.test(tail) ? 3 : /^of month\b/.test(tail) ? 2 : 0);
+    const day = (nthDay + 6) % 7;  // (counted from Monday, 0)
+    return { repeat: `nth:${nth}:${day}`, date: nextNth(nth, day), len };
+  }
+  const days = [];
+  let len = 0;
+  for (let j = i; j < words.length; j++) {
+    const d = weekdayOf(words[j], true);
+    if (d >= 0) { days.push(d); len = j - i + 1; }
+    else if (!(days.length && ["and", "&", ","].includes(words[j]))) break;
+  }
+  if (!days.length) return null;
+  const date = addDays(today(), Math.min(...days.map((d) => daysUntil(d))));
+  if (new Set(days).size === 1) return { repeat: "weekly", date, len };
+  // (days:… counts from Monday, 0; these from Sunday)
+  return { repeat: "days:" + [...new Set(days.map((d) => (d + 6) % 7))].sort().join(","), date, len };
 }
 
 // Takes the first start date, due date and time out of words.
@@ -177,12 +226,10 @@ function parseWhen(words) {
   for (let i = 0; i < words.length;) {
     const w = lc[i];
     const due = w === "due" || w === "by";
-    const exp = w === "expires" || w === "expiry" || w === "exp";
-    const j = due || exp || w === "on" ? i + 1 : i;
-    const d = !(due ? out.due_date : exp ? out.expires_on : out.start_date) && matchDate(lc, j, j > i);
+    const j = due || w === "on" ? i + 1 : i;
+    const d = !(due ? out.due_date : out.start_date) && matchDate(lc, j, j > i);
     if (d) {
-      if (exp) out.expires_on = d.date;
-      else if (due) out.due_date = d.date;
+      if (due) out.due_date = d.date;
       else Object.assign(out, { start_date: d.date, today: d.today, defaultTime: d.time });
       i = j + d.len;
       continue;
@@ -214,7 +261,6 @@ function parseWhen(words) {
 function whenFields(parsed) {
   const f = {};
   if (parsed.due_date) f.due_date = parsed.due_date;
-  if (parsed.expires_on) f.expires_on = parsed.expires_on;
   if (!parsed.start_date) return f;
   const now = nowStamp();
   const later = parsed.start_date > now.slice(0, 10) ||
@@ -231,7 +277,7 @@ function whenFields(parsed) {
 }
 
 function parseQuickAdd(text) {
-  const out = { tags: [] };
+  const out = { tags: [], people: [] };
   const words = [];
   for (const w of text.split(/\s+/)) {
     if (/^#\S+/.test(w)) out.tags.push(w.slice(1));
@@ -239,10 +285,17 @@ function parseQuickAdd(text) {
     else if (/^!\w+$/.test(w) && LIST_WORDS[w.slice(1).toLowerCase()]) out.state = LIST_WORDS[w.slice(1).toLowerCase()];
     else if (/^!-?\d+$/.test(w)) out.priority = clampPriority(Number(w.slice(1)));
     else if (/^\+\S+/.test(w) && areaByWord(w.slice(1))) out.area_id = areaByWord(w.slice(1)).id;
+    else if (/^@\S/.test(w)) {
+      // (Punctuation after the name stays: "Call @Mom, then…")
+      const [, word, tail] = /^@(.*?)([.,;:!?)]*)$/.exec(w);
+      const found = contactByWord(word);
+      if (found && !out.people.includes(found.contact.id)) out.people.push(found.contact.id);
+      words.push(found ? found.name + tail : w);
+    }
     else words.push(w);
   }
   const when = parseWhen(words);
   out.title = when.rest.join(" ").trim();
-  for (const k of ["start_date", "start_time", "due_date", "expires_on", "repeat"]) if (when[k]) out[k] = when[k];
+  for (const k of ["start_date", "start_time", "due_date", "repeat"]) if (when[k]) out[k] = when[k];
   return out;
 }

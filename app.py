@@ -582,11 +582,53 @@ def set_blockers(task_id, blocker_ids):
                      [(task_id, b) for b in ids])
 
 
+def links_for(task_ids):
+    """{task_id: [{id, title, done, trashed} of each related task]}, by title."""
+    if not task_ids:
+        return {}
+    marks = ",".join("?" * len(task_ids))
+    out = {}
+    for r in db.get_db().execute(
+            f"SELECT l.a AS mine, t.* FROM task_links l JOIN tasks t ON t.id = l.b WHERE l.a IN ({marks}) "
+            f"UNION ALL SELECT l.b AS mine, t.* FROM task_links l JOIN tasks t ON t.id = l.a WHERE l.b IN ({marks}) "
+            "ORDER BY title COLLATE NOCASE", task_ids * 2):
+        out.setdefault(r["mine"], []).append({"id": r["id"], "title": r["title"], "done": bool(r["completed_at"]),
+                                              "trashed": bool(r["deleted_at"])})
+    return out
+
+
+def set_related(task_id, ids):
+    """Replace the tasks related to task_id (each link goes both ways)."""
+    if not isinstance(ids, list) or len(ids) > 50:
+        raise ValueError("related must be a list of task ids")
+    conn = db.get_db()
+    others = []
+    for other in ids:
+        other = int(other)
+        if other == task_id:
+            raise ValueError("A task can't be related to itself.")
+        if not conn.execute("SELECT 1 FROM tasks WHERE id = ? AND user_id = ?", (other, g.user["id"])).fetchone():
+            raise ValueError("No such task to relate it to.")
+        others.append(other)
+    conn.execute("DELETE FROM task_links WHERE a = ? OR b = ?", (task_id, task_id))
+    conn.executemany("INSERT OR IGNORE INTO task_links (a, b) VALUES (?, ?)",
+                     [(min(task_id, o), max(task_id, o)) for o in others])
+
+
+def copy_links(from_id, to_id):
+    """Give to_id the same related tasks as from_id."""
+    db.get_db().execute(
+        "INSERT OR IGNORE INTO task_links (a, b) SELECT MIN(?, other), MAX(?, other) FROM "
+        "(SELECT b AS other FROM task_links WHERE a = ? UNION SELECT a FROM task_links WHERE b = ?) "
+        "WHERE other != ?", (to_id, to_id, from_id, from_id, to_id))
+
+
 def tasks_json(rows):
     files = attachments_for([r["id"] for r in rows])
     deps = deps_for([r["id"] for r in rows])
+    links = links_for([r["id"] for r in rows])
     for_task = lambda d: d | {"attachments": files.get(d["id"], []),  # noqa: E731
-                              "blocked_by": deps.get(d["id"], [])}
+                              "blocked_by": deps.get(d["id"], []), "related": links.get(d["id"], [])}
     return [for_task(d) for d in _tasks_json(rows)]
 
 
@@ -913,6 +955,7 @@ def copy_occurrence(s, template, index, start, due, today):
          template["position"]))
     conn.execute("INSERT INTO task_tags SELECT ?, tag_id FROM task_tags WHERE task_id = ?",
                  (cur.lastrowid, template["id"]))
+    copy_links(template["id"], cur.lastrowid)
     if remind := carried_reminder(template, start, due):
         conn.execute("UPDATE tasks SET remind_at = ?, remind_plan = ? WHERE id = ?", (remind, remind, cur.lastrowid))
     if s["carry_files"]:
@@ -1089,6 +1132,8 @@ def insert_task(data, today):
         set_tags(cur.lastrowid, data["tags"])
     if data.get("blocked_by"):
         set_blockers(cur.lastrowid, data["blocked_by"])
+    if data.get("related"):
+        set_related(cur.lastrowid, data["related"])
     if repeat:
         start_series(owned("tasks", cur.lastrowid), repeat,
                      on_miss or db.default_on_miss(repeat), today)
@@ -1112,9 +1157,9 @@ def update_task(task_id):
 @app.post("/api/tasks/<int:task_id>/duplicate")
 @login_required
 def duplicate_task(task_id):
-    """A copy of a task, just after it: same details, tags, blockers and files (stored once),
-    but no reminder or time spent. A repeating task's copy repeats the same way, as a
-    schedule of its own."""
+    """A copy of a task, just after it: same details, tags, blockers, related tasks and files
+    (stored once), but no reminder or time spent. A repeating task's copy repeats the same way,
+    as a schedule of its own."""
     t = owned("tasks", task_id)
     if t["deleted_at"]:
         return bad("Restore it from the trash first.")
@@ -1133,6 +1178,7 @@ def duplicate_task(task_id):
                      "WHERE id = ?", (new,))
     conn.execute("INSERT INTO task_tags SELECT ?, tag_id FROM task_tags WHERE task_id = ?", (new, task_id))
     conn.execute("INSERT INTO task_deps SELECT ?, blocker_id FROM task_deps WHERE task_id = ?", (new, task_id))
+    copy_links(task_id, new)
     conn.execute("INSERT INTO attachments (user_id, task_id, name, mime, size, blob_id, created_at) "
                  "SELECT user_id, ?, name, mime, size, blob_id, created_at FROM attachments "
                  "WHERE task_id = ? ORDER BY id", (new, task_id))
@@ -1210,6 +1256,8 @@ def apply_task_update(task, data, today):
                      "(SELECT series_id FROM tasks WHERE id = ?)", (on_miss, task_id))
     if "blocked_by" in data:
         set_blockers(task_id, data["blocked_by"])
+    if "related" in data:
+        set_related(task_id, data["related"])
     if data.get("repeat_from") in ("done", "calendar"):
         set_repeat_from(task_id, data["repeat_from"] == "done", today)
     task = owned("tasks", task_id)

@@ -673,6 +673,7 @@ function taskRow(t, { showState }) {
   }
   if (t.spent) meta.push(`<span title="Time spent (focus timer)">⏱ ${fmtSpent(t.spent)}</span>`);
   if (reminderPending(t)) meta.push(`<span class="remind-at" title="Reminder">⏰ ${fmtRemind(t)}</span>`);
+  if (t.related?.length) meta.push(`<span class="related" title="Related: ${h(t.related.map((r) => r.title).join(", "))}">🔗 ${t.related.length}</span>`);
   if (t.attachments?.length) meta.push(`<span title="${h(t.attachments.map((f) => f.name).join(", "))}">📎 ${t.attachments.length}</span>`);
   if (t.minutes) meta.push(`<span>${t.minutes}m</span>`);
   if (t.energy) meta.push(`<span class="energy-${t.energy}">${t.energy}</span>`);
@@ -1421,6 +1422,7 @@ function renderDetail() {
   // The rarer details fold away under More, open when any is set (or as last left on this device).
   const more = [t.priority ? `priority ${t.priority}` : "", t.minutes ? `${t.minutes}m` : "",
     t.energy ? `${t.energy} energy` : "", t.blocked_by?.length ? `blocked by ${t.blocked_by.length}` : "",
+    t.related?.length ? `${t.related.length} related` : "",
     t.spent ? `${fmtSpent(t.spent)} spent` : ""].filter(Boolean);
   el.innerHTML = `
     <div class="detail-head"><span>${t.completed_at ? "Completed" : t.deleted_at ? "In trash" : "Task"}</span>
@@ -1464,7 +1466,7 @@ function renderDetail() {
         <p class="muted small">${repeatNote(t)}</p>` : ""}
     </section>
     <details class="d-group d-more" ${more.length || load("editorMore", "") === "open" ? "open" : ""}>
-      <summary><h3>More</h3> <span class="muted small">${h(more.join(" · ") || "priority, time, energy, blocked by")}</span></summary>
+      <summary><h3>More</h3> <span class="muted small">${h(more.join(" · ") || "priority, time, energy, blocked by, related")}</span></summary>
       <label>Priority <input type="number" data-field="priority" step="1" min="-${PRIORITY_MAX}" max="${PRIORITY_MAX}" value="${t.priority}"></label>
       <div class="two">
         <label>Time <select data-field="minutes">${options(
@@ -1473,6 +1475,7 @@ function renderDetail() {
           [["", "—"], ["low", "Low"], ["medium", "Medium"], ["high", "High"]], t.energy)}</select></label>
       </div>
       ${blockersField(t)}
+      ${relatedField(t)}
       ${t.spent ? `<p class="muted small spent">Time spent: ${fmtSpent(t.spent)} · <button type="button" class="link reset-spent">Reset</button></p>` : ""}
     </details>
     </div></div>
@@ -2121,6 +2124,25 @@ function peopleMatches(t, q) {
 async function setPeople(id, ids) {
   $("#detail").dataset.key = "";
   await patchTask(id, { people: ids });
+}
+
+// "Related to": links both ways to other tasks, to get from one to the other (app.py's
+// task_links). A related task that's open opens on a click; a done one is struck through.
+function relatedField(t) {
+  const chips = (t.related || []).map((r) => {
+    const open = !r.done && !r.trashed && taskById(r.id);
+    return `<span class="dep-chip${open ? "" : " done"}" data-related="${r.id}" title="${r.trashed ? "In the trash" : r.done ? "Done" : "Open it"}">${
+      open ? `<button type="button" class="link open-related">${h(r.title)}</button>` : h(r.title)}
+      <button type="button" class="icon del-related" aria-label="Remove">✕</button></span>`;
+  }).join("");
+  return `<div class="deps related-tasks"><label>Related to <input class="related-search" placeholder="Link another task…" autocomplete="off"></label>
+    <div class="dep-chips">${chips}</div><div class="related-results"></div></div>`;
+}
+
+async function setRelated(id, ids) {
+  $("#detail").dataset.key = "";
+  await patchTask(id, { related: ids });
+  await refresh();  // (the other tasks' links changed too)
 }
 
 async function setBlockers(id, ids) {
@@ -2797,6 +2819,17 @@ function bindDetail() {
         (e.target.value.trim() ? '<span class="muted small">No contact matches.</span>' : "");
       return;
     }
+    if (e.target.matches(".related-search")) {
+      const t = taskById(S.selected.id);
+      const q = e.target.value.trim().toLowerCase();
+      const have = new Set((t.related || []).map((r) => r.id));
+      $(".related-results", el).innerHTML = (q ? S.data.tasks.filter((x) => x.id !== t.id && !have.has(x.id) &&
+        x.title.toLowerCase().includes(q)).slice(0, 6) : []).map((x) =>
+        `<button type="button" class="link add-related" data-related="${x.id}">${h(x.title)}${
+          x.project_id ? ` <span class="muted small">${h(projectById(x.project_id)?.name || "")}</span>` : ""}</button>`).join("") ||
+        (q ? '<span class="muted small">No open task matches.</span>' : "");
+      return;
+    }
     if (e.target.matches(".dep-search")) {
       const t = taskById(S.selected.id);
       $(".dep-results", el).innerHTML = depMatches(t, e.target.value).map((x) =>
@@ -2949,6 +2982,12 @@ function bindDetail() {
       const gone = b.closest("[data-person]").dataset.person;
       setPeople(sel.id, taskById(sel.id).people.filter((id) => id !== gone));
     }
+    else if (b.classList.contains("add-related")) setRelated(sel.id, [...(taskById(sel.id).related || []).map((r) => r.id), Number(b.dataset.related)]);
+    else if (b.classList.contains("del-related")) {
+      const gone = Number(b.closest("[data-related]").dataset.related);
+      setRelated(sel.id, taskById(sel.id).related.map((r) => r.id).filter((id) => id !== gone));
+    }
+    else if (b.classList.contains("open-related")) openTask(Number(b.closest("[data-related]").dataset.related));
     else if (b.classList.contains("del-dep")) {
       const gone = Number(b.closest("[data-dep]").dataset.dep);
       setBlockers(sel.id, taskById(sel.id).blocked_by.filter((id) => id !== gone));

@@ -198,6 +198,15 @@ CREATE TABLE IF NOT EXISTS task_deps (
     PRIMARY KEY (task_id, blocker_id)
 );
 
+-- "Related to": two tasks linked both ways (stored once, with a < b), for getting from one to
+-- the other; it changes nothing about either.
+CREATE TABLE IF NOT EXISTS task_links (
+    a INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    b INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    PRIMARY KEY (a, b),
+    CHECK (a < b)
+);
+
 -- Project templates: a project and its tasks as JSON (see app.py's template_data), with
 -- dates as days from the project's date. With a repeat, a new project is made from it on
 -- schedule: for next_date, lead_days before it.
@@ -257,6 +266,7 @@ INDEXES = """
 CREATE INDEX IF NOT EXISTS links_user ON links(user_id, parent_id);
 CREATE INDEX IF NOT EXISTS attachments_task ON attachments(task_id);
 CREATE INDEX IF NOT EXISTS task_deps_blocker ON task_deps(blocker_id);
+CREATE INDEX IF NOT EXISTS task_links_b ON task_links(b);
 CREATE INDEX IF NOT EXISTS attachments_blob ON attachments(blob_id);
 CREATE TRIGGER IF NOT EXISTS attachments_blob_gone AFTER DELETE ON attachments
 BEGIN

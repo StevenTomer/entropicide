@@ -30,7 +30,7 @@
       <li><a href="#notes">Notes and formatting</a></li>
       <li><a href="#files">Attachments</a></li>
       <li><a href="#projects">Projects</a></li>
-      <li><a href="#deps">Blocked by (dependencies)</a></li>
+      <li><a href="#deps">Blocked by and Related to</a></li>
       <li><a href="#templates">Templates and recurring projects</a></li>
       <li><a href="#areas">Areas</a></li>
       <li><a href="#tags">Tags and search</a></li>
@@ -246,6 +246,7 @@
       <dt>Priority</dt><dd>A number; higher comes first in Focus and the Queue.</dd>
       <dt>Time and Energy</dt><dd>How long it takes and how much energy it needs, shown on the row, to help pick a task that fits the moment (“15 min, low energy” for the end of the day).</dd>
       <dt>Blocked by</dt><dd>Other tasks it has to wait for (<a href="#deps">see Blocked by</a>).</dd>
+      <dt>Related to</dt><dd>Other tasks that go with it, both ways, to open from here (<a href="#deps">see Related to</a>).</dd>
     </dl>
     <p>More opens by itself when any of these is set, and its heading lists them (“priority 3 · 15m”).</p>
     <p>At the bottom: <strong>Move to trash</strong> (or Restore / Delete forever when it's already in the Trash).
@@ -324,7 +325,7 @@
   </section>
 
   <section id="deps">
-    <h2>Blocked by (dependencies)</h2>
+    <h2>Blocked by and Related to</h2>
     <p>Some tasks can't start until others are done. In a task's details, type in <strong>Blocked by</strong> and pick
       the task (or tasks) it waits on. Until they're all done, it stays out of the Queue and Focus; elsewhere (All, its
       project) it shows 🔒 <em>after …</em>. When the last one is done, it turns up in the Queue by itself.</p>
@@ -332,6 +333,11 @@
       “Send invitations”, blocked by “Book the venue” and “Set the budget”, in another project.</div>
     <p>A blocker in the Trash counts as done; ✕ on it takes it off. Tasks can't wait on each other in a loop.
       <a href="#projects">Sequential projects</a> are the simple case: each step waits on the one before.</p>
+    <p><strong>Related to</strong> (under it, in More) links tasks that belong together without either waiting:
+      type and pick, and the link goes both ways. Click a related task to open it; done ones are struck through,
+      and ✕ takes a link off (from both). Rows show 🔗 and how many. Copies (Duplicate, and each copy of a repeating task)
+      keep the links.</p>
+    <div class="ex">“Call the plumber” related to “Kitchen leak”, so either leads to the other, but both stay in the Queue.</div>
   </section>
 
   <section id="templates">

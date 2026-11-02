@@ -16,6 +16,8 @@ Settings → Troubleshooting.
   under Repeat, or `every mon, wed and fri` when adding.
 - **Repeat on a weekday of the month:** the first Monday, the second Tuesday, the last Friday
   (`every first monday`, `every last friday of the month` when adding).
+- **Related to:** link tasks that belong together, both ways, without either waiting on the other
+  (in a task's details, under More). Click one to open it; rows show 🔗 and how many.
 - **Add tasks from other apps:** Settings → Add from other apps makes a key for an Alexa skill,
   Home Assistant, an iPhone shortcut or a script, which sends the task's text to `/api/add`
   and has it read like quick add. A key can also be allowed to read your lists

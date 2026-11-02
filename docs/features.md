@@ -96,7 +96,7 @@ In brief:
 - **Repeating tasks** start each copy with its checklist unticked, and can carry their
   attachments to each copy (stored once).
 - **Blocked by:** a task can wait on others (in any project); until they're done it stays out of
-  the Queue and Focus.
+  the Queue and Focus. **Related to** links tasks both ways without waiting: click one to open it.
 - **Templates:** *Save as template* from a project (dates kept as days from the project's date),
   then *New project* from it with a date. A template can repeat, making a new project on
   schedule, some days ahead (*Monthly bills (Nov 1)*).

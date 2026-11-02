@@ -42,10 +42,11 @@ fi
 
 echo "== Copying the app to $DEST"
 mkdir -p "$DEST/data" "$DEST/backups"
-# (Development-only files stay behind: the tests, CI settings and the ideas backlog.)
+# (Development-only files stay behind: the tests, CI settings and the ideas backlog; and the
+# Alexa skill, which alexa/install.sh installs on its own.)
 rsync -a --delete --exclude venv --exclude data --exclude backups --exclude .env \
     --exclude __pycache__ --exclude .git --exclude android --exclude tests \
-    --exclude .pytest_cache --exclude .github --exclude IDEAS.md "$SRC/" "$DEST/"
+    --exclude .pytest_cache --exclude .github --exclude IDEAS.md --exclude alexa "$SRC/" "$DEST/"
 
 if [ ! -x "$DEST/venv/bin/python" ]; then
     echo "== Creating virtualenv"

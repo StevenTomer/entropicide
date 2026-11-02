@@ -1,0 +1,77 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "entropicide",
+      "intents": [
+        { "name": "AMAZON.CancelIntent", "samples": [] },
+        { "name": "AMAZON.HelpIntent", "samples": [] },
+        { "name": "AMAZON.StopIntent", "samples": [] },
+        { "name": "AMAZON.NavigateHomeIntent", "samples": [] },
+        { "name": "AMAZON.FallbackIntent", "samples": [] },
+        { "name": "AMAZON.YesIntent", "samples": [] },
+        { "name": "AMAZON.NoIntent", "samples": [] },
+        {
+          "name": "AddTaskIntent",
+          "slots": [{ "name": "task", "type": "AMAZON.SearchQuery" }],
+          "samples": [
+            "add {task}",
+            "to add {task}",
+            "new task {task}",
+            "put {task} on my list",
+            "capture {task}",
+            "I need to {task}"
+          ]
+        },
+        {
+          "name": "ReadListIntent",
+          "slots": [{ "name": "list", "type": "LIST_NAME" }],
+          "samples": [
+            "what's due",
+            "what's due today",
+            "what is due today",
+            "what do I have to do",
+            "what do I have to do today",
+            "what's on my list",
+            "what's on my {list}",
+            "what's on my {list} list",
+            "what's in my {list}",
+            "what's in my {list} list",
+            "read my {list}",
+            "read my {list} list",
+            "read {list}"
+          ]
+        },
+        {
+          "name": "CompleteTaskIntent",
+          "slots": [{ "name": "task", "type": "AMAZON.SearchQuery" }],
+          "samples": [
+            "I finished {task}",
+            "I've finished {task}",
+            "I did {task}",
+            "I've done {task}",
+            "complete {task}",
+            "mark {task} done",
+            "mark {task} as done",
+            "check off {task}",
+            "tick off {task}"
+          ]
+        }
+      ],
+      "types": [
+        {
+          "name": "LIST_NAME",
+          "values": [
+            { "name": { "value": "focus", "synonyms": ["today", "focus list", "my day", "today's list"] } },
+            { "name": { "value": "queue", "synonyms": ["next", "next actions", "to do", "to do list"] } },
+            { "name": { "value": "inbox", "synonyms": ["in box", "in tray"] } },
+            { "name": { "value": "soon", "synonyms": [] } },
+            { "name": { "value": "later", "synonyms": [] } },
+            { "name": { "value": "someday", "synonyms": ["some day", "someday maybe"] } },
+            { "name": { "value": "waiting", "synonyms": ["waiting for", "waiting on"] } },
+            { "name": { "value": "scheduled", "synonyms": ["upcoming", "coming up"] } }
+          ]
+        }
+      ]
+    }
+  }
+}

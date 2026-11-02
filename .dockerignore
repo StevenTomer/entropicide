@@ -5,6 +5,7 @@ data
 backups
 apk
 android
+alexa
 tests
 __pycache__
 *.pyc

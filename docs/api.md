@@ -144,7 +144,8 @@ curl -d "Buy milk tomorrow #errand" -H "Authorization: Bearer YOUR-KEY" https://
 
 ### An Alexa skill
 
-Make a custom skill in the [Alexa developer console](https://developer.amazon.com/alexa/console/ask)
+A ready-made one is in `alexa/` (add, read and complete, run on your server): see
+[alexa.md](alexa.md). To write your own, make a custom skill in the [Alexa developer console](https://developer.amazon.com/alexa/console/ask)
 (left in *Development*, it works on the Echos of your own Amazon account, without publishing)
 with one intent whose slot takes the whole phrase:
 
@@ -152,7 +153,7 @@ with one intent whose slot takes the whole phrase:
 {
   "name": "AddTaskIntent",
   "slots": [{"name": "task", "type": "AMAZON.SearchQuery"}],
-  "samples": ["add {task}", "to add {task}", "remind me to {task}", "put {task} on my list"]
+  "samples": ["add {task}", "to add {task}", "new task {task}", "put {task} on my list"]
 }
 ```
 

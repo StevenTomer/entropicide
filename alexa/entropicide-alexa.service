@@ -1,0 +1,15 @@
+# Entropicide's Alexa skill (alexa/server.py), installed by alexa/install.sh.
+[Unit]
+Description=Entropicide Alexa skill
+After=network.target entropicide.service
+
+[Service]
+User=entropicide
+Group=entropicide
+WorkingDirectory=/opt/entropicide-alexa
+EnvironmentFile=/opt/entropicide-alexa/.env
+ExecStart=/opt/entropicide-alexa/venv/bin/gunicorn --workers 1 --bind 127.0.0.1:5004 server:app
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

@@ -21,7 +21,8 @@ repeating tasks and reminders, for you, your family or a small team.
 
 The in-app **Help** page (press `?`) explains every feature with examples; there's also a
 [feature tour](docs/features.md). Other apps (an Alexa skill, Home Assistant, a phone
-shortcut) can add tasks too: see [docs/api.md](docs/api.md).
+shortcut) can add tasks too: see [docs/api.md](docs/api.md), and [docs/alexa.md](docs/alexa.md)
+for a ready-made Alexa skill.
 
 ## Running it
 

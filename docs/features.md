@@ -48,7 +48,7 @@ In brief:
 - **Priority** is a number, 0 by default (negative pushes a task down); rows are tinted red above 0
   and blue below, deeper the further from 0. **Focus** and the
   **Queue** list higher numbers first, in your drag order within the same number. Change it
-  with the ▲/▼ on each task, right-click → Priority, `+`/`-` on the open or selected tasks, or
+  by dragging the ↕ on each task up or down, right-click → Priority, `+`/`-` on the open or selected tasks, or
   the editor. Dragging a task within Focus or the Queue gives it the priority of where it lands.
 - **Drag** tasks to reorder them, or drop them on a sidebar list, a project, Logbook (to
   complete them) or Trash.

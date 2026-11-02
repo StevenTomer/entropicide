@@ -5,6 +5,14 @@ Settings → Troubleshooting.
 
 ## Unreleased
 
+- **Priority by dragging:** each task's ▲/▼ is now one ↕: press and drag up to raise the
+  priority, down to lower it, and let go to set it. The row stays put until then, so it no
+  longer jumps away between clicks.
+- **A quicker right-click menu:** Move to and Area are rows of buttons at the top (one click
+  instead of a submenu), then Priority, Tag and Defer, then Open, Focus timer, Star, Complete
+  and Duplicate.
+- **Android app 1.0.5:** the Add task tile's box shows its text light on dark in dark mode
+  (it was black on dark grey).
 - The compass symbol, in grey bas-relief, now sits faintly behind every page.
 - **Remind me** can now be a day to three months before the due date, as well as a time; it
   sits under Due, and either kind moves when the due date does.
@@ -16,6 +24,9 @@ Settings → Troubleshooting.
   under Repeat, or `every mon, wed and fri` when adding.
 - **Repeat on a weekday of the month:** the first Monday, the second Tuesday, the last Friday
   (`every first monday`, `every last friday of the month` when adding).
+- **Alexa:** a ready-made skill in `alexa/` ("Alexa, tell Entropicide to add buy milk tomorrow",
+  "… what's due today", "… I finished call the dentist"), run on your own server with
+  `sudo ./alexa/install.sh`; see docs/alexa.md.
 - **Related to:** link tasks that belong together, both ways, without either waiting on the other
   (in a task's details, under More). Click one to open it; rows show 🔗 and how many.
 - **Add tasks from other apps:** Settings → Add from other apps makes a key for an Alexa skill,

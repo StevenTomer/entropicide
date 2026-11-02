@@ -508,16 +508,19 @@ public class QuickAddTile extends TileService {
         boolean night = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
                 == Configuration.UI_MODE_NIGHT_YES;
         int pad = Math.round(20 * getResources().getDisplayMetrics().density);
-        EditText field = new EditText(this);
+        AlertDialog.Builder builder = new AlertDialog.Builder(this, night
+                ? android.R.style.Theme_DeviceDefault_Dialog_Alert
+                : android.R.style.Theme_DeviceDefault_Light_Dialog_Alert);
+        // Made from the dialog's context, so the text takes its theme (light on dark at night),
+        // not the tile service's (black).
+        EditText field = new EditText(builder.getContext());
         field.setHint("New task");
         field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         field.setImeOptions(EditorInfo.IME_ACTION_DONE);
-        FrameLayout box = new FrameLayout(this);
+        FrameLayout box = new FrameLayout(builder.getContext());
         box.setPadding(pad, pad / 2, pad, 0);
         box.addView(field);
-        AlertDialog dialog = new AlertDialog.Builder(this, night
-                ? android.R.style.Theme_DeviceDefault_Dialog_Alert
-                : android.R.style.Theme_DeviceDefault_Light_Dialog_Alert)
+        AlertDialog dialog = builder
                 .setTitle("Add a task")
                 .setView(box)
                 .setPositiveButton("Add", (d, which) -> send(field.getText().toString()))

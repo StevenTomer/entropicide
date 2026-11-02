@@ -701,13 +701,14 @@ function taskRow(t, { showState }) {
       ${meta.length ? `<div class="meta">${meta.join("")}</div>` : ""}
       ${notesBlock(t)}
     </div>
-    ${t.completed_at || t.deleted_at ? "" : `<div class="prio-ctl" title="Priority ${t.priority}">
-      <button type="button" class="prio-up" aria-label="Raise priority">▲</button>
-      <span class="prio-num ${t.priority > 0 ? "up" : t.priority < 0 ? "down" : ""}">${t.priority || ""}</span>
-      <button type="button" class="prio-down" aria-label="Lower priority">▼</button>
-    </div>`}
+    ${t.completed_at || t.deleted_at ? "" : `<button type="button" class="prio-ctl"
+      title="Priority ${t.priority}: hold and drag up to raise it, down to lower it" aria-label="Priority ${t.priority}">
+      <span class="prio-grip" aria-hidden="true">↕</span>${prioNum(t.priority)}</button>`}
   </div>`;
 }
+
+const prioNum = (p, text = p || "") =>
+  `<span class="prio-num ${p > 0 ? "up" : p < 0 ? "down" : ""}">${text}</span>`;
 
 // Open tasks are tinted by priority: redder the higher, bluer the lower, none at 0. The
 // tint deepens quickly over the first few steps, then levels off.
@@ -2383,8 +2384,9 @@ function paletteItems() {
     const on = ts.length > 1 ? `${ts.length} selected tasks` : `“${ts[0].title}”`;
     const flat = (list, path) => {
       for (const it of list) {
-        if (it.sep || it.heading || it.note || it.stay || ["Open", "Select", "Tag", "Priority"].includes(it.label) && !path) continue;
-        if (it.sub) flat(it.sub(), path + it.label + " › ");
+        if (it.sep || it.heading || it.note && !it.chips || it.stay || ["Open", "Select", "Tag", "Priority"].includes(it.label) && !path) continue;
+        if (it.chips) flat(it.chips, path + it.label + " › ");
+        else if (it.sub) flat(it.sub(), path + it.label + " › ");
         else if (it.run) add("Action", path + it.label, it.run, on);
       }
     };
@@ -3638,40 +3640,51 @@ function openDeferDialog(ts) {
 }
 
 // Menu items act on every task given; "current" marks a choice they all have already.
-function moveItems(ts) {
+// Move to and Area are a row of buttons each ("chips"), one click from the menu.
+function moveItem(ts) {
   const all = (f) => ts.every(f);
-  const lists = STATES.map(([s]) => s).filter((s) => s !== "scheduled").map((s) => ({
+  const chips = STATES.map(([s]) => s).filter((s) => s !== "scheduled").map((s) => ({
     label: STATE_LABEL[s], current: all((t) => t.state === s), run: () => dropOnNav(ts, s),
   }));
+  if (S.data.projects.some((p) => p.state === "active") || ts.some((t) => t.project_id)) {
+    chips.push({ label: "Project", sub: () => projectItems(ts) });
+  }
+  return { label: "Move to", chips };
+}
+
+function projectItems(ts) {
   const projects = S.data.projects.filter((p) => p.state === "active").map((p) => ({
-    label: p.name, current: all((t) => t.project_id === p.id), run: () => dropOnNav(ts, `project:${p.id}`),
+    label: p.name, current: ts.every((t) => t.project_id === p.id), run: () => dropOnNav(ts, `project:${p.id}`),
   }));
   if (ts.some((t) => t.project_id)) {
     projects.push({ label: "No project", run: () => changeTasks(ts, (t) => t.project_id ? { project_id: null } : null,
       ts.length > 1 ? `Took ${ts.length} tasks out of their projects.` : null) });
   }
-  return projects.length ? [...lists, { heading: "Projects" }, ...projects] : lists;
+  return projects;
 }
 
-function areaItems(ts) {
+function areaItem(ts) {
   // A task in a project takes the project's area.
   const free = ts.filter((t) => !t.project_id);
   if (!free.length) {
-    return [{ note: ts.length > 1 ? "These get their areas from their projects"
-      : `Comes from its project, “${projectById(ts[0].project_id)?.name}”` }];
+    return { label: "Area", note: ts.length > 1 ? "These get their areas from their projects"
+      : `From its project, “${projectById(ts[0].project_id)?.name}”` };
   }
-  if (!S.data.areas.length) return [{ note: "No areas yet. Add them in Settings." }];
+  if (!S.data.areas.length) return { label: "Area", note: "No areas yet. Add them in Settings." };
   const n = free.length;
   const set = (area_id, name) => changeTasks(free, () => ({ area_id }),
     n > 1 ? `Moved ${n} tasks to ${name}.` : null);
-  return [
-    ...(n < ts.length ? [{ note: `${ts.length - n} in projects keep their project's area` }] : []),
-    { label: "No area", current: free.every((t) => !t.area_id), run: () => set(null, "no area") },
-    ...S.data.areas.map((a) => ({
-      label: a.name, icon: a.icon_version && areaIconUrl(a), current: free.every((t) => t.area_id === a.id),
-      run: () => set(a.id, a.name),
-    })),
-  ];
+  return {
+    label: "Area",
+    note: n < ts.length ? `${ts.length - n} in projects keep their project's area` : "",
+    chips: [
+      { label: "None", current: free.every((t) => !t.area_id), run: () => set(null, "no area") },
+      ...S.data.areas.map((a) => ({
+        label: a.name, icon: a.icon_version && areaIconUrl(a), current: free.every((t) => t.area_id === a.id),
+        run: () => set(a.id, a.name),
+      })),
+    ],
+  };
 }
 
 // Tag items toggle and keep the submenu open, so several can be set in a row.
@@ -3709,6 +3722,56 @@ function bumpPriority(ts, step, exact) {
     const p = exact ?? clampPriority(t.priority + step);
     return p === t.priority ? null : { priority: p };
   });
+}
+
+// A row's ↕: press and drag up to raise the priority, down to lower it, a step every
+// PRIO_STEP pixels; it's set on release. Nothing is saved (or the list re-sorted) until then,
+// so the row stays put under the pointer. On a picked task, it moves all the picked ones.
+const PRIO_STEP = 12;
+let prioDrag = null;
+
+function bindPriorityDrag(list) {
+  const bubble = $("#prio-bubble");
+  const show = () => {
+    const { ctl, ts, step, x, y } = prioDrag;
+    const one = ts.length === 1;
+    const p = one ? clampPriority(ts[0].priority + step) : step;
+    const text = one ? String(p) : step > 0 ? `+${step}` : String(step);
+    ctl.querySelector(".prio-num").outerHTML = prioNum(p, one ? p || "" : step ? text : "");
+    bubble.textContent = one ? `Priority ${text}` : `${ts.length} tasks: ${step ? text : "±0"}`;
+    bubble.style.left = x + "px";
+    bubble.style.top = y + "px";
+  };
+  const end = (e) => {
+    if (!prioDrag || e.pointerId !== prioDrag.pointer) return;
+    const { ctl, ts, step, before } = prioDrag;
+    prioDrag = null;
+    ctl.classList.remove("active");
+    bubble.hidden = true;
+    if (e.type === "pointerup" && step) bumpPriority(ts, step);
+    else ctl.querySelector(".prio-num").outerHTML = before;
+  };
+  list.addEventListener("pointerdown", (e) => {
+    const ctl = e.target.closest(".prio-ctl");
+    if (!ctl || e.button || prioDrag) return;
+    e.preventDefault();
+    const id = Number(ctl.closest(".row.task").dataset.task);
+    ctl.setPointerCapture(e.pointerId);
+    ctl.classList.add("active");
+    prioDrag = { ctl, pointer: e.pointerId, ts: tasksOf(S.picked.has(id) ? pickedIds() : [id]), startY: e.clientY,
+      step: 0, x: e.clientX, y: e.clientY, before: ctl.querySelector(".prio-num").outerHTML };
+    bubble.hidden = false;
+    show();
+  });
+  list.addEventListener("pointermove", (e) => {
+    if (!prioDrag || e.pointerId !== prioDrag.pointer) return;
+    const step = Math.round((prioDrag.startY - e.clientY) / PRIO_STEP);
+    if (step !== prioDrag.step) navigator.vibrate?.(5);
+    Object.assign(prioDrag, { step, x: e.clientX, y: e.clientY });
+    show();
+  });
+  list.addEventListener("pointerup", end);
+  list.addEventListener("pointercancel", end);
 }
 
 // These stay open, so the priority can be stepped several times.
@@ -3753,17 +3816,19 @@ function menuItems(ts) {
   }
   const star = !ts.every((t) => t.focus);
   return [
-    ...head,
+    ...(one ? [] : head),
+    moveItem(ts),
+    areaItem(ts),
+    { sep: true },
+    { label: "Priority", sub: () => priorityItems(ts) },
+    { label: "Tag", sub: () => tagItems(ts) },
+    { label: "Defer", sub: () => deferItems(ts) },
+    { sep: true },
+    ...(one ? head : []),
     ...(one ? [{ label: "Focus timer", run: () => openTimer(one.id) }] : []),
     { label: star ? "Star" : "Unstar", run: () => changeTasks(ts, () => ({ focus: star })) },
     { label: "Complete", run: () => dropOnNav(ts, "logbook") },
     { label: "Duplicate", run: () => duplicateTasks(ts) },
-    { sep: true },
-    { label: "Move to", sub: () => moveItems(ts) },
-    { label: "Area", sub: () => areaItems(ts) },
-    { label: "Priority", sub: () => priorityItems(ts) },
-    { label: "Tag", sub: () => tagItems(ts) },
-    { label: "Defer", sub: () => deferItems(ts) },
     { sep: true },
     ...picking,
     ...(picking.length ? [{ sep: true }] : []),
@@ -3805,6 +3870,11 @@ function showItems(items, focusAt) {
   el.innerHTML = items.map((it, i) => {
     if (it.sep) return "<hr>";
     if (it.heading) return `<div class="ctx-heading">${h(it.heading)}</div>`;
+    if (it.chips || it.note && it.label) {
+      return `<div class="ctx-row"><div class="ctx-row-label">${h(it.label)}</div>
+        ${it.note ? `<div class="ctx-row-note">${h(it.note)}</div>` : ""}
+        ${it.chips ? `<div class="ctx-chips">${it.chips.map((c, j) => `<button type="button" role="menuitem" data-i="${i}" data-c="${j}"${c.current ? ' class="current" aria-current="true"' : ""}>${c.icon ? `<img class="ctx-icon" src="${c.icon}" alt="">` : ""}${h(c.label)}${c.sub ? " ›" : ""}</button>`).join("")}</div>` : ""}</div>`;
+    }
     if (it.note) return `<div class="ctx-note">${h(it.note)}</div>`;
     const lead = it.toggle ? `<span class="ctx-check">${it.checked ? "✓" : ""}</span>`
       : it.icon ? `<img class="ctx-icon" src="${it.icon}" alt="">` : "";
@@ -3831,7 +3901,9 @@ function bindMenu() {
   el.addEventListener("click", (e) => {
     const b = e.target.closest("button[data-i]");
     if (!b) return;
-    const it = menu.items[Number(b.dataset.i)];
+    const row = menu.items[Number(b.dataset.i)];
+    const it = b.dataset.c ? row.chips[Number(b.dataset.c)] : row;
+    if (it.current) return;
     if (it.sub) {
       showSub(menu.items, it.sub());
     } else if (it.stay) {
@@ -3845,7 +3917,11 @@ function bindMenu() {
     e.stopPropagation();  // keep app shortcuts out of the menu
     const buttons = [...el.querySelectorAll("button:not([disabled])")];
     const i = buttons.indexOf(document.activeElement);
+    const chip = document.activeElement.dataset.c;
     if (e.key === "Escape") closeMenu();
+    // Left and right move along a row of buttons.
+    else if (chip && e.key === "ArrowRight") document.activeElement.nextElementSibling?.focus();
+    else if (chip && e.key === "ArrowLeft" && chip !== "0") document.activeElement.previousElementSibling?.focus();
     else if (e.key === "ArrowDown") { e.preventDefault(); buttons[(i + 1) % buttons.length]?.focus(); }
     else if (e.key === "ArrowUp") { e.preventDefault(); buttons[(i - 1 + buttons.length) % buttons.length]?.focus(); }
     else if (e.key === "ArrowRight" && menu.items[Number(document.activeElement.dataset.i)]?.sub) document.activeElement.click();
@@ -3865,7 +3941,7 @@ function bindMenu() {
   const cancel = () => { if (press) clearTimeout(press.timer); press = null; };
   list.addEventListener("touchstart", (e) => {
     const row = e.target.closest(".row.task");
-    if (!row || e.touches.length > 1) return cancel();
+    if (!row || e.touches.length > 1 || e.target.closest(".prio-ctl")) return cancel();
     const { clientX: x, clientY: y } = e.touches[0];
     press = { x, y, fired: false };
     press.timer = setTimeout(() => {
@@ -4005,11 +4081,7 @@ function bind() {
       }
       if (e.target.classList.contains("complete")) return completeTask(id, e.target.checked);
       if (b?.classList.contains("star")) return patchTask(id, { focus: !taskById(id).focus });
-      if (b?.classList.contains("prio-up") || b?.classList.contains("prio-down")) {
-        // On a picked task, the buttons move all the picked ones.
-        const ids = S.picked.has(id) ? pickedIds() : [id];
-        return bumpPriority(tasksOf(ids), b.classList.contains("prio-up") ? 1 : -1);
-      }
+      if (b?.classList.contains("prio-ctl")) return;  // dragged, not clicked (bindPriorityDrag)
       // While some tasks are picked, a plain click (or tap) picks too.
       if (S.view !== "trash" && (e.ctrlKey || e.metaKey || e.shiftKey || S.picked.size)) {
         return pick(id, e.shiftKey);
@@ -4037,7 +4109,9 @@ function bind() {
   list.addEventListener("mousedown", (e) => {
     if (e.shiftKey && e.target.closest(".row.task")) e.preventDefault();
   });
+  bindPriorityDrag(list);
   list.addEventListener("dragstart", (e) => {
+    if (prioDrag) return e.preventDefault();
     const row = e.target.closest(".row.task");
     if (!row) return;
     const id = Number(row.dataset.task);

@@ -280,13 +280,20 @@ body.is-dragging-link .link-end { display: block; }
 .overdue { color: var(--overdue); font-weight: 600; }
 .due-today { color: var(--today); font-weight: 600; }
 .energy-high { color: var(--danger); }
-/* Priority: ▲ number ▼ at the end of a task's row. */
-.prio-ctl { display: flex; align-items: center; flex-shrink: 0; margin: -0.125rem -0.25rem -0.125rem 0; color: var(--muted); }
-.prio-ctl button { background: none; border: none; padding: 0.125rem 0.3125rem; font-size: 0.625rem; line-height: 1.4;
-  color: var(--line); cursor: pointer; }
-.prio-ctl button:hover { color: var(--accent); }
-.row:hover .prio-ctl button, .row.selected .prio-ctl button, .row.picked .prio-ctl button { color: var(--muted); }
-@media (hover: none) { .prio-ctl button { color: var(--muted); font-size: 0.75rem; padding: 0.25rem 0.4375rem; } }
+/* Priority: ↕ and the number at the end of a task's row; drag it up or down. */
+.prio-ctl { display: flex; align-items: center; gap: 0.125rem; flex-shrink: 0; margin: -0.125rem -0.25rem -0.125rem 0;
+  padding: 0.125rem 0.3125rem; min-width: 2.25rem; justify-content: center; background: none;
+  border: 1px solid transparent; border-radius: 999px; color: var(--muted); cursor: ns-resize;
+  touch-action: none; user-select: none; -webkit-user-select: none; }
+.prio-grip { font-size: 0.75rem; color: var(--line); }
+.row:hover .prio-grip, .row.selected .prio-grip, .row.picked .prio-grip, .prio-ctl:focus-visible .prio-grip { color: var(--muted); }
+.prio-ctl:hover, .prio-ctl.active { border-color: var(--line); background: var(--bg); }
+.prio-ctl:hover .prio-grip, .prio-ctl.active .prio-grip { color: var(--accent); }
+@media (hover: none) { .prio-ctl { padding: 0.375rem 0.5rem; } .prio-grip { color: var(--muted); font-size: 0.875rem; } }
+/* The number while dragging, beside the pointer (left of it: the ↕ is at the row's right end). */
+.prio-bubble { position: fixed; z-index: 45; transform: translate(calc(-100% - 1.25rem), -50%); pointer-events: none;
+  background: var(--text); color: var(--bg); font-weight: 600; font-size: 0.875rem; padding: 0.3125rem 0.625rem;
+  border-radius: 0.375rem; box-shadow: 0 0.25rem 1rem rgba(0, 0, 0, .2); white-space: nowrap; }
 .prio-num { font-size: 0.75rem; font-weight: 600; min-width: 1.4em; text-align: center; }
 .prio-num.up { color: var(--danger); }
 .prio-num.down { color: var(--muted); font-weight: normal; }
@@ -469,6 +476,15 @@ table.users td button { display: block; margin-bottom: 0.125rem; }
 .ctx-check { width: 0.875rem; display: inline-block; color: var(--accent); font-weight: 600; }
 .ctx-icon { width: 1rem; height: 1rem; object-fit: contain; }
 .ctx-note { color: var(--muted); padding: 0.4375rem 0.625rem; font-size: 0.8125rem; max-width: 16.25rem; }
+/* Move to and Area: a label over a row of buttons. */
+.ctx-row { padding: 0.3125rem 0.625rem 0.4375rem; max-width: 19rem; }
+.ctx-row-label { font-size: 0.75rem; color: var(--muted); margin-bottom: 0.25rem; }
+.ctx-row-note { font-size: 0.8125rem; color: var(--muted); }
+.ctx-chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.ctx .ctx-chips button { width: auto; display: inline-flex; align-items: center; gap: 0.3125rem; padding: 0.25rem 0.5625rem;
+  border: 1px solid var(--line); border-radius: 999px; font-size: 0.8125rem; white-space: nowrap; }
+.ctx .ctx-chips button.current { border-color: var(--accent); color: var(--accent); font-weight: 600; cursor: default; }
+@media (hover: none) { .ctx .ctx-chips button { padding: 0.375rem 0.6875rem; } }
 .row.menu-target { background: var(--hover); }
 /* press-and-hold shouldn't select text or pop the browser's own menu */
 .row.task { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }

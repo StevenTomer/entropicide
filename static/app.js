@@ -16,11 +16,12 @@ const REMIND_BEFORE = [[1, "1 day"], [2, "2 days"], [3, "3 days"], [7, "1 week"]
 const isRecurringCopy = (t) => t.state === "scheduled" && t.series_id;
 // Priority is a number, 0 by default; Focus and the Queue list higher numbers first.
 const PRIORITY_VIEWS = ["focus", "next"];
-const byPriority = (list) => [...list].sort((a, b) => b.priority - a.priority);  // stable: keeps drag order
+const byPriority = (list) => [...list].sort((a, b) => (b.priority || 0) - (a.priority || 0));  // stable: keeps drag order
 const REPEATS = ["", "daily", "weekdays", "weekly", "monthly", "yearly"];
 
 const S = {
-  data: { tasks: [], projects: [], areas: [], tags: [], links: [], templates: [], user: {}, events: [], google: {} },
+  data: { tasks: [], projects: [], areas: [], tags: [], links: [], templates: [], user: {}, events: [], google: {},
+    notes: [], note_categories: [], journals: [] },
   linkTarget: null,     // the folder new links go into (Links page), or null for the top level
   view: load("view", "focus"),
   // Areas shown (ids as strings, "none" for tasks without one); empty shows everything.
@@ -36,6 +37,7 @@ const S = {
   navFocus: false,      // the keyboard is on the sidebar (h), where j/k change the list
   extra: [],            // logbook / trash rows, fetched per view
   extraProjects: [],
+  extraNotes: [],       // notes in the trash (Trash)
 };
 
 // This device's settings, as "entropicide.<key>" (copied once from "todo.<key>", their
@@ -250,12 +252,12 @@ function send(method, path, body) {
 }
 
 // ---- offline changes -----------------------------------------------------
-// Task and project changes made without a connection wait in an outbox (kept in this
+// Task, project and note changes made without a connection wait in an outbox (kept in this
 // browser) and are sent in order once the server answers again. Meanwhile they're applied
 // to the tasks on screen, and again after a reload (the service worker keeps the last
-// /api/data). Tasks and projects created offline get negative ids until they're sent.
+// /api/data). Tasks, projects and notes created offline get negative ids until they're sent.
 
-const OFFLINE_PATH = /^\/(tasks(\/bulk|\/-?\d+)?|projects(\/-?\d+)?|reorder\/tasks)$/;
+const OFFLINE_PATH = /^\/(tasks(\/bulk|\/-?\d+)?|projects(\/-?\d+)?|notes(\/-?\d+)?|reorder\/tasks)$/;
 const outbox = loadOutbox();  // { uid, ops: [{ method, path, body, temp }], ids: {temp: real} }
 let flushing = false;
 
@@ -278,7 +280,7 @@ function queueChange(method, path, body) {
   }
   outbox.uid = S.data.user.id;
   const op = { method, path, body: structuredClone(body) };
-  if (method === "POST" && (path === "/tasks" || path === "/projects")) {
+  if (method === "POST" && ["/tasks", "/projects", "/notes"].includes(path)) {
     op.temp = Math.min(-1, ...outbox.ops.map((o) => o.temp ?? 0), ...Object.keys(outbox.ids).map(Number)) - 1;
   }
   outbox.ops.push(op);
@@ -303,19 +305,30 @@ function applyOffline(op) {
       energy: null, minutes: null, priority: 0, series_id: null, series_index: null,
       missed: false, position: Math.max(0, ...S.data.tasks.map((x) => x.position)) + 1,
       completed_at: null, deleted_at: null, tags: [], repeat: null, on_miss: null,
-      series_latest: null, attachments: [] };
+      series_latest: null, attachments: [], blocked_by: [], blocked_by_projects: [], related: [],
+      related_projects: [] };
     if (!taskById(t.id)) S.data.tasks.push(t);
     return changeOffline("tasks", t.id, body);
   }
   if (method === "POST" && kind === "projects") {
     const p = { id: op.temp, area_id: null, name: "", notes: "", sequential: false, state: "active",
-      focus: false, due_date: null, completed_at: null, deleted_at: null,
+      focus: false, due_date: null, completed_at: null, deleted_at: null, priority: 0, tags: [],
+      attachments: [], blocked_by: [], blocked_by_projects: [], related: [], related_projects: [],
       position: Math.max(0, ...S.data.projects.map((x) => x.position)) + 1 };
     if (!projectById(p.id)) S.data.projects.push(p);
     return changeOffline("projects", p.id, body);
   }
+  if (method === "POST" && kind === "notes") {
+    const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
+    const n = { id: op.temp, title: "", body: "", font: "", category_id: null, area_id: null, journal_id: null,
+      entry_date: null, pinned: false, created_at: stamp, updated_at: stamp, deleted_at: null, tags: [],
+      attachments: [], related: [], related_projects: [] };
+    if (!S.data.notes.some((x) => x.id === n.id)) S.data.notes.push(n);
+    return changeOffline("notes", n.id, body);
+  }
   if (method === "DELETE") {
     S.extra = S.extra.filter((t) => t.id !== Number(rest));
+    if (kind === "notes") S.extraNotes = S.extraNotes.filter((n) => n.id !== Number(rest));
     return null;
   }
   return changeOffline(kind, Number(rest), body);
@@ -324,9 +337,10 @@ function applyOffline(op) {
 const offlineGone = new Map();  // tasks/projects completed or trashed offline, for Undo
 
 function changeOffline(kind, id, changes) {
-  const list = kind === "tasks" ? S.data.tasks : S.data.projects;
+  const list = { tasks: S.data.tasks, projects: S.data.projects, notes: S.data.notes }[kind];
   const key = kind + id;
-  const x = list.find((y) => y.id === id) || S.extra.find((y) => y.id === id) || offlineGone.get(key);
+  const extra = kind === "notes" ? S.extraNotes : S.extra;
+  const x = list.find((y) => y.id === id) || extra.find((y) => y.id === id) || offlineGone.get(key);
   if (!x) return null;
   const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
   for (const [k, v] of Object.entries(changes)) {
@@ -339,11 +353,12 @@ function changeOffline(kind, id, changes) {
     else if (k !== "defer" && k !== "on_miss") x[k] = v;
   }
   if (kind === "projects" && "state" in changes) x.completed_at = changes.state === "done" ? stamp : null;
-  // Like /api/data: only open tasks, and projects not in the trash.
+  if (kind === "notes") noteChangedOffline(x, changes, stamp);
+  // Like /api/data: only open tasks, and projects and notes not in the trash.
   const gone = kind === "tasks" ? x.completed_at || x.deleted_at : x.deleted_at;
   const i = list.indexOf(x);
   if (gone && i >= 0) { list.splice(i, 1); offlineGone.set(key, x); }
-  else if (!gone && i < 0 && !S.extra.includes(x)) { list.push(x); offlineGone.delete(key); }
+  else if (!gone && i < 0 && !extra.includes(x)) { list.push(x); offlineGone.delete(key); }
   return x;
 }
 
@@ -384,6 +399,7 @@ async function flushOutbox() {
       saveOutbox();
     }
     if (S.selected && outbox.ids[S.selected.id]) S.selected.id = outbox.ids[S.selected.id];
+    noteEditorSaved(outbox.ids);
     S.picked = new Set([...S.picked].map((id) => outbox.ids[id] ?? id));
     outbox.ids = {};
     outbox.uid = null;
@@ -442,13 +458,35 @@ function projectActive(t) {
   return !p || p.state === "active";
 }
 
+// The open item in the editor: a task or a project.
+const selItem = () => S.selected && (S.selected.kind === "task" ? taskById(S.selected.id) : projectById(S.selected.id));
+// A project that isn't done (only open tasks are loaded, but projects done lately are too).
+const openProject = (id) => { const p = projectById(id); return p && p.state !== "done" ? p : null; };
+
+// What a task or project (kind) is blocked by that isn't done yet, as [{kind, id, title}]:
+// open tasks and projects, and for a task, what its project is waiting on too.
+function waitingOn(x, kind = "task") {
+  const out = [];
+  for (const id of x.blocked_by || []) {
+    const t = S.data.tasks.find((y) => y.id === id);
+    if (t) out.push({ kind: "task", id, title: t.title });
+  }
+  for (const id of x.blocked_by_projects || []) {
+    const p = openProject(id);
+    if (p) out.push({ kind: "project", id, title: p.name });
+  }
+  const p = kind === "task" && x.project_id && projectById(x.project_id);
+  if (p) out.push(...waitingOn(p, "project"));
+  return out;
+}
+
 // A sequential project only exposes its first Next action.
-// Plus tasks blocked by others that aren't done yet (Blocked by).
+// Plus tasks waiting on others, or on projects, that aren't done yet (Blocked by), and the
+// tasks of a project that's waiting.
 function sequentialBlocked() {
   const blocked = new Set();
   const seen = new Set();
-  const open = new Set(S.data.tasks.map((t) => t.id));
-  for (const t of S.data.tasks) if (t.blocked_by?.some((id) => open.has(id))) blocked.add(t.id);
+  for (const t of S.data.tasks) if (waitingOn(t).length) blocked.add(t.id);
   for (const t of S.data.tasks) {
     const p = t.project_id && projectById(t.project_id);
     if (!p || !p.sequential || t.state !== "next") continue;
@@ -529,11 +567,17 @@ function searchTest() {
   return (...texts) => texts.some((text) => text.toLowerCase().includes(lower));
 }
 
+// A task's tags, with its project's (which go with all of its tasks).
+function taskTags(t) {
+  const p = t.project_id && projectById(t.project_id);
+  return p?.tags?.length ? [...new Set([...t.tags, ...p.tags])] : t.tags;
+}
+
 function filtered(list) {
   const match = searchTest();
   return list.filter((t) =>
     (!match || match(t.title, t.notes)) &&
-    [...S.tagFilter].every((tag) => t.tags.includes(tag)));
+    [...S.tagFilter].every((tag) => taskTags(t).includes(tag)));
 }
 
 async function refresh() {
@@ -544,6 +588,7 @@ async function refresh() {
     const tr = await api("GET", "/trash");
     S.extra = tr.tasks;
     S.extraProjects = tr.projects;
+    S.extraNotes = tr.notes || [];
   }
   render();
 }
@@ -565,10 +610,14 @@ async function patchTask(id, changes, { quiet } = {}) {
   return task;
 }
 
+function replaceProject(p) {
+  const i = S.data.projects.findIndex((x) => x.id === p.id);
+  if (i >= 0) S.data.projects[i] = p;
+}
+
 async function patchProject(id, changes) {
   const p = await api("PATCH", `/projects/${id}`, changes);
-  const i = S.data.projects.findIndex((x) => x.id === id);
-  if (i >= 0) S.data.projects[i] = p;
+  if (p) replaceProject(p);
   if ("deleted" in changes || "state" in changes) await refresh();
   else render();
   return p;
@@ -603,7 +652,7 @@ function setAreas(ids) {
 
 function navItem(view, label, count, extraClass = "") {
   const active = S.view === view ? " active" : "";
-  return `<a href="#" class="nav-item${active} ${extraClass}" data-view="${h(view)}"${["recurring", "all", "calendar", "links"].includes(view) ? "" : ` data-drop="${h(view)}"`}>
+  return `<a href="#" class="nav-item${active} ${extraClass}" data-view="${h(view)}"${["recurring", "all", "calendar", "links", "notes", "journal"].includes(view) ? "" : ` data-drop="${h(view)}"`}>
     <span class="nav-label">${label}</span>${count ? `<span class="count">${count}</span>` : ""}</a>`;
 }
 
@@ -613,10 +662,8 @@ function renderNav() {
   counts.focus = viewTasks("focus").length;
   counts.recurring = viewTasks("recurring").length;
   counts.all = viewTasks("all").length;
-  const projects = S.data.projects
-    .filter((p) => p.state === "active" && inArea(p.area_id))
-    .sort((a, b) => (b.focus - a.focus) || (a.position - b.position));
-  const open = (id) => S.data.tasks.filter((t) => t.project_id === id).length;
+  // Projects have a page of their own (and Move to › Project); the sidebar just counts them.
+  const projects = S.data.projects.filter((p) => p.state === "active" && inArea(p.area_id)).length;
   $("#nav").innerHTML =
     // Inbox, then Focus, then the other lists; the Calendar is an icon in the toolbar.
     STATES.map(([s, label]) => navItem(s, label, counts[s]) +
@@ -624,12 +671,12 @@ function renderNav() {
       (s === "scheduled" ? navItem("recurring", "Recurring", counts.recurring) : "")).join("") +
     navItem("all", "All", counts.all) +
     `<div class="nav-section">
-       <a href="#" class="nav-item ${S.view === "projects" ? "active" : ""}" data-view="projects">Projects</a>
+       <a href="#" class="nav-item ${S.view === "projects" || S.view.startsWith("project:") ? "active" : ""}" data-view="projects">
+         <span class="nav-label">Projects</span>${projects ? `<span class="count">${projects}</span>` : ""}</a>
        <button class="icon add-project" title="New project" aria-label="New project">+</button>
      </div>` +
-    projects.map((p) => navItem(`project:${p.id}`,
-      areaIcon(p.area_id) + (p.focus ? "★ " : "") + h(p.name), open(p.id), "project")).join("") +
-    '<div class="nav-section"></div>' +
+    navItem("notes", "Notes", 0) +
+    navItem("journal", "Journal", 0) +
     navItem("links", "Links", 0) +
     navItem("logbook", "Logbook", 0) +
     navItem("trash", "Trash", 0);
@@ -644,6 +691,7 @@ function viewTitle() {
   if (S.view === "calendar") return "Calendar";
   if (S.view === "logbook") return "Logbook";
   if (S.view === "links") return "Links";
+  if (S.view === "notes" || S.view === "journal") return notesViewTitle();
   if (S.view === "trash") return "Trash";
   if (S.view.startsWith("project:")) return projectById(Number(S.view.slice(8)))?.name ?? "Project";
   return STATE_LABEL[S.view] ?? "";
@@ -666,7 +714,7 @@ function taskRow(t, { showState }) {
     meta.push(`<span title="Repeats ${repeatLabel(t.repeat)}${fromDone ? " after it's done" : `; if missed: ${t.on_miss}`}">↻${
       S.view === "recurring" ? ` ${repeatLabel(t.repeat)}${fromDone ? " after done" : `, ${t.on_miss === "keep" ? "keeps missed" : "replaces missed"}`}` : ""}</span>`);
   }
-  const waits = openBlockers(t);
+  const waits = waitingOn(t);
   if (waits.length) {
     meta.push(`<span class="blocked" title="Waiting on: ${h(waits.map((b) => b.title).join(", "))}">🔒 after ${
       h(waits[0].title)}${waits.length > 1 ? ` +${waits.length - 1}` : ""}</span>`);
@@ -770,7 +818,10 @@ async function setAreaIcon(li, body) {
 function projectRow(p) {
   const n = S.data.tasks.filter((t) => t.project_id === p.id).length;
   const area = p.area_id && areaById(p.area_id);
-  return `<div class="row project" data-project="${p.id}">
+  const waits = waitingOn(p, "project");
+  const sel = (S.selected?.kind === "project" && S.selected.id === p.id ? " selected" : "") +
+    (menu.project === p.id ? " menu-target" : "");
+  return `<div class="row project${sel}" data-project="${p.id}"${prioTint(p)}>
     <button class="star ${p.focus ? "on" : ""}" aria-label="Focus" title="Focus">★</button>
     ${areaIcon(p.area_id)}
     <div class="row-body">
@@ -780,13 +831,22 @@ function projectRow(p) {
         ${area ? `<span>${h(area.name)}</span>` : ""}
         <span>${n} open</span>
         ${p.due_date ? `<span class="due">Due ${fmtDate(p.due_date)}</span>` : ""}
+        ${waits.length ? `<span class="blocked" title="Waiting on: ${h(waits.map((b) => b.title).join(", "))}">🔒 after ${
+          h(waits[0].title)}${waits.length > 1 ? ` +${waits.length - 1}` : ""}</span>` : ""}
+        ${p.related?.length || p.related_projects?.length ? `<span class="related" title="Related: ${h([...(p.related || []).map((r) => r.title),
+          ...(p.related_projects || []).map((r) => r.name)].join(", "))}">🔗 ${(p.related?.length || 0) + (p.related_projects?.length || 0)}</span>` : ""}
+        ${p.attachments?.length ? `<span title="${h(p.attachments.map((f) => f.name).join(", "))}">📎 ${p.attachments.length}</span>` : ""}
+        ${(p.tags || []).map((tag) => `<span class="tag">${h(tag)}</span>`).join("")}
       </div>
     </div>
+    ${p.state === "done" ? "" : `<button type="button" class="prio-ctl"
+      title="Priority ${p.priority || 0}: hold and drag up to raise it, down to lower it" aria-label="Priority ${p.priority || 0}">
+      <span class="prio-grip" aria-hidden="true">↕</span>${prioNum(p.priority || 0)}</button>`}
   </div>`;
 }
 
 function renderTagBar(list) {
-  const used = new Set(list.flatMap((t) => t.tags));
+  const used = new Set(list.flatMap(taskTags));
   for (const t of S.tagFilter) used.add(t);
   $("#tag-bar").innerHTML = [...used].sort().map((tag) =>
     `<button class="tag-chip ${S.tagFilter.has(tag) ? "on" : ""}" data-tag="${h(tag)}">${h(tag)}</button>`
@@ -798,7 +858,13 @@ function renderList() {
   document.title = viewTitle() + " · Entropicide";
   const el = $("#list");
   const readOnly = S.view === "logbook" || S.view === "trash";
-  $("#quick-add").hidden = readOnly || S.view === "projects" || S.view === "links";
+  $("#quick-add").hidden = readOnly || ["projects", "links", "notes", "journal"].includes(S.view);
+  if (S.view === "notes" || S.view === "journal") {
+    $("#main").append($("#detail"));  // (as for links)
+    renderNotes(el);
+    renderSelectBar();
+    return;
+  }
   if (S.view === "links") {
     $("#main").append($("#detail"));  // out of the way of the links page, which redraws the list
     renderLinks(el);
@@ -810,7 +876,7 @@ function renderList() {
     $("#tag-bar").innerHTML = "";
     const groups = [["active", "Active"], ["someday", "Someday"], ["later", "Later"], ["done", "Completed"]];
     fillList(el, (groups.map(([state, label]) => {
-      const ps = S.data.projects.filter((p) => p.state === state && inArea(p.area_id));
+      const ps = byPriority(S.data.projects.filter((p) => p.state === state && inArea(p.area_id)));
       if (!ps.length) return "";
       return `<h2 class="group">${label}</h2>` + ps.map(projectRow).join("");
     }).join("") || '<p class="empty">No projects yet. Use + in the sidebar to add one.</p>') +
@@ -838,7 +904,7 @@ function renderList() {
   }
 
   if (S.view === "someday" || S.view === "later") {
-    const ps = S.data.projects.filter((p) => p.state === S.view && inArea(p.area_id));
+    const ps = byPriority(S.data.projects.filter((p) => p.state === S.view && inArea(p.area_id)));
     if (ps.length) html += '<h2 class="group">Projects</h2>' + ps.map(projectRow).join("") +
       '<h2 class="group">Actions</h2>';
   }
@@ -850,7 +916,8 @@ function renderList() {
           <div class="title">${h(p.name)}</div></div>
           <button class="link restore-project">Restore</button></div>`).join("");
     }
-    if (S.extra.length || S.extraProjects.length) {
+    html += trashedNotes();
+    if (S.extra.length || S.extraProjects.length || S.extraNotes.length) {
       html += '<p><button class="link danger empty-trash">Empty trash</button></p>';
     }
   }
@@ -858,8 +925,8 @@ function renderList() {
   const showState = S.view.startsWith("project:") || S.view === "focus";
   if (S.view === "calendar") {
     html += calendarAgenda(list);
-  } else if (S.view === "focus" && eventsOn(today()).length) {
-    html += '<h2 class="group">Today\'s calendar</h2>' + eventsOn(today()).map(eventRow).join("") +
+  } else if (S.view === "focus" && eventsLeftToday().length) {
+    html += '<h2 class="group">Today\'s calendar</h2>' + eventsLeftToday().map(eventRow).join("") +
       (list.length ? '<h2 class="group">Tasks</h2>' : "");
     html += list.map((t) => taskRow(t, { showState })).join("");
   } else if (S.view === "logbook") {
@@ -878,7 +945,7 @@ function renderList() {
   } else {
     html += list.map((t) => taskRow(t, { showState })).join("");
   }
-  if (!list.length && S.view !== "calendar") {
+  if (!list.length && S.view !== "calendar" && !(S.view === "trash" && (S.extraProjects.length || S.extraNotes.length))) {
     html += `<p class="empty">${S.search || S.tagFilter.size ? "Nothing matches." :
       { focus: "Star tasks to put them here.",
         recurring: "Set a task's Repeat to see its next copy here." }[S.view] ?? "Nothing here."}</p>`;
@@ -1241,6 +1308,14 @@ function eventsOn(day) {
   return (S.data.events || []).filter((e) => e.date === day || (e.date < day && e.last_date >= day));
 }
 
+// Today's events that haven't ended yet (Focus): a timed one goes once its end time has
+// passed (or its start time, without one); all-day ones stay all day.
+function eventsLeftToday() {
+  const now = nowStamp();
+  return eventsOn(today()).filter((e) => !e.time ||
+    `${e.last_date}T${e.end_time || (e.last_date === e.date ? e.time : "23:59")}` > now);
+}
+
 function eventRow(e) {
   const time = e.time ? fmtTime(e.time) + (e.end_time ? "–" + fmtTime(e.end_time) : "") : "All day";
   const tag = e.link ? "a" : "div";
@@ -1398,14 +1473,31 @@ function renderDetail() {
     el.innerHTML = `
       <div class="detail-head"><span>Project</span><button class="icon close" aria-label="Close">✕</button></div>
       <input class="d-title" data-field="name" value="${h(p.name)}" aria-label="Name">
+      <div class="d-cols"><div class="d-main">
       <textarea data-field="notes" placeholder="Notes" rows="5">${h(p.notes)}</textarea>
-      <label>Status <select data-field="state">${options(
-        [["active", "Active"], ["someday", "Someday"], ["later", "Later"], ["done", "Completed"]], p.state)}</select></label>
-      <label>Area <select data-field="area_id">${options(areaOpts, p.area_id)}</select></label>
-      <label>Due <input type="date" data-field="due_date" value="${h(p.due_date || "")}"></label>
-      <label class="check"><input type="checkbox" data-field="sequential" ${p.sequential ? "checked" : ""}>
-        Sequential (only the first action shows in Queue)</label>
-      <label class="check"><input type="checkbox" data-field="focus" ${p.focus ? "checked" : ""}> Focus</label>
+      ${attachmentsSection(p, "project")}
+      ${linkedNotes(p, "project")}
+      </div><div class="d-side">
+      <section class="d-group" aria-label="About the project">
+        <label>Status <select data-field="state">${options(
+          [["active", "Active"], ["someday", "Someday"], ["later", "Later"], ["done", "Completed"]], p.state)}</select></label>
+        <label>Area <select data-field="area_id">${options(areaOpts, p.area_id)}</select></label>
+        <label title="Its tasks show under these tags too">Tags <input data-field="tags" value="${h((p.tags || []).join(", "))}" list="tag-list" placeholder="comma, separated"></label>
+        <datalist id="tag-list">${S.data.tags.map((x) => `<option value="${h(x.name)}">`).join("")}</datalist>
+        <div class="two">
+          <label>Due <input type="date" data-field="due_date" value="${h(p.due_date || "")}"></label>
+          <label title="Higher comes first on the Projects page">Priority <input type="number" data-field="priority" step="1"
+            min="-${PRIORITY_MAX}" max="${PRIORITY_MAX}" value="${p.priority || 0}"></label>
+        </div>
+        <label class="check"><input type="checkbox" data-field="sequential" ${p.sequential ? "checked" : ""}>
+          Sequential (only the first action shows in Queue)</label>
+        <label class="check"><input type="checkbox" data-field="focus" ${p.focus ? "checked" : ""}> Focus</label>
+      </section>
+      <section class="d-group" aria-label="Blocked by and related">
+        ${blockersField(p, "project")}
+        ${relatedField(p, "project")}
+      </section>
+      </div></div>
       <div class="detail-actions">
         <button class="open-project">Open</button>
         ${p.template_id && templateById(p.template_id)
@@ -1422,8 +1514,8 @@ function renderDetail() {
     .filter((p) => p.state !== "done" || p.id === t.project_id).map((p) => [p.id, p.name])];
   // The rarer details fold away under More, open when any is set (or as last left on this device).
   const more = [t.priority ? `priority ${t.priority}` : "", t.minutes ? `${t.minutes}m` : "",
-    t.energy ? `${t.energy} energy` : "", t.blocked_by?.length ? `blocked by ${t.blocked_by.length}` : "",
-    t.related?.length ? `${t.related.length} related` : "",
+    t.energy ? `${t.energy} energy` : "", refs(t, "blocked_by").length ? `blocked by ${refs(t, "blocked_by").length}` : "",
+    refs(t, "related").length ? `${refs(t, "related").length} related` : "",
     t.spent ? `${fmtSpent(t.spent)} spent` : ""].filter(Boolean);
   el.innerHTML = `
     <div class="detail-head"><span>${t.completed_at ? "Completed" : t.deleted_at ? "In trash" : "Task"}</span>
@@ -1439,7 +1531,8 @@ function renderDetail() {
     <div class="notes md-preview" ${MD_HINT.test(t.notes) ? "" : "hidden"}>${notesHtml(t.notes, { locked: !!(t.completed_at || t.deleted_at) })}</div>
     <p class="muted small hint">**bold**, *italic*, # heading, - list, [ ] checklist, \`code\`,
       [name](https://…). <a href="${BASE}/help#notes" target="_blank" rel="noopener">More</a></p>
-    ${attachmentsSection(t)}
+    ${attachmentsSection(t, "task")}
+    ${linkedNotes(t, "task")}
     </div><div class="d-side">
     <section class="d-group" aria-label="Where it belongs">
       <label>Project <select data-field="project_id">${options(projOpts, t.project_id)}</select></label>
@@ -1475,15 +1568,18 @@ function renderDetail() {
         <label>Energy <select data-field="energy">${options(
           [["", "—"], ["low", "Low"], ["medium", "Medium"], ["high", "High"]], t.energy)}</select></label>
       </div>
-      ${blockersField(t)}
-      ${relatedField(t)}
+      ${blockersField(t, "task")}
+      ${relatedField(t, "task")}
       ${t.spent ? `<p class="muted small spent">Time spent: ${fmtSpent(t.spent)} · <button type="button" class="link reset-spent">Reset</button></p>` : ""}
     </details>
     </div></div>
     <div class="detail-actions">
       ${t.deleted_at
         ? '<button class="restore-task">Restore</button><button class="danger purge-task">Delete forever</button>'
-        : '<button class="start-timer" title="Work on this with a timer (T)">▶ Focus timer</button><button class="danger delete-task">Move to trash</button>'}
+        : '<button class="start-timer" title="Work on this with a timer (T)">▶ Focus timer</button>' +
+          (t.completed_at || t.series_id ? "" : '<button class="convert-task" title="Make it a project, with its checklist as tasks">Convert to project</button>' +
+            '<button class="task-to-note" title="Make it a note, with its notes, tags and files">Make it a note</button>') +
+          '<button class="danger delete-task">Move to trash</button>'}
     </div>
     <p class="muted small">Created ${fmtDate(utcToLocalInput(t.created_at).slice(0, 10))}</p>`;
   el.notesReady = enhanceNotes(el);
@@ -1570,6 +1666,7 @@ function setView(view) {
   S.tagFilter.clear();
   S.extra = [];
   S.extraProjects = [];
+  S.extraNotes = [];
   document.body.classList.remove("nav-open");
   if (view === "logbook" || view === "trash") refresh(); else render();
 }
@@ -1934,6 +2031,39 @@ async function duplicateTasks(ts) {
   }
 }
 
+// Convert to project: the task becomes a project of the same name (app.py's convert_task),
+// its checklist lines its tasks if wanted. Says first what a project has no place for.
+function openConvert(t) {
+  if (!t) return;
+  if (t.id < 0) return toast("Wait until this task has been saved (when you're back online).");
+  const items = t.notes.split("\n").filter((line) => { const m = CHECK_RE.exec(line); return m && m[3].trim(); }).length;
+  const lost = [t.start_date && "its start date", reminderPending(t) && "its reminder", t.waiting_for && "who it's waiting for",
+    t.minutes && "its time", t.energy && "its energy", t.people?.length && "its people", t.spent && "its time spent"].filter(Boolean);
+  const dlg = $("#proj-dialog");
+  dlg.innerHTML = `<form method="dialog" class="stack convert-project">
+    <div class="dlg-head"><h2>Convert to project</h2><button type="button" class="icon close-dlg" aria-label="Close">✕</button></div>
+    <p>“${h(t.title)}” becomes a project, with its notes, area, due date, priority, tags and files.
+      What it's blocked by and related to go with it, and tasks waiting on it will wait on the project.</p>
+    ${items ? `<label class="check"><input type="checkbox" name="checklist" checked>
+      Make its ${items} checklist item${items > 1 ? "s" : ""} the project's tasks</label>` : ""}
+    ${lost.length ? `<p class="muted small">A project has no place for ${h(lost.join(", ").replace(/, ([^,]*)$/, " or $1"))}, so ${lost.length > 1 ? "they go" : "it goes"}.</p>` : ""}
+    <div class="detail-actions"><button class="primary">Convert</button></div>
+  </form>`;
+  const f = $("form", dlg);
+  $(".close-dlg", dlg).onclick = () => dlg.close();
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const p = await api("POST", `/tasks/${t.id}/convert`, { checklist: !!f.checklist?.checked });
+    dlg.close();
+    S.selected = null;
+    await refresh();
+    setView(`project:${p.id}`);
+    toast("It's a project now.");
+  });
+  dlg.showModal();
+  $("button.primary", dlg).focus();
+}
+
 async function bulkPatch(changes) {
   const tasks = await api("POST", "/tasks/bulk", { tasks: changes });
   tasks.forEach(replaceTask);
@@ -2065,25 +2195,93 @@ async function saveStart(t, start) {
 
 // ---- dependencies ("Blocked by") ---------------------------------------------
 
-// The tasks t is waiting on that aren't done yet (only open tasks are loaded).
-const openBlockers = (t) => (t.blocked_by || []).map((id) => S.data.tasks.find((x) => x.id === id)).filter(Boolean);
-
-function blockersField(t) {
-  if (t.completed_at || t.deleted_at) return "";
-  const chips = (t.blocked_by || []).map((id) => {
-    const b = S.data.tasks.find((x) => x.id === id);
-    return `<span class="dep-chip${b ? "" : " done"}" data-dep="${id}">${b ? h(b.title) : "a finished task"}
-      <button type="button" class="icon del-dep" aria-label="Remove">✕</button></span>`;
-  }).join("");
-  return `<div class="deps"><label>Blocked by <input class="dep-search" placeholder="Wait for another task…" autocomplete="off"></label>
-    <div class="dep-chips">${chips}</div><div class="dep-results"></div></div>`;
+// Blocked by and Related to are lists of tasks and projects, as refs: "task:12", "project:3".
+// refs(x, "blocked_by") or refs(x, "related"), for a task or project x.
+function refs(x, field) {
+  const id = (r) => (typeof r === "object" ? r.id : r);  // (related: {id, title}; offline: ids)
+  return [...(x[field] || []).map((r) => `task:${id(r)}`), ...(x[field + "_projects"] || []).map((r) => `project:${id(r)}`)];
 }
 
-function depMatches(t, q) {
+// What a ref names: {title, open, done}. Only open tasks are loaded, so others are done.
+function refInfo(ref, saved) {
+  const [kind, raw] = ref.split(":");
+  const id = Number(raw);
+  if (kind === "task") {
+    const t = taskById(id);
+    return { title: t?.title ?? saved?.title ?? "a finished task", open: !!t && !t.completed_at && !t.deleted_at };
+  }
+  const p = projectById(id);
+  return { title: "Project: " + (p?.name ?? saved?.name ?? "a finished one"), open: !!p && p.state !== "done" && !p.deleted_at };
+}
+
+// Tasks and projects matching q that x (kind "task" or "project") could be linked to, as
+// [{ref, title, where}]; not x itself, what's in skip, or, for Blocked by, its own project or tasks.
+function refMatches(x, kind, q, skip, blocking) {
   q = q.trim().toLowerCase();
   if (!q) return [];
-  return S.data.tasks.filter((x) => x.id !== t.id && !t.blocked_by?.includes(x.id) &&
-    x.title.toLowerCase().includes(q)).slice(0, 6);
+  const fits = (text) => text.toLowerCase().includes(q);
+  const tasks = S.data.tasks.filter((t) => !(kind === "task" && t.id === x.id) && !skip.has(`task:${t.id}`) &&
+    !(blocking && kind === "project" && t.project_id === x.id) && fits(t.title))
+    .map((t) => ({ ref: `task:${t.id}`, title: t.title, where: projectById(t.project_id)?.name || "" }));
+  const projects = S.data.projects.filter((p) => !(kind === "project" && p.id === x.id) && !skip.has(`project:${p.id}`) &&
+    p.state !== "done" && !(blocking && kind === "task" && x.project_id === p.id) && fits(p.name))
+    .map((p) => ({ ref: `project:${p.id}`, title: p.name, where: "Project" }));
+  return [...projects, ...tasks].slice(0, 8);
+}
+
+function refResults(matches, cls) {
+  return matches.map((m) => `<button type="button" class="link ${cls}" data-ref="${m.ref}">${h(m.title)}${
+    m.where ? ` <span class="muted small">${h(m.where)}</span>` : ""}</button>`).join("");
+}
+
+function blockersField(x, kind) {
+  if (x.completed_at || x.deleted_at) return "";
+  const chips = refs(x, "blocked_by").map((ref) => {
+    const r = refInfo(ref);
+    return `<span class="dep-chip${r.open ? "" : " done"}" data-ref="${ref}">${h(r.title)}
+      <button type="button" class="icon del-dep" aria-label="Remove">✕</button></span>`;
+  }).join("");
+  const p = kind === "task" && x.project_id && projectById(x.project_id);
+  const inherited = p ? waitingOn(p, "project") : [];
+  return `<div class="deps"><label>Blocked by <input class="dep-search" placeholder="Wait for a task or project…" autocomplete="off"></label>
+    <div class="dep-chips">${chips}</div><div class="dep-results"></div>
+    ${inherited.length ? `<p class="muted small">Its project waits for ${h(inherited.map((b) => b.title).join(", "))}, so this does too.</p>` : ""}</div>`;
+}
+
+// "Related to": links both ways to other tasks and projects, to get from one to the other
+// (app.py's task_links and project_links). An open one opens on a click; a done one is struck through.
+function relatedField(x, kind) {
+  const saved = new Map([...(x.related || []).map((r) => [`task:${r.id}`, r]),
+    ...(x.related_projects || []).map((r) => [`project:${r.id}`, r])]);
+  const chips = refs(x, "related").map((ref) => {
+    const s = saved.get(ref);
+    const r = refInfo(ref, s);
+    return `<span class="dep-chip${r.open ? "" : " done"}" data-ref="${ref}" title="${s?.trashed ? "In the trash" : r.open ? "Open it" : "Done"}">${
+      r.open ? `<button type="button" class="link open-related">${h(r.title)}</button>` : h(r.title)}
+      <button type="button" class="icon del-related" aria-label="Remove">✕</button></span>`;
+  }).join("");
+  return `<div class="deps related-tasks"><label>Related to <input class="related-search" placeholder="Link a task or project…" autocomplete="off"></label>
+    <div class="dep-chips">${chips}</div><div class="related-results"></div></div>`;
+}
+
+// Saves the open item's Blocked by or Related to (field) as the given refs.
+async function setRefs(field, list) {
+  const sel = S.selected;
+  const ids = (kind) => list.filter((r) => r.startsWith(kind + ":")).map((r) => Number(r.split(":")[1]));
+  const changes = { [field]: ids("task"), [field + "_projects"]: ids("project") };
+  $("#detail").dataset.key = "";
+  if (sel.kind === "project") await patchProject(sel.id, changes);
+  else await patchTask(sel.id, changes);
+  // (Related: the other side's links changed too. A project's waits change its tasks' lists.)
+  if (field === "related" || sel.kind === "project") await refresh();
+}
+
+function openRef(ref) {
+  const [kind, id] = ref.split(":");
+  if (kind === "task") return openTask(Number(id));
+  if (!projectById(Number(id))) return toast("That project isn't there any more.");
+  setView(`project:${id}`);
+  select("project", Number(id));
 }
 
 // ---- people (Google Contacts) ---------------------------------------------------
@@ -2125,30 +2323,6 @@ function peopleMatches(t, q) {
 async function setPeople(id, ids) {
   $("#detail").dataset.key = "";
   await patchTask(id, { people: ids });
-}
-
-// "Related to": links both ways to other tasks, to get from one to the other (app.py's
-// task_links). A related task that's open opens on a click; a done one is struck through.
-function relatedField(t) {
-  const chips = (t.related || []).map((r) => {
-    const open = !r.done && !r.trashed && taskById(r.id);
-    return `<span class="dep-chip${open ? "" : " done"}" data-related="${r.id}" title="${r.trashed ? "In the trash" : r.done ? "Done" : "Open it"}">${
-      open ? `<button type="button" class="link open-related">${h(r.title)}</button>` : h(r.title)}
-      <button type="button" class="icon del-related" aria-label="Remove">✕</button></span>`;
-  }).join("");
-  return `<div class="deps related-tasks"><label>Related to <input class="related-search" placeholder="Link another task…" autocomplete="off"></label>
-    <div class="dep-chips">${chips}</div><div class="related-results"></div></div>`;
-}
-
-async function setRelated(id, ids) {
-  $("#detail").dataset.key = "";
-  await patchTask(id, { related: ids });
-  await refresh();  // (the other tasks' links changed too)
-}
-
-async function setBlockers(id, ids) {
-  $("#detail").dataset.key = "";
-  await patchTask(id, { blocked_by: ids });
 }
 
 // ---- focus timer -------------------------------------------------------------
@@ -2587,49 +2761,69 @@ function fmtSize(n) {
     : n < 1073741824 ? `${(n / 1048576).toFixed(1)} MB` : `${+(n / 1073741824).toFixed(2)} GB`;
 }
 
-function attachmentsSection(t) {
-  const files = t.attachments || [];
-  const locked = t.deleted_at;
-  return `<div class="attachments">
-    <div class="att-head">Attachments
-      ${locked ? "" : `<button type="button" class="link add-files">+ Add files</button>
-        <input type="file" class="file-input" multiple hidden>`}</div>
-    ${files.map((f) => { const view = viewable(f) ? " att-view" : ""; return `<div class="att" data-file="${f.id}">
+// Files on the open item, and, for a task, its project's (which go with all of its tasks).
+function detailFiles() {
+  const x = selItem();
+  const p = S.selected?.kind === "task" && x?.project_id && projectById(x.project_id);
+  return [...(x?.attachments || []), ...(p?.attachments || [])];
+}
+
+function fileRow(f, locked) {
+  const view = viewable(f) ? " att-view" : "";
+  return `<div class="att" data-file="${f.id}">
       ${IMAGE_TYPES.includes(f.mime) ? `<a class="att-view" href="${h(fileUrl(f))}" target="_blank" rel="noopener"><img class="att-thumb" src="${h(fileUrl(f))}" alt="" loading="lazy"></a>`
         : `<span class="att-icon">${f.mime === "application/pdf" ? "📄" : "📎"}</span>`}
       <a class="att-name${view}" href="${h(fileUrl(f))}" target="_blank" rel="noopener" title="${h(f.name)}">${h(f.name)}</a>
       <span class="muted small">${fmtSize(f.size)}</span>
       ${locked ? "" : `<button type="button" class="icon del-file" title="Delete" aria-label="Delete ${h(f.name)}">✕</button>`}
-    </div>`; }).join("")}
-    ${locked ? "" : `<p class="muted small hint">${files.length ? "" : "None yet. "}Drop files here, or paste an image. Up to 25 MB each.</p>`}
+    </div>`;
+}
+
+function attachmentsSection(x, kind) {
+  const files = x.attachments || [];
+  const locked = x.deleted_at;
+  const p = kind === "task" && x.project_id && projectById(x.project_id);
+  const shared = p?.attachments || [];
+  return `<div class="attachments">
+    <div class="att-head">Attachments
+      ${locked ? "" : `<button type="button" class="link add-files">+ Add files</button>
+        <input type="file" class="file-input" multiple hidden>`}</div>
+    ${files.map((f) => fileRow(f, locked)).join("")}
+    ${locked ? "" : `<p class="muted small hint">${files.length ? "" : "None yet. "}Drop files here, or paste an image. Up to 25 MB each.${
+      kind === "project" ? " They go with all of the project's tasks." : ""}</p>`}
+    ${shared.length ? `<div class="att-head muted small">From the project “${h(p.name)}”</div>
+      ${shared.map((f) => fileRow(f, true)).join("")}` : ""}
   </div>`;
 }
 
-async function uploadFiles(id, files) {
-  if (!files.length) return;
-  if (id < 0) return toast("Wait until this task has been saved (when you're back online), then add files.");
+// Uploads files to the task or project sel ({kind, id}).
+async function uploadFiles(sel, files) {
+  if (!files.length || !sel) return;
+  const { kind, id } = sel;
+  if (id < 0) return toast(`Wait until this ${kind} has been saved (when you're back online), then add files.`);
   if (files.some((f) => f.size > 25 * 1048576)) return toast("Files can be up to 25 MB each.");
   const form = new FormData();
   for (const f of files) form.append("file", f, f.name || "pasted.png");
   toast(files.length > 1 ? `Uploading ${files.length} files…` : `Uploading ${files[0].name || "image"}…`);
   let res;
   try {
-    res = await fetch(`${BASE}/api/tasks/${id}/attachments`, { method: "POST", body: form, headers: { "X-Requested-With": "entropicide" } });
+    res = await fetch(`${BASE}/api/${kind}s/${id}/attachments`, { method: "POST", body: form, headers: { "X-Requested-With": "entropicide" } });
   } catch {
     return toast("You're offline. Attachments need a connection.");
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) return toast(data.error || "Couldn't upload that.");
-  replaceTask(data);
+  if (kind === "project") replaceProject(data); else replaceTask(data);
   $("#detail").dataset.key = "";
   render();
   toast(files.length > 1 ? `Added ${files.length} files.` : "File added.");
 }
 
-async function deleteFile(id, fileId) {
-  const f = taskById(id)?.attachments.find((x) => x.id === fileId);
+async function deleteFile(fileId) {
+  const f = selItem()?.attachments.find((x) => x.id === fileId);
   if (!f || !confirm(`Delete ${f.name}?`)) return;
-  replaceTask(await api("DELETE", `/attachments/${fileId}`));
+  const owner = await api("DELETE", `/attachments/${fileId}`);
+  if (S.selected.kind === "project") replaceProject(owner); else replaceTask(owner);
   $("#detail").dataset.key = "";
   render();
 }
@@ -2652,8 +2846,8 @@ function loadPdfjs() {
   return pdfjsLoading;
 }
 
-function openViewer(id, fileId) {
-  viewer.files = (taskById(id)?.attachments || []).filter(viewable);
+function openViewer(files, fileId) {
+  viewer.files = files.filter(viewable);
   viewer.at = Math.max(0, viewer.files.findIndex((f) => f.id === fileId));
   if (!viewer.files.length) return;
   const dlg = $("#viewer");
@@ -2821,23 +3015,13 @@ function bindDetail() {
         (e.target.value.trim() ? '<span class="muted small">No contact matches.</span>' : "");
       return;
     }
-    if (e.target.matches(".related-search")) {
-      const t = taskById(S.selected.id);
-      const q = e.target.value.trim().toLowerCase();
-      const have = new Set((t.related || []).map((r) => r.id));
-      $(".related-results", el).innerHTML = (q ? S.data.tasks.filter((x) => x.id !== t.id && !have.has(x.id) &&
-        x.title.toLowerCase().includes(q)).slice(0, 6) : []).map((x) =>
-        `<button type="button" class="link add-related" data-related="${x.id}">${h(x.title)}${
-          x.project_id ? ` <span class="muted small">${h(projectById(x.project_id)?.name || "")}</span>` : ""}</button>`).join("") ||
-        (q ? '<span class="muted small">No open task matches.</span>' : "");
-      return;
-    }
-    if (e.target.matches(".dep-search")) {
-      const t = taskById(S.selected.id);
-      $(".dep-results", el).innerHTML = depMatches(t, e.target.value).map((x) =>
-        `<button type="button" class="link add-dep" data-dep="${x.id}">${h(x.title)}${
-          x.project_id ? ` <span class="muted small">${h(projectById(x.project_id)?.name || "")}</span>` : ""}</button>`).join("") ||
-        (e.target.value.trim() ? '<span class="muted small">No open task matches.</span>' : "");
+    if (e.target.matches(".related-search, .dep-search")) {
+      const x = selItem();
+      const blocking = e.target.matches(".dep-search");
+      const field = blocking ? "blocked_by" : "related";
+      const found = refMatches(x, S.selected.kind, e.target.value, new Set(refs(x, field)), blocking);
+      $(blocking ? ".dep-results" : ".related-results", el).innerHTML = refResults(found, blocking ? "add-dep" : "add-related") ||
+        (e.target.value.trim() ? '<span class="muted small">No open task or project matches.</span>' : "");
       return;
     }
     if (e.target.matches('textarea[data-field="notes"]')) {
@@ -2870,7 +3054,7 @@ function bindDetail() {
       return refresh();
     }
     if (e.target.matches(".file-input")) {
-      uploadFiles(S.selected.id, [...e.target.files]);
+      uploadFiles(S.selected, [...e.target.files]);
       return;
     }
     // Ticking a checklist item in the preview: change the notes as typed so far, and save.
@@ -2934,7 +3118,7 @@ function bindDetail() {
     if (input?.dataset.typed) saveDate(input);
   });
   // Files dropped on, or images pasted into, an open task are attached to it.
-  const taskOpen = () => S.selected?.kind === "task" && !taskById(S.selected.id)?.deleted_at;
+  const taskOpen = () => { const x = selItem(); return x && !x.deleted_at; };
   el.addEventListener("dragover", (e) => {
     if (!taskOpen() || !e.dataTransfer.types.includes("Files")) return;
     e.preventDefault();
@@ -2945,13 +3129,13 @@ function bindDetail() {
     el.classList.remove("file-over");
     if (!taskOpen() || !e.dataTransfer.files.length) return;
     e.preventDefault();
-    uploadFiles(S.selected.id, [...e.dataTransfer.files]);
+    uploadFiles(S.selected, [...e.dataTransfer.files]);
   });
   el.addEventListener("paste", (e) => {
     const files = [...(e.clipboardData?.files || [])];
     if (!taskOpen() || !files.length) return;
     e.preventDefault();
-    uploadFiles(S.selected.id, files);
+    uploadFiles(S.selected, files);
   });
 
   el.addEventListener("click", async (e) => {
@@ -2959,7 +3143,7 @@ function bindDetail() {
     // (Ctrl/⌘/Shift-click still opens the file in a new tab or window.)
     if (view && !(e.ctrlKey || e.metaKey || e.shiftKey) && e.button === 0) {
       e.preventDefault();
-      return openViewer(S.selected.id, Number(view.closest("[data-file]").dataset.file));
+      return openViewer(detailFiles(), Number(view.closest("[data-file]").dataset.file));
     }
     const b = e.target.closest("button");
     if (!b) return;
@@ -2978,21 +3162,23 @@ function bindDetail() {
       await patchTask(sel.id, { focus: !taskById(sel.id).focus });
     }
     else if (b.dataset.until) snoozeTask(sel.id, b.dataset.until);
-    else if (b.classList.contains("add-dep")) setBlockers(sel.id, [...(taskById(sel.id).blocked_by || []), Number(b.dataset.dep)]);
+    else if (b.classList.contains("add-dep")) setRefs("blocked_by", [...refs(selItem(), "blocked_by"), b.dataset.ref]);
     else if (b.classList.contains("add-person")) setPeople(sel.id, [...(taskById(sel.id).people || []), b.dataset.person]);
     else if (b.classList.contains("del-person")) {
       const gone = b.closest("[data-person]").dataset.person;
       setPeople(sel.id, taskById(sel.id).people.filter((id) => id !== gone));
     }
-    else if (b.classList.contains("add-related")) setRelated(sel.id, [...(taskById(sel.id).related || []).map((r) => r.id), Number(b.dataset.related)]);
+    else if (b.classList.contains("add-related")) setRefs("related", [...refs(selItem(), "related"), b.dataset.ref]);
     else if (b.classList.contains("del-related")) {
-      const gone = Number(b.closest("[data-related]").dataset.related);
-      setRelated(sel.id, taskById(sel.id).related.map((r) => r.id).filter((id) => id !== gone));
+      const gone = b.closest("[data-ref]").dataset.ref;
+      setRefs("related", refs(selItem(), "related").filter((r) => r !== gone));
     }
-    else if (b.classList.contains("open-related")) openTask(Number(b.closest("[data-related]").dataset.related));
+    else if (b.classList.contains("open-related")) openRef(b.closest("[data-ref]").dataset.ref);
+    else if (b.classList.contains("convert-task")) openConvert(taskById(sel.id));
+    else if (b.classList.contains("task-to-note")) taskToNote(taskById(sel.id));
     else if (b.classList.contains("del-dep")) {
-      const gone = Number(b.closest("[data-dep]").dataset.dep);
-      setBlockers(sel.id, taskById(sel.id).blocked_by.filter((id) => id !== gone));
+      const gone = b.closest("[data-ref]").dataset.ref;
+      setRefs("blocked_by", refs(selItem(), "blocked_by").filter((r) => r !== gone));
     }
     else if (b.classList.contains("save-template")) saveAsTemplate(sel.id, false);
     else if (b.classList.contains("reset-spent")) { $("#detail").dataset.key = ""; await patchTask(sel.id, { spent: 0 }); }
@@ -3000,7 +3186,7 @@ function bindDetail() {
     else if (b.classList.contains("update-template")) saveAsTemplate(sel.id, true);
     else if (b.classList.contains("clear-remind")) { $("#detail").dataset.key = ""; await patchTask(sel.id, { remind_at: null, remind_before: null }); }
     else if (b.classList.contains("add-files")) $(".file-input", el).click();
-    else if (b.classList.contains("del-file")) deleteFile(sel.id, Number(b.closest("[data-file]").dataset.file));
+    else if (b.classList.contains("del-file")) deleteFile(Number(b.closest("[data-file]").dataset.file));
     else if (b.classList.contains("close")) { S.selected = null; render(); }
     else if (b.dataset.state) {
       const changes = { state: b.dataset.state };
@@ -3093,6 +3279,16 @@ async function openSettings() {
       <h3>Phone app</h3>
       <p class="muted small">Install Entropicide on an Android phone or tablet (or add it to an iPhone's home screen).</p>
       <p><a href="${BASE}/install" target="_blank" rel="noopener">Install the app</a></p>
+    </section>
+
+    <section>
+      <h3>Sharing to Entropicide</h3>
+      <p class="muted small">In the installed app, Entropicide is in the phone's Share menu: share a photo, a page or
+        some text from another app. Pictures shared to a note or journal are placed in its text.</p>
+      <label>Put what's shared <select class="share-to">${options([["ask", "Ask each time"], ["inbox", "In the Inbox, as a task"],
+        ["note", "In Notes, as a new note"],
+        ...S.data.journals.map((j) => [`journal:${j.id}`, `In the journal “${j.name}” (today's entry)`])],
+        me.settings.share_to)}</select></label>
     </section>
 
     <section>
@@ -3281,7 +3477,8 @@ async function fillStorage() {
     $("#dialog .storage-list").innerHTML = largest.map((f) => `<li class="storage-file">
       <a href="${h(fileUrl(f))}" target="_blank" rel="noopener">${h(f.name)}</a>
       <span class="muted small">${fmtSize(f.size)}</span>
-      <button type="button" class="link open-task" data-task="${f.task_id}" title="Open the task">${h(f.title)}${
+      <button type="button" class="link open-task" ${f.project_id ? `data-project="${f.project_id}" title="Open the project"`
+        : f.note_id ? `data-note="${f.note_id}" title="Open the note"` : `data-task="${f.task_id}" title="Open the task"`}>${h(f.title)}${
         f.deleted_at ? " (in trash)" : f.completed_at ? " (done)" : ""}</button></li>`).join("");
   } catch {
     state.textContent = "Couldn't check (you may be offline).";
@@ -3394,6 +3591,11 @@ function bindSettings() {
       toast(t.value === "vim" ? "Notes use Vim keys on this device." : "Notes use the plain box on this device.");
       return;
     }
+    if (t.classList.contains("share-to")) {
+      S.data.user.settings = await api("PATCH", "/me/settings", { share_to: t.value });
+      toast("Saved.");
+      return;
+    }
     if (t.classList.contains("notify-starts")) {
       S.data.user.settings = await api("PATCH", "/me/settings", { notify_starts: t.checked });
       return;
@@ -3465,7 +3667,9 @@ function bindSettings() {
       fillPushState();
     } else if (b.classList.contains("open-task")) {
       $("#dialog").close();
-      openTask(Number(b.dataset.task));
+      if (b.dataset.project) openRef(`project:${b.dataset.project}`);
+      else if (b.dataset.note) openNoteById(Number(b.dataset.note));
+      else openTask(Number(b.dataset.task));
     } else if (b.classList.contains("g-connect")) {
       location.href = BASE + "/google/connect";
     } else if (b.classList.contains("g-sync")) {
@@ -3594,7 +3798,8 @@ function bindSuggest() {
 // ---- context menu --------------------------------------------------------
 
 const DEFER_UNITS = { m: ["minute", 60e3], h: ["hour", 3600e3], d: ["day"], w: ["week"], mo: ["month"] };
-const menu = { ids: [], items: [], x: 0, y: 0, openedAt: 0 };
+// ids: the tasks the menu acts on; project: or the project's id, for a project's menu.
+const menu = { ids: [], project: null, items: [], x: 0, y: 0, openedAt: 0 };
 
 function parseDefer(opt) {
   const m = /^(\d+)(mo|m|h|d|w)$/.exec(opt);
@@ -3745,20 +3950,27 @@ function bindPriorityDrag(list) {
   const end = (e) => {
     if (!prioDrag || e.pointerId !== prioDrag.pointer) return;
     const { ctl, ts, step, before } = prioDrag;
+    const isProject = prioDrag.project;
     prioDrag = null;
     ctl.classList.remove("active");
     bubble.hidden = true;
-    if (e.type === "pointerup" && step) bumpPriority(ts, step);
+    if (e.type === "pointerup" && step && isProject) {
+      const p = ts[0];
+      patchProject(p.id, { priority: clampPriority((p.priority || 0) + step) });
+    } else if (e.type === "pointerup" && step) bumpPriority(ts, step);
     else ctl.querySelector(".prio-num").outerHTML = before;
   };
   list.addEventListener("pointerdown", (e) => {
     const ctl = e.target.closest(".prio-ctl");
     if (!ctl || e.button || prioDrag) return;
     e.preventDefault();
-    const id = Number(ctl.closest(".row.task").dataset.task);
+    // A project's row (on the Projects page) works the same way, for just that project.
+    const projectRow = ctl.closest(".row.project");
+    const id = Number(projectRow ? projectRow.dataset.project : ctl.closest(".row.task").dataset.task);
     ctl.setPointerCapture(e.pointerId);
     ctl.classList.add("active");
-    prioDrag = { ctl, pointer: e.pointerId, ts: tasksOf(S.picked.has(id) ? pickedIds() : [id]), startY: e.clientY,
+    prioDrag = { ctl, pointer: e.pointerId, project: !!projectRow,
+      ts: projectRow ? [projectById(id)] : tasksOf(S.picked.has(id) ? pickedIds() : [id]), startY: e.clientY,
       step: 0, x: e.clientX, y: e.clientY, before: ctl.querySelector(".prio-num").outerHTML };
     bubble.hidden = false;
     show();
@@ -3829,6 +4041,8 @@ function menuItems(ts) {
     { label: star ? "Star" : "Unstar", run: () => changeTasks(ts, () => ({ focus: star })) },
     { label: "Complete", run: () => dropOnNav(ts, "logbook") },
     { label: "Duplicate", run: () => duplicateTasks(ts) },
+    ...(one && !one.series_id ? [{ label: "Convert to project…", run: () => openConvert(one) },
+      { label: "Make it a note…", run: () => taskToNote(one) }] : []),
     { sep: true },
     ...picking,
     ...(picking.length ? [{ sep: true }] : []),
@@ -3848,7 +4062,7 @@ function openMenu(ids, x, y) {
   if (!ts.length) return false;
   // Android fires both our long-press timer and a contextmenu event.
   if (menu.ids.join() === ids.join() && Date.now() - menu.openedAt < 800) return true;
-  Object.assign(menu, { ids: ts.map((t) => t.id), x, y, openedAt: Date.now() });
+  Object.assign(menu, { ids: ts.map((t) => t.id), project: null, x, y, openedAt: Date.now() });
   showItems(menuItems(ts));
   markMenuTarget();
   return true;
@@ -3858,6 +4072,92 @@ function openMenu(ids, x, y) {
 function markMenuTarget() {
   document.querySelectorAll(".menu-target").forEach((r) => r.classList.remove("menu-target"));
   for (const id of menu.ids) document.querySelector(`.row.task[data-task="${id}"]`)?.classList.add("menu-target");
+  if (menu.project) document.querySelector(`.row.project[data-project="${menu.project}"]`)?.classList.add("menu-target");
+}
+
+// ---- a project's menu (right-click, or press and hold, a project's row) ----
+
+const PROJECT_STATES = [["active", "Active"], ["someday", "Someday"], ["later", "Later"], ["done", "Completed"]];
+
+function openProjectMenu(id, x, y) {
+  const p = projectById(id);
+  if (!p || p.deleted_at) return false;
+  if (menu.project === id && Date.now() - menu.openedAt < 800) return true;  // (as in openMenu)
+  Object.assign(menu, { ids: [], project: id, x, y, openedAt: Date.now() });
+  showItems(projectMenuItems(p));
+  markMenuTarget();
+  return true;
+}
+
+// Changes a project, with Undo when a message is given.
+async function changeProject(p, changes, message) {
+  const back = Object.fromEntries(Object.keys(changes).map((k) => [k, p[k]]));
+  await patchProject(p.id, changes);
+  if (message) toast(message, () => patchProject(p.id, back));
+}
+
+function projectMenuItems(p) {
+  const reopen = (items, at) => { const fresh = projectById(p.id); if (fresh) showSub(projectMenuItems(fresh), items(fresh), at); };
+  return [
+    { label: "Status", chips: PROJECT_STATES.map(([state, name]) => ({
+      label: name, current: p.state === state,
+      run: () => changeProject(p, { state }, `“${p.name}” ${{ active: "is active", someday: "is in Someday", later: "is in Later",
+        done: "is completed" }[state]} now.`),
+    })) },
+    S.data.areas.length ? { label: "Area", chips: [
+      { label: "None", current: !p.area_id, run: () => changeProject(p, { area_id: null }) },
+      ...S.data.areas.map((a) => ({ label: a.name, icon: a.icon_version && areaIconUrl(a), current: p.area_id === a.id,
+        run: () => changeProject(p, { area_id: a.id }) })),
+    ] } : { label: "Area", note: "No areas yet. Add them in Settings." },
+    { sep: true },
+    { label: "Priority", sub: () => projectPriorityItems(p, reopen) },
+    { label: "Tag", sub: () => projectTagItems(p, reopen) },
+    { sep: true },
+    { label: "Open", run: () => setView(`project:${p.id}`) },
+    { label: "Details", run: () => { setView(`project:${p.id}`); select("project", p.id); } },
+    { label: p.focus ? "Unstar" : "Star", run: () => changeProject(p, { focus: !p.focus }) },
+    { label: "Sequential", toggle: true, checked: p.sequential, run: () => changeProject(p, { sequential: !p.sequential }) },
+    { sep: true },
+    { label: "Move to trash", danger: true, run: async () => {
+      if (!confirm(`Move “${p.name}” and its tasks to the trash?`)) return;
+      if (S.selected?.kind === "project" && S.selected.id === p.id) S.selected = null;
+      await changeProject(p, { deleted: true });
+      toast("Project moved to trash.", () => patchProject(p.id, { deleted: false }));
+    } },
+  ];
+}
+
+function projectPriorityItems(p, reopen) {
+  const set = async (priority, at) => {
+    await patchProject(p.id, { priority: clampPriority(priority) });
+    reopen((fresh) => projectPriorityItems(fresh, reopen), at);
+  };
+  return [
+    { label: "Increase", hint: `now ${p.priority || 0}`, stay: true, run: () => set((p.priority || 0) + 1, 2) },
+    { label: "Decrease", stay: true, run: () => set((p.priority || 0) - 1, 3) },
+    ...(p.priority ? [{ label: "Reset to 0", run: () => patchProject(p.id, { priority: 0 }) }] : []),
+  ];
+}
+
+// As for tasks' Tag menu: each toggles and keeps the menu open.
+function projectTagItems(p, reopen) {
+  const tags = p.tags || [];
+  return [
+    ...S.data.tags.map((tag, i) => {
+      const on = tags.includes(tag.name);
+      return { label: tag.name, toggle: true, checked: on, stay: true, run: async () => {
+        await patchProject(p.id, { tags: on ? tags.filter((x) => x !== tag.name) : [...tags, tag.name] });
+        reopen((fresh) => projectTagItems(fresh, reopen), i + 2);  // +2: after Back and the divider
+      } };
+    }),
+    ...(S.data.tags.length ? [{ sep: true }] : []),
+    { label: "New tag…", run: async () => {
+      const name = prompt("New tag")?.trim().replace(/^#/, "");
+      if (!name) return;
+      await patchProject(p.id, { tags: [...new Set([...tags, name])] });
+      await refresh();  // picks up the new tag in the tag list
+    } },
+  ];
 }
 
 function showSub(parent, items, focusAt) {
@@ -3890,9 +4190,10 @@ function showItems(items, focusAt) {
 }
 
 function closeMenu() {
-  if (!menu.ids.length) return;
+  if (!menu.ids.length && !menu.project) return;
   $("#ctx").hidden = true;
   menu.ids = [];
+  menu.project = null;
   markMenuTarget();
 }
 
@@ -3932,20 +4233,25 @@ function bindMenu() {
   $("#list").addEventListener("scroll", closeMenu);
 
   const list = $("#list");
+  // A project's row (not one in the trash) has its own menu.
+  const projectRow = (e) => e.target.closest(".row.project:not(.trashed)");
   list.addEventListener("contextmenu", (e) => {
     const row = e.target.closest(".row.task");
     if (row && openMenu(menuIdsFor(Number(row.dataset.task)), e.clientX, e.clientY)) e.preventDefault();
+    const p = projectRow(e);
+    if (p && openProjectMenu(Number(p.dataset.project), e.clientX, e.clientY)) e.preventDefault();
   });
   // Press-and-hold on touch screens (iOS has no contextmenu event).
   let press = null;
   const cancel = () => { if (press) clearTimeout(press.timer); press = null; };
   list.addEventListener("touchstart", (e) => {
-    const row = e.target.closest(".row.task");
+    const row = e.target.closest(".row.task") || projectRow(e);
     if (!row || e.touches.length > 1 || e.target.closest(".prio-ctl")) return cancel();
     const { clientX: x, clientY: y } = e.touches[0];
     press = { x, y, fired: false };
     press.timer = setTimeout(() => {
-      press.fired = openMenu(menuIdsFor(Number(row.dataset.task)), x, y);
+      press.fired = row.dataset.project ? openProjectMenu(Number(row.dataset.project), x, y)
+        : openMenu(menuIdsFor(Number(row.dataset.task)), x, y);
       if (press.fired) navigator.vibrate?.(10);
     }, 500);
   }, { passive: true });
@@ -4097,6 +4403,7 @@ function bind() {
       if (b?.classList.contains("star")) {
         return patchProject(id, { focus: !projectById(id).focus });
       }
+      if (b?.classList.contains("prio-ctl")) return;  // dragged, not clicked (bindPriorityDrag)
       if (S.view !== "trash") setView(`project:${id}`);
     }
   });
@@ -4221,6 +4528,7 @@ function bind() {
       e.preventDefault();
       // On Links, N adds a link; other lists without a quick-add bar hand off to the Inbox.
       if (S.view === "links") return $("#link-add")?.elements.url.focus();
+      if (S.view === "notes" || S.view === "journal") return newNote();
       focusQuickAdd();
     }
     else if (e.key === "/") { e.preventDefault(); $("#search").focus(); }
@@ -4437,10 +4745,17 @@ async function afterLoad() {
   const params = new URLSearchParams(location.search);
   checkAppUpdate(params);
   const opened = Number(params.get("task") || params.get("shared"));
-  if (opened) {
+  if (opened && params.has("ask")) {
+    history.replaceState(null, "", location.pathname);
+    askShared(opened);
+  } else if (opened) {
     history.replaceState(null, "", location.pathname);
     if (params.get("shared")) toast("Added to your Inbox.");
     openTask(opened);
+  }
+  if (params.get("shared_note")) {
+    history.replaceState(null, "", location.pathname);
+    openSharedNote(Number(params.get("shared_note")));
   }
   // The installed app's New task shortcut (the manifest's shortcuts).
   if (params.has("new")) {
@@ -4484,7 +4799,7 @@ async function afterLoad() {
   setInterval(() => {
     if (!S.data.google.connected || document.hidden || document.querySelector("dialog[open]") ||
         $("#detail").contains(document.activeElement) || document.body.classList.contains("is-dragging") ||
-        menu.ids.length) return;
+        menu.ids.length || menu.project) return;
     refresh();
   }, 60000);
 }

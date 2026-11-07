@@ -1,0 +1,194 @@
+"""Formatted note text: the small set of HTML a note may hold, and nothing else.
+
+A note's body comes from the browser's editor (a contenteditable box: bold, italic,
+underline, struck, a font, headings, lists, quotes, links and the note's own pictures),
+so it's HTML. Everything outside that set is dropped before it's stored: other tags (their
+text is kept, except for scripts and styles), every attribute but the few below, and any
+link that isn't to a web page or an email address. static/notes.js cleans the same way
+before it saves; this is the copy that counts.
+"""
+import html
+import re
+from html.parser import HTMLParser
+
+# Typefaces a note (or a stretch of one) can be in: <font face="serif">, styled in app.css.
+FONTS = ("sans", "serif", "mono", "hand", "round", "narrow")
+# How wide a picture placed in a note shows: small, medium, or the width of the note.
+IMAGE_SIZES = ("s", "m", "l")
+
+BLOCKS = {"p", "div", "h1", "h2", "h3", "blockquote", "ul", "ol", "li", "pre"}
+INLINE = {"b", "strong", "i", "em", "u", "s", "strike", "del", "code", "span", "font", "a", "sub", "sup"}
+EMPTY = {"br", "hr", "img"}
+# Dropped along with everything inside them.
+SKIP = {"script", "style", "template", "head", "title", "iframe", "object", "embed", "svg", "math",
+        "noscript", "select", "textarea", "button"}
+# What other editors (and pasted pages) use for the same thing.
+RENAME = {"h4": "h3", "h5": "h3", "h6": "h3", "section": "div", "article": "div", "header": "div",
+          "footer": "div", "main": "div", "figure": "div", "figcaption": "div", "dl": "div", "dt": "div",
+          "dd": "div", "tr": "div", "td": "span", "th": "span", "table": "div", "tbody": "div",
+          "thead": "div", "ins": "u", "mark": "span", "small": "span", "big": "span", "label": "span"}
+
+URL_RE = re.compile(r"^(https?://|mailto:)[^\s\"'<>]+$", re.IGNORECASE)
+MAX_LENGTH = 400_000
+
+
+def _style_tags(style):
+    """Bold, italic, underline, strike and a font, from an inline style (Chrome's editor and
+    pasted pages sometimes use those instead of tags), as the tags to wrap in."""
+    style = (style or "").lower()
+    out = []
+    if re.search(r"font-weight\s*:\s*(bold|[6-9]00)", style):
+        out.append(("b", ""))
+    if re.search(r"font-style\s*:\s*italic", style):
+        out.append(("i", ""))
+    if re.search(r"text-decoration[^;]*underline", style):
+        out.append(("u", ""))
+    if re.search(r"text-decoration[^;]*line-through", style):
+        out.append(("s", ""))
+    if (m := re.search(r"font-family\s*:\s*([^;]+)", style)) and (face := font_from_family(m[1])):
+        out.append(("font", f' face="{face}"'))
+    return out
+
+
+def font_from_family(family):
+    """One of FONTS for a CSS font-family list, if it's clearly one of them."""
+    family = family.lower()
+    if "monospace" in family or "courier" in family or "mono" in family:
+        return "mono"
+    if "cursive" in family or "comic" in family or "hand" in family or "script" in family:
+        return "hand"
+    if "narrow" in family or "condensed" in family:
+        return "narrow"
+    if "rounded" in family:
+        return "round"
+    if "serif" in family and "sans" not in family or "georgia" in family or "times" in family:
+        return "serif"
+    return None
+
+
+class _Cleaner(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out = []
+        self.stack = []  # the tags written for each open element (a list: styles may add several)
+        self.skipping = 0
+
+    def handle_starttag(self, tag, attrs):
+        tag = RENAME.get(tag, tag)
+        if tag in SKIP:
+            self.skipping += 1
+            return
+        if self.skipping:
+            return
+        attrs = dict(attrs)
+        if tag in EMPTY:
+            if tag == "br":
+                self.out.append("<br>")
+            elif tag == "hr":
+                self.out.append("<hr>")
+            elif tag == "img":
+                file_id = str(attrs.get("data-file") or "")
+                if file_id.isdigit():
+                    size = attrs.get("data-size")
+                    self.out.append(f'<img data-file="{int(file_id)}"' +
+                                    (f' data-size="{size}"' if size in IMAGE_SIZES else "") + ">")
+            return
+        written = []
+        if tag in BLOCKS:
+            written.append((tag, ""))
+        elif tag == "a":
+            href = (attrs.get("href") or "").strip()
+            if URL_RE.match(href):
+                written.append(("a", f' href="{html.escape(href)}" target="_blank" rel="noopener noreferrer"'))
+        elif tag == "font":
+            face = attrs.get("face", "")
+            if face in FONTS:
+                written.append(("font", f' face="{face}"'))
+            elif face_from := font_from_family(face):
+                written.append(("font", f' face="{face_from}"'))
+        elif tag in INLINE and tag != "span":
+            written.append(({"strong": "b", "em": "i", "strike": "s", "del": "s"}.get(tag, tag), ""))
+        written += _style_tags(attrs.get("style"))
+        for name, extra in written:
+            self.out.append(f"<{name}{extra}>")
+        self.stack.append((tag, [name for name, _ in written]))
+
+    def handle_startendtag(self, tag, attrs):
+        tag = RENAME.get(tag, tag)
+        if tag in EMPTY or tag in SKIP:
+            if tag not in SKIP:
+                self.handle_starttag(tag, attrs)
+            return
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        tag = RENAME.get(tag, tag)
+        if tag in SKIP:
+            self.skipping = max(0, self.skipping - 1)
+            return
+        if self.skipping or tag in EMPTY:
+            return
+        # Close back to the matching element (browsers' HTML isn't always tidy).
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i][0] == tag:
+                while len(self.stack) > i:
+                    _, names = self.stack.pop()
+                    self.out.extend(f"</{n}>" for n in reversed(names))
+                return
+
+    def handle_data(self, data):
+        if not self.skipping:
+            self.out.append(html.escape(data, quote=False))
+
+    def result(self):
+        while self.stack:
+            _, names = self.stack.pop()
+            self.out.extend(f"</{n}>" for n in reversed(names))
+        return "".join(self.out)
+
+
+def clean(value):
+    """value (HTML from the editor, or anywhere) reduced to what a note may hold."""
+    value = str(value or "")
+    if len(value) > MAX_LENGTH * 2:
+        raise ValueError("That note is too long.")
+    parser = _Cleaner()
+    parser.feed(value)
+    parser.close()
+    out = parser.result()
+    if len(out) > MAX_LENGTH:
+        raise ValueError("That note is too long.")
+    # An editor left empty still holds a <br> or two.
+    return "" if not re.sub(r"<br>|<p>|</p>|<div>|</div>|\s|&nbsp;|\xa0", "", out) else out
+
+
+def from_text(text):
+    """Plain text (a task's notes, something shared) as note HTML: a paragraph per line, with
+    web addresses as links."""
+    lines = []
+    for line in str(text or "").split("\n"):
+        line = re.sub(r"^(\s*(?:[-*]\s*)?)\[ \]\s*", r"\1☐ ", line)
+        line = re.sub(r"^(\s*(?:[-*]\s*)?)\[[xX]\]\s*", r"\1☑ ", line)
+        parts, at = [], 0
+        for m in re.finditer(r"https?://[^\s<>\"]+", line):
+            url = m[0].rstrip(".,;:!?)")
+            parts.append(html.escape(line[at:m.start()], quote=False))
+            parts.append(f'<a href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">'
+                         f"{html.escape(url, quote=False)}</a>")
+            at = m.start() + len(url)
+        parts.append(html.escape(line[at:], quote=False))
+        lines.append(f"<p>{''.join(parts) or '<br>'}</p>")
+    while lines and lines[-1] == "<p><br></p>":
+        lines.pop()
+    return "".join(lines)
+
+
+def image(file_id, size="l"):
+    return f'<p><img data-file="{int(file_id)}" data-size="{size}"></p>'
+
+
+def plain(value):
+    """A note's text without its formatting (for the export's CSV, and spoken summaries)."""
+    value = re.sub(r"<br>|</p>|</div>|</li>|</h[1-3]>|</blockquote>|</pre>", "\n", str(value or ""))
+    return re.sub(r"\n{3,}", "\n\n", html.unescape(re.sub(r"<[^>]+>", "", value))).strip()

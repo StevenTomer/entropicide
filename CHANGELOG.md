@@ -5,6 +5,37 @@ Settings → Troubleshooting.
 
 ## Unreleased
 
+- **Notes:** a new page for anything worth keeping that isn't a task. Notes have a title,
+  formatted text (bold, italic, underline, strike, fonts, headings, lists, quotes, links),
+  pictures you can place and drag anywhere in the text, and other files. Give them categories,
+  each in its own colour, plus tags and an area; link them to tasks and projects (which show
+  their notes); pin the important ones. Sort by when they were written or last edited, filter by
+  category, tag and what they have, and search with phrases, `-word`, `#tag`, `cat:`, `has:picture`,
+  `before:` and more. They save as you type, offline too.
+- **Journals:** tick *Journal entry* on a note to put it in a journal, on a day. The Journal page
+  reads each journal by month; keep as many as you like.
+- **Share to notes:** Settings → Sharing to Entropicide can send what you share from your phone
+  (photos especially) to a new note, or to today's entry in a journal, instead of the Inbox; or
+  **ask each time**, offering the Inbox, a new note, or today's entry in each journal.
+- **Make it a note:** a task can become a note (right-click it, or the button in its details),
+  with its notes, tags, files and links.
+- The Trash no longer says "Nothing here" when it only holds projects or notes.
+- **Convert to project:** right-click a task (or open it) → *Convert to project*. The project
+  takes its name, notes, area, due date, priority, star, tags and files; what it was blocked by
+  and related to, and what waited on it, move to the project; and its checklist lines can become
+  the project's tasks.
+- **Projects get tags, files, Blocked by and Related to,** like tasks. A project's tags count for
+  all its tasks (in the tag filter), its files show in each task's details, and while it's blocked
+  none of its tasks show in the Queue or Focus. Tasks can be blocked by, and related to, projects too.
+- **Project priorities:** drag a project's ↕ on the Projects page to raise or lower it, as for
+  tasks; higher ones come first.
+- **A right-click menu for projects** (press and hold on a phone): set its status (Active,
+  Someday, Later, Completed) in one click, its area, priority and tags, star it, make it
+  sequential, open it or move it to the trash.
+- **A tidier sidebar:** projects are no longer listed there; *Projects* (with how many are active)
+  opens their page.
+- **Today's calendar** in Focus leaves out events that have already ended.
+
 - **Priority by dragging:** each task's ▲/▼ is now one ↕: press and drag up to raise the
   priority, down to lower it, and let go to set it. The row stays put until then, so it no
   longer jumps away between clicks.

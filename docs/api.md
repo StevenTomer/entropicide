@@ -61,7 +61,8 @@ Authorization: Bearer YOUR-KEY
 `LIST` is one of `focus`, `queue`, `inbox`, `soon`, `later`, `someday`, `waiting` or
 `scheduled`. The tasks are the ones that list shows in Entropicide, in the same order: Focus is
 starred tasks plus anything due today or overdue, and Focus and the Queue leave out blocked
-tasks (Blocked by, or later actions of a sequential project) and projects that aren't active,
+tasks (Blocked by a task or project, in a project that's blocked, or later actions of a
+sequential project) and projects that aren't active,
 highest priority first. "Today" is in your account's time zone.
 
 Optional query parameters:

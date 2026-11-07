@@ -4,15 +4,20 @@ import sqlite3
 
 from flask import g, current_app
 
+# Each attachment is on a task, a project (whose files go with all of its tasks) or a note
+# (where a picture may also be placed in the text: <img data-file="id">).
 ATTACHMENTS = """CREATE TABLE IF NOT EXISTS attachments (
     id         INTEGER PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    task_id    INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    note_id    INTEGER REFERENCES notes(id) ON DELETE CASCADE,
     name       TEXT NOT NULL,
     mime       TEXT NOT NULL,
     size       INTEGER NOT NULL,
     blob_id    INTEGER NOT NULL REFERENCES blobs(id),
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK ((task_id IS NOT NULL) + (project_id IS NOT NULL) + (note_id IS NOT NULL) = 1)
 );"""
 
 SCHEMA = """
@@ -67,6 +72,8 @@ CREATE TABLE IF NOT EXISTS projects (
     state        TEXT NOT NULL DEFAULT 'active',
     focus        INTEGER NOT NULL DEFAULT 0,
     due_date     TEXT,
+    -- higher comes first on the Projects page, as for tasks; 0 by default, may be negative
+    priority     INTEGER NOT NULL DEFAULT 0,
     position     REAL NOT NULL DEFAULT 0,
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at TEXT,
@@ -207,6 +214,85 @@ CREATE TABLE IF NOT EXISTS task_links (
     CHECK (a < b)
 );
 
+CREATE TABLE IF NOT EXISTS project_tags (
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    tag_id     INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (project_id, tag_id)
+);
+
+-- "Blocked by" with a project on either side (task_deps has task-on-task): what waits, a
+-- task or a project, on what, a task or a project. A waiting project holds back all its tasks.
+CREATE TABLE IF NOT EXISTS project_deps (
+    task_id            INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+    project_id         INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    blocker_task_id    INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+    blocker_project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    CHECK ((task_id IS NULL) != (project_id IS NULL)),
+    CHECK ((blocker_task_id IS NULL) != (blocker_project_id IS NULL)),
+    CHECK (project_id IS NOT NULL OR blocker_project_id IS NOT NULL)
+);
+
+-- "Related to" with a project: a project linked both ways to a task, or to another project
+-- (stored once, with project_id < other_id).
+CREATE TABLE IF NOT EXISTS project_links (
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    task_id    INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+    other_id   INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    CHECK ((task_id IS NULL) != (other_id IS NULL)),
+    CHECK (other_id IS NULL OR project_id < other_id)
+);
+
+-- Notes (the Notes page), and journal entries: a note in a journal is an entry, on its
+-- entry_date. body is formatted text as cleaned HTML (richtext.py); font is the note's
+-- typeface (richtext.FONTS, '' for the app's own).
+CREATE TABLE IF NOT EXISTS note_categories (
+    id       INTEGER PRIMARY KEY,
+    user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name     TEXT NOT NULL,
+    -- a colour name from the browser's palette (notes.js NOTE_COLORS), '' for none
+    color    TEXT NOT NULL DEFAULT '',
+    position REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS journals (
+    id         INTEGER PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    position   REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS notes (
+    id          INTEGER PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title       TEXT NOT NULL DEFAULT '',
+    body        TEXT NOT NULL DEFAULT '',
+    font        TEXT NOT NULL DEFAULT '',
+    category_id INTEGER REFERENCES note_categories(id) ON DELETE SET NULL,
+    area_id     INTEGER REFERENCES areas(id) ON DELETE SET NULL,
+    journal_id  INTEGER REFERENCES journals(id) ON DELETE SET NULL,
+    entry_date  TEXT,
+    pinned      INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    -- when its words, files or settings last changed (not pinning or trashing it)
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS note_tags (
+    note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    tag_id  INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (note_id, tag_id)
+);
+
+-- A note linked to a task or a project (shown on both).
+CREATE TABLE IF NOT EXISTS note_links (
+    note_id    INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    task_id    INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    CHECK ((task_id IS NULL) != (project_id IS NULL))
+);
+
 -- Project templates: a project and its tasks as JSON (see app.py's template_data), with
 -- dates as days from the project's date. With a repeat, a new project is made from it on
 -- schedule: for next_date, lead_days before it.
@@ -265,6 +351,19 @@ SCHEMA = SCHEMA.replace("{ATTACHMENTS}", ATTACHMENTS)
 INDEXES = """
 CREATE INDEX IF NOT EXISTS links_user ON links(user_id, parent_id);
 CREATE INDEX IF NOT EXISTS attachments_task ON attachments(task_id);
+CREATE INDEX IF NOT EXISTS attachments_project ON attachments(project_id) WHERE project_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS attachments_note ON attachments(note_id) WHERE note_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS notes_user ON notes(user_id, deleted_at);
+CREATE INDEX IF NOT EXISTS note_links_note ON note_links(note_id);
+CREATE INDEX IF NOT EXISTS note_links_task ON note_links(task_id);
+CREATE INDEX IF NOT EXISTS note_links_project ON note_links(project_id);
+CREATE INDEX IF NOT EXISTS project_deps_task ON project_deps(task_id);
+CREATE INDEX IF NOT EXISTS project_deps_project ON project_deps(project_id);
+CREATE INDEX IF NOT EXISTS project_deps_blocker_task ON project_deps(blocker_task_id);
+CREATE INDEX IF NOT EXISTS project_deps_blocker_project ON project_deps(blocker_project_id);
+CREATE INDEX IF NOT EXISTS project_links_project ON project_links(project_id);
+CREATE INDEX IF NOT EXISTS project_links_task ON project_links(task_id);
+CREATE INDEX IF NOT EXISTS project_links_other ON project_links(other_id);
 CREATE INDEX IF NOT EXISTS task_deps_blocker ON task_deps(blocker_id);
 CREATE INDEX IF NOT EXISTS task_links_b ON task_links(b);
 CREATE INDEX IF NOT EXISTS attachments_blob ON attachments(blob_id);
@@ -305,10 +404,13 @@ def put_blob(conn, data):
 
 
 def migrate(conn):
-    if "template_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(projects)")}:
+    project_cols = {r["name"] for r in conn.execute("PRAGMA table_info(projects)")}
+    if "template_id" not in project_cols:
         # The template a project was made from (or saved as), to update it from the project.
         conn.execute("ALTER TABLE projects ADD COLUMN template_id INTEGER "
                      "REFERENCES templates(id) ON DELETE SET NULL")
+    if "priority" not in project_cols:
+        conn.execute("ALTER TABLE projects ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
     series_cols = {r["name"] for r in conn.execute("PRAGMA table_info(series)")}
     if "carry_files" not in series_cols:
         # Whether new copies of a repeating task get the newest copy's attachments.
@@ -326,6 +428,14 @@ def migrate(conn):
                          "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                          (r["id"], r["user_id"], r["task_id"], r["name"], r["mime"], r["size"],
                           put_blob(conn, r["data"]), r["created_at"]))
+        conn.execute("DROP TABLE attachments_old")
+    elif not {"project_id", "note_id"} <= (cols := {r["name"] for r in conn.execute("PRAGMA table_info(attachments)")}):
+        # Attachments were on tasks only, then on tasks and projects; notes have them too now.
+        keep = ", ".join(c for c in ("id", "user_id", "task_id", "project_id", "name", "mime", "size",
+                                     "blob_id", "created_at") if c in cols)
+        conn.execute("ALTER TABLE attachments RENAME TO attachments_old")
+        conn.execute(ATTACHMENTS)
+        conn.execute(f"INSERT INTO attachments ({keep}) SELECT {keep} FROM attachments_old")
         conn.execute("DROP TABLE attachments_old")
     area_cols = {r["name"] for r in conn.execute("PRAGMA table_info(areas)")}
     for name in ("icon_svg", "icon_version"):

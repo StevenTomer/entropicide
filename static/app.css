@@ -136,7 +136,6 @@ button.icon { background: none; border: none; padding: 0.25rem 0.5rem; color: va
 .nav-item:hover { background: var(--hover); }
 .nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .nav-item.focus .nav-label { color: inherit; }
-.nav-item.project { padding-left: 1.125rem; font-size: 0.8125rem; }
 .nav-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .count { color: var(--muted); font-size: 0.75rem; }
 .nav-section {
@@ -302,8 +301,8 @@ body.is-dragging-link .link-end { display: block; }
 .note-more { font-style: italic; }
 .notes a, .row .title a, .project-notes a { color: var(--accent); overflow-wrap: anywhere; }
 /* Priority tint, over whatever background the row has (selected, picked…) */
-.row.task[style*="--tint"] { background-image: linear-gradient(var(--tint), var(--tint)); }
-.row.task[style*="--tint"] .prio-num { color: var(--text); }
+.row.task[style*="--tint"], .row.project[style*="--tint"] { background-image: linear-gradient(var(--tint), var(--tint)); }
+.row.task[style*="--tint"] .prio-num, .row.project[style*="--tint"] .prio-num { color: var(--text); }
 
 /* Markdown in titles and notes */
 .title strong, .notes strong { font-weight: 650; }
@@ -747,3 +746,165 @@ div.inline { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; 
 /* Keyboard on the sidebar (h / l) */
 body.nav-keys #nav .nav-item.kb { outline: 2px solid var(--accent); outline-offset: -2px; }
 body.nav-keys .row.task.cursor { box-shadow: none; }
+
+/* ---- Notes and Journal (notes.js) ---- */
+/* Category colours: a note's background (data-color), soft in light and deep in dark. */
+:root {
+  --n-red: #fbd5d1; --n-orange: #fbe0c8; --n-yellow: #fdf3b6; --n-green: #dcf2cf; --n-teal: #c9ece4;
+  --n-blue: #d6e9f5; --n-navy: #c7d4ec; --n-purple: #e4d6f0; --n-pink: #f8dbe8; --n-brown: #eaded0; --n-gray: #e6e7ea;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --n-red: #5c2526; --n-orange: #5e3a1e; --n-yellow: #5a4e17; --n-green: #2a4a2c; --n-teal: #1d4a46;
+    --n-blue: #1f4058; --n-navy: #263357; --n-purple: #42305a; --n-pink: #5a2a43; --n-brown: #4a3d2f; --n-gray: #393c42;
+  }
+}
+[data-color="red"] { --note: var(--n-red); } [data-color="orange"] { --note: var(--n-orange); }
+[data-color="yellow"] { --note: var(--n-yellow); } [data-color="green"] { --note: var(--n-green); }
+[data-color="teal"] { --note: var(--n-teal); } [data-color="blue"] { --note: var(--n-blue); }
+[data-color="navy"] { --note: var(--n-navy); } [data-color="purple"] { --note: var(--n-purple); }
+[data-color="pink"] { --note: var(--n-pink); } [data-color="brown"] { --note: var(--n-brown); }
+[data-color="gray"] { --note: var(--n-gray); }
+
+/* Typefaces, for a whole note (.font-x) or words in one (<font face="x">). */
+.font-sans, font[face="sans"] { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.font-serif, font[face="serif"] { font-family: Georgia, "Times New Roman", "Noto Serif", serif; }
+.font-mono, font[face="mono"] { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.font-hand, font[face="hand"] { font-family: "Segoe Print", "Bradley Hand", "Comic Sans MS", "Comic Neue", cursive; }
+.font-round, font[face="round"] { font-family: ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", Nunito, "Varela Round", sans-serif; }
+.font-narrow, font[face="narrow"] { font-family: "Arial Narrow", "Roboto Condensed", "sans-serif-condensed", "Helvetica Neue", sans-serif; font-stretch: condensed; }
+font[face="default"] { font-family: inherit; }
+
+.notes-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; padding: 0.25rem 0.5rem 0.5rem; }
+.notes-opts { display: flex; flex-wrap: wrap; gap: 0.375rem; align-items: center; margin-left: auto; }
+.notes-opts select { width: auto; padding: 0.25rem 0.375rem; font-size: 0.8125rem; }
+.cat-chips { display: flex; flex-wrap: wrap; gap: 0.375rem; align-items: center; }
+.cat-chip { padding: 0.125rem 0.625rem; border-radius: 0.875rem; font-size: 0.8125rem; background: var(--note, var(--side)); }
+.cat-chip.on { outline: 2px solid var(--accent); outline-offset: 0; font-weight: 600; }
+.cat-chip:not([data-color]).on, .cat-chip[data-color=""].on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.notes-tip { margin: 0 0.5rem 0.5rem; }
+.notes-tip code { font-size: 0.75rem; }
+
+/* Cards, in columns like a pinboard. */
+.note-grid { columns: 15rem; column-gap: 0.75rem; padding: 0 0.25rem; }
+.note-card {
+  position: relative; break-inside: avoid; margin: 0 0 0.75rem; padding: 0.625rem 0.75rem 0.5rem;
+  background: var(--note, var(--bg)); border: 1px solid var(--line); border-radius: 0.625rem; cursor: pointer;
+}
+.note-card:hover, .note-card:focus-visible { box-shadow: 0 1px 6px rgba(0, 0, 0, .18); }
+/* A long note fades out at the bottom; a short one shows whole. */
+.note-card .note-body { max-height: 17rem; overflow: hidden; font-size: 0.8125rem;
+  -webkit-mask-image: linear-gradient(#000 14rem, transparent 17rem); mask-image: linear-gradient(#000 14rem, transparent 17rem); }
+.note-title { margin: 0 1.5rem 0.25rem 0; font-size: 0.9375rem; font-weight: 600; overflow-wrap: anywhere; }
+.note-snippet { margin: 0; font-size: 0.8125rem; overflow-wrap: anywhere; }
+.note-snippet mark, .note-title mark { background: #ffe066; color: #1d2330; border-radius: 2px; }
+.note-pin { position: absolute; top: 0.25rem; right: 0.125rem; opacity: 0; filter: grayscale(1); font-size: 0.875rem; }
+.note-card:hover .note-pin, .note-card:focus-within .note-pin, .note-pin.on { opacity: 1; }
+.note-pin.on, .ne-pin.on { filter: none; }
+.ne-pin:not(.on) { filter: grayscale(1); opacity: 0.6; }
+@media (hover: none) { .note-pin { opacity: 0.45; } }
+.note-meta { display: flex; flex-wrap: wrap; gap: 0.25rem 0.5rem; align-items: center; margin-top: 0.375rem;
+  font-size: 0.6875rem; color: var(--muted); }
+.note-meta:empty { display: none; }
+.note-cat { padding: 0 0.375rem; border-radius: 0.5rem; background: var(--note, var(--side)); border: 1px solid var(--line); color: var(--text); }
+.note-when { margin-left: auto; }
+
+/* Formatted text, in cards, journal entries and the editor. */
+.note-body { overflow-wrap: anywhere; }
+.note-body > :first-child { margin-top: 0; }
+.note-body p, .note-body div { margin: 0; }
+.note-body h1, .note-body h2, .note-body h3 { margin: 0.5em 0 0.25em; font-size: 1.15em; }
+.note-body h1 { font-size: 1.3em; }
+.note-body ul, .note-body ol { margin: 0.25em 0; padding-left: 1.5em; }
+.note-body blockquote { margin: 0.375em 0; padding-left: 0.75em; border-left: 3px solid var(--line); color: var(--muted); }
+.note-body pre { white-space: pre-wrap; font-family: ui-monospace, monospace; background: var(--side); padding: 0.375em 0.5em; border-radius: 0.25rem; }
+.note-body a { color: var(--accent); }
+.note-body hr { border: none; border-top: 1px solid var(--line); }
+.note-body img { display: inline-block; vertical-align: top; max-width: 100%; height: auto; border-radius: 0.375rem; margin: 0.25em 0; }
+.note-body img[data-size="s"] { width: calc(33% - 0.25rem); margin-right: 0.25rem; }
+.note-body img[data-size="m"] { width: calc(60% - 0.25rem); margin-right: 0.25rem; }
+.note-body img[data-size="l"], .note-body img:not([data-size]) { width: 100%; }
+
+/* Journal entries: the whole entry, a day at a time. */
+.journal-entry { max-width: 46rem; margin: 0 auto 0.875rem; padding: 0.75rem 1rem; border: 1px solid var(--line);
+  border-radius: 0.625rem; background: var(--note, var(--bg)); cursor: pointer; }
+.journal-entry:hover { box-shadow: 0 1px 6px rgba(0, 0, 0, .14); }
+.journal-month { max-width: 46rem; margin: 1rem auto 0.375rem; }
+.entry-day { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 0.25rem; }
+.journal-entry .note-body { font-size: 0.9375rem; line-height: 1.55; }
+.journal-entry .note-body img { cursor: zoom-in; }
+
+/* The Trash's notes */
+.trash-note { display: flex; gap: 0.75rem; align-items: center; padding: 0.5rem; border-bottom: 1px solid var(--line); }
+.trash-note .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Notes linked to a task or project, in its editor */
+.linked-notes { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; align-items: baseline; }
+.ln-label { color: var(--muted); font-size: 0.8125rem; }
+.linked-notes .link { text-align: left; }
+
+/* The note editor */
+#note-dialog { padding: 0; width: min(46rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem); overflow-y: auto; }
+.ne { position: relative; background: var(--note, var(--bg)); padding: 0 1.25rem 1rem; min-height: 100%; }
+.ne-head { display: flex; flex-wrap: wrap; gap: 0.375rem 0.625rem; align-items: center; padding: 0.75rem 0 0.375rem;
+  position: sticky; top: 0; z-index: 2; background: var(--note, var(--bg)); }
+.ne-head select, .ne-head input[type="date"] { width: auto; padding: 0.25rem 0.375rem; font-size: 0.8125rem; }
+.ne-head .check { display: inline-flex; gap: 0.25rem; align-items: center; font-size: 0.8125rem; margin: 0; }
+.ne-journal-opts { display: inline-flex; gap: 0.375rem; }
+.ne-journal-opts[hidden] { display: none; }
+.ne-space { flex: 1; }
+.ne-title { font-size: 1.125rem; font-weight: 600; border: none; background: transparent; padding: 0.25rem 0; }
+.ne-title:focus { outline: none; }
+.ne-tools { display: flex; flex-wrap: wrap; gap: 0.125rem; align-items: center; padding: 0.25rem 0; border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line); position: sticky; top: 2.75rem; z-index: 2; background: var(--note, var(--bg)); }
+.ne-tools button { background: none; border: 1px solid transparent; padding: 0.125rem 0.5rem; min-width: 2rem; }
+.ne-tools button:hover { background: var(--hover); }
+.ne-tools button.on { background: var(--accent-soft); border-color: var(--line); }
+.ne-tools select { width: auto; padding: 0.125rem 0.25rem; font-size: 0.8125rem; margin-right: 0.25rem; }
+.ne-body { min-height: 12rem; padding: 0.625rem 0; font-size: 0.9375rem; line-height: 1.55; outline: none; }
+.ne-body:empty::before, .ne-body:has(> p:only-child > br:only-child)::before { content: "Write here…"; color: var(--muted); position: absolute; pointer-events: none; }
+.ne-body img { cursor: grab; -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
+.ne-body img.chosen { outline: 3px solid var(--accent); outline-offset: 1px; }
+.ne-body img.moving { opacity: 0.35; }
+.pic-ghost { position: fixed; width: 60px; height: 60px; object-fit: cover; border-radius: 0.375rem; opacity: 0.8;
+  pointer-events: none; z-index: 10; box-shadow: 0 2px 10px rgba(0, 0, 0, .3); }
+.pic-caret { position: fixed; width: 3px; background: var(--accent); pointer-events: none; z-index: 10; border-radius: 2px; }
+.pic-caret[hidden] { display: none; }
+.ne-imgbar { position: fixed; z-index: 11; display: flex; gap: 0.125rem; padding: 0.25rem; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0, 0, 0, .2); }
+.ne-imgbar[hidden] { display: none; }
+.ne-imgbar button { padding: 0.125rem 0.5rem; background: none; border: 1px solid transparent; font-size: 0.8125rem; }
+.ne-imgbar button.on { background: var(--accent-soft); border-color: var(--line); }
+.ne-files:not(:empty) { margin: 0.5rem 0; }
+.ne-more { display: grid; grid-template-columns: 1fr 12rem; gap: 0.5rem 0.75rem; border-top: 1px solid var(--line); padding-top: 0.5rem; }
+.ne-more label { font-size: 0.8125rem; color: var(--muted); }
+.ne-more input, .ne-more select { color: var(--text); }
+.ne-links { grid-column: 1 / -1; }
+.ne-link-results { display: flex; flex-direction: column; align-items: flex-start; gap: 0.125rem; margin-top: 0.25rem; }
+.ne-foot { display: flex; gap: 0.75rem; align-items: center; margin-top: 0.75rem; }
+.ne-dates { flex: 1; }
+
+/* Categories dialog */
+.cat-list li { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; padding: 0.375rem 0; border-bottom: 1px solid var(--line); }
+.cat-list .cat-name { flex: 1 1 10rem; width: auto; background: var(--note, var(--bg)); }
+.swatches { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
+.swatch { width: 1.375rem; height: 1.375rem; border-radius: 50%; border: 1px solid var(--line); background: var(--note, var(--bg)); cursor: pointer; display: inline-block; position: relative; }
+.swatch[data-color=""] { background: linear-gradient(135deg, var(--bg) 45%, var(--danger) 47%, var(--danger) 53%, var(--bg) 55%); }
+.swatch input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.swatch:has(input:checked) { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+@media (max-width: 760px) {
+  #note-dialog { width: 100vw; max-width: none; height: 100dvh; max-height: none; margin: 0; border: none; border-radius: 0; }
+  .ne { padding: 0 0.75rem 1rem; }
+  .ne-more { grid-template-columns: 1fr; }
+  .note-grid { columns: 2 9rem; column-gap: 0.5rem; padding: 0; }
+  .note-card { margin-bottom: 0.5rem; }
+  .note-card .note-body { max-height: 12rem; -webkit-mask-image: linear-gradient(#000 9rem, transparent 12rem); mask-image: linear-gradient(#000 9rem, transparent 12rem); }
+  .notes-opts { margin-left: 0; }
+  .journal-entry { padding: 0.625rem 0.75rem; }
+}
+
+/* The Share menu's "Where should this go?" (notes.js askShared) */
+.share-what { overflow-wrap: anywhere; }
+.share-choices { display: flex; flex-direction: column; gap: 0.5rem; margin: 0.75rem 0; }
+.share-choices button { text-align: left; padding: 0.625rem 0.875rem; }

@@ -21,7 +21,23 @@ In brief:
   `every 3 months`, `every monday`, `every mon, wed and fri`, `every last friday`).
   Adding a task while viewing Recurring makes it repeat weekly from tomorrow; the editor
   opens on Repeat so you can change that.
-- **Projects** can be *sequential*, so only their first action shows in the Queue.
+- **Projects** have a page of their own (the sidebar just counts them), sorted by priority, which
+  you drag with each project's ↕ as for tasks. They can be *sequential*, so only their first action
+  shows in the Queue, and have tags (which count for all their tasks), files (shown in each task's
+  details), Blocked by (holding back all their tasks) and Related to.
+- **Convert to project:** a task that turns out to be bigger becomes a project with its name,
+  notes, dates, tags, files and links; its checklist lines can become the project's tasks.
+- **Notes** (a page of their own): formatted text (bold, italic, underline, strike, fonts,
+  headings, lists, quotes, links) with pictures placed and dragged anywhere in it, other files,
+  a title, a category (each with a colour, which the note shows in), tags, an area, and links to
+  tasks and projects (which show their notes). Pin the important ones; sort by last edited,
+  newest, oldest, title or best match; filter by category, tag, area, and pinned / pictures /
+  files / web links / linked tasks. Search looks in titles, text, tags, categories, file names
+  and linked tasks, with `"phrases"`, `-word`, `#tag`, `cat:`, `journal:`, `area:`, `has:`,
+  `is:pinned`, `before:` / `after:` / `on:`. Saved as you type, and offline too. A task can
+  become a note. Stored as cleaned HTML (`richtext.py`).
+- **Journals:** a note ticked as a journal entry belongs to a journal, on a day; the Journal page
+  reads them by month. As many journals as you like.
 - **Areas** (Work, Home, …) filter the whole app from the sidebar dropdown: tick one or several
   (or *No area*); none ticked shows everything. New tasks go in the first area ticked. Each can have an
   SVG icon (Settings → Areas: upload a file, or give a URL to download it from), shown before
@@ -50,8 +66,8 @@ In brief:
   **Queue** list higher numbers first, in your drag order within the same number. Change it
   by dragging the ↕ on each task up or down, right-click → Priority, `+`/`-` on the open or selected tasks, or
   the editor. Dragging a task within Focus or the Queue gives it the priority of where it lands.
-- **Drag** tasks to reorder them, or drop them on a sidebar list, a project, Logbook (to
-  complete them) or Trash.
+- **Drag** tasks to reorder them, or drop them on a sidebar list, Logbook (to complete them)
+  or Trash.
 - **Select several tasks** with Ctrl/⌘-click, Shift-click (a range) or Ctrl/⌘-A (all shown);
   on a phone, press and hold a task → *Select*, then tap others. Right-click one of them (or use
   *Actions* in the bar above the list) to move, tag, defer, star, complete or trash them all,
@@ -92,11 +108,14 @@ In brief:
   list) with a summary to say, and one allowed to complete gets `POST /api/complete` ("call the
   dentist" finds *Call dentist*) ([api.md](api.md): curl, Alexa, Home Assistant, Shortcuts).
 - **Share menu:** the installed app (Android) takes shared pages, text, photos and files as new
-  Inbox tasks (`/share`, the manifest's `share_target`).
+  Inbox tasks (`/share`, the manifest's `share_target`), or (Settings → Sharing to Entropicide)
+  as a new note, or added to today's entry in a journal, with pictures placed in the text; or it
+  asks each time.
 - **Repeating tasks** start each copy with its checklist unticked, and can carry their
   attachments to each copy (stored once).
-- **Blocked by:** a task can wait on others (in any project); until they're done it stays out of
-  the Queue and Focus. **Related to** links tasks both ways without waiting: click one to open it.
+- **Blocked by:** a task can wait on other tasks or on projects; until they're done it stays out of
+  the Queue and Focus. **Related to** links tasks and projects both ways without waiting: click one to open it.
+- **Today's calendar** in Focus shows the day's events that haven't ended yet.
 - **Templates:** *Save as template* from a project (dates kept as days from the project's date),
   then *New project* from it with a date. A template can repeat, making a new project on
   schedule, some days ahead (*Monthly bills (Nov 1)*).

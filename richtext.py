@@ -15,6 +15,30 @@ from html.parser import HTMLParser
 FONTS = ("sans", "serif", "mono", "hand", "round", "narrow")
 # How wide a picture placed in a note shows: small, medium, or the width of the note.
 IMAGE_SIZES = ("s", "m", "l")
+CROP_RE = re.compile(r"^\d{1,4}(,\d{1,4}){3}$")
+
+
+def image_attrs(get):
+    """A placed picture's attributes, from get(name), as they're kept: its file, size, and how
+    it was edited. A cropped or turned picture is a copy (data-file) made in the browser from
+    the original (data-orig), with the crop (thousandths off the left, top, right and bottom)
+    and turn kept so it can be edited again; opacity (a percent) and being behind the text are
+    only how it shows."""
+    out = f'data-file="{int(get("data-file"))}"'
+    if (size := get("data-size")) in IMAGE_SIZES:
+        out += f' data-size="{size}"'
+    if str(orig := get("data-orig") or "").isdigit():
+        out += f' data-orig="{int(orig)}"'
+        crop = str(get("data-crop") or "")
+        if CROP_RE.match(crop) and all(int(x) <= 1000 for x in crop.split(",")):
+            out += f' data-crop="{",".join(str(int(x)) for x in crop.split(","))}"'
+        if (turn := get("data-rotate")) in ("90", "180", "270"):
+            out += f' data-rotate="{turn}"'
+    if str(opacity := get("data-opacity") or "").isdigit() and 5 <= int(opacity) < 100:
+        out += f' data-opacity="{int(opacity)}"'
+    if get("data-behind") == "1":
+        out += ' data-behind="1"'
+    return out
 
 BLOCKS = {"p", "div", "h1", "h2", "h3", "blockquote", "ul", "ol", "li", "pre"}
 INLINE = {"b", "strong", "i", "em", "u", "s", "strike", "del", "code", "span", "font", "a", "sub", "sup"}
@@ -87,11 +111,8 @@ class _Cleaner(HTMLParser):
             elif tag == "hr":
                 self.out.append("<hr>")
             elif tag == "img":
-                file_id = str(attrs.get("data-file") or "")
-                if file_id.isdigit():
-                    size = attrs.get("data-size")
-                    self.out.append(f'<img data-file="{int(file_id)}"' +
-                                    (f' data-size="{size}"' if size in IMAGE_SIZES else "") + ">")
+                if str(attrs.get("data-file") or "").isdigit():
+                    self.out.append(f"<img {image_attrs(attrs.get)}>")
             return
         written = []
         if tag in BLOCKS:

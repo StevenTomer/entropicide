@@ -32,6 +32,15 @@ def test_formatted_text_is_cleaned():
     # The note's own pictures only, by id.
     assert clean('<img src="https://evil/x.png"><img data-file="12" data-size="s" onerror="x"><img data-file="x">') == \
         '<img data-file="12" data-size="s">'
+    # How a picture was edited (crop, turn: only on a copy, with its original) and shows.
+    assert clean('<img data-file="13" data-size="m" data-orig="12" data-crop="100,0,250,50" data-rotate="90" '
+                 'data-opacity="40" data-behind="1" style="opacity:.4">') == \
+        '<img data-file="13" data-size="m" data-orig="12" data-crop="100,0,250,50" data-rotate="90" ' \
+        'data-opacity="40" data-behind="1">'
+    assert clean('<img data-file="13" data-crop="1,2,3,4" data-rotate="90" data-orig="x" data-opacity="100" '
+                 'data-behind="yes">') == '<img data-file="13">'
+    assert clean('<img data-file="13" data-orig="12" data-crop="2000,0,0,0" data-rotate="45" data-opacity="3">') == \
+        '<img data-file="13" data-orig="12">'
     # Fonts by name; inline styles become tags.
     assert clean('<font face="serif">a</font><font face="Comic Sans MS">b</font><font face="x">c</font>') == \
         '<font face="serif">a</font><font face="hand">b</font>c'

@@ -96,8 +96,7 @@ function cleanNoteHtml(html) {
     if (tag === "br") return "<br>";
     if (tag === "hr") return "<hr>";
     if (tag === "img") {
-      const id = node.getAttribute("data-file") || "", size = node.getAttribute("data-size");
-      return /^\d+$/.test(id) ? `<img data-file="${id}"${["s", "m", "l"].includes(size) ? ` data-size="${size}"` : ""}>` : "";
+      return /^\d+$/.test(node.getAttribute("data-file") || "") ? `<img ${imageAttrs((a) => node.getAttribute(a))}>` : "";
     }
     const opens = [];
     if (NOTE_BLOCKS.has(tag)) opens.push([tag, ""]);
@@ -117,6 +116,26 @@ function cleanNoteHtml(html) {
   return out.replace(/<br>|<\/?p>|<\/?div>|\s|&nbsp;| /g, "") ? out : "";
 }
 
+// A placed picture's attributes as they're kept (richtext.image_attrs, which this mirrors): its
+// file and size; for a cropped or turned copy, the original and how it was edited; and opacity
+// and being behind the text, which are only how it shows.
+function imageAttrs(get) {
+  let out = `data-file="${Number(get("data-file"))}"`;
+  const size = get("data-size"), orig = get("data-orig") || "", crop = get("data-crop") || "";
+  const turn = get("data-rotate"), opacity = get("data-opacity") || "";
+  if (["s", "m", "l"].includes(size)) out += ` data-size="${size}"`;
+  if (/^\d+$/.test(orig)) {
+    out += ` data-orig="${Number(orig)}"`;
+    if (/^\d{1,4}(,\d{1,4}){3}$/.test(crop) && crop.split(",").every((x) => Number(x) <= 1000)) {
+      out += ` data-crop="${crop.split(",").map(Number).join(",")}"`;
+    }
+    if (["90", "180", "270"].includes(turn)) out += ` data-rotate="${turn}"`;
+  }
+  if (/^\d+$/.test(opacity) && Number(opacity) >= 5 && Number(opacity) < 100) out += ` data-opacity="${Number(opacity)}"`;
+  if (get("data-behind") === "1") out += ' data-behind="1"';
+  return out;
+}
+
 // A note's words without the formatting (for search and previews), worked out once per version.
 const noteTexts = new Map();
 function noteText(n) {
@@ -130,10 +149,15 @@ function noteText(n) {
 }
 
 const pictureIds = (html) => [...String(html || "").matchAll(/<img data-file="(\d+)"/g)].map((m) => Number(m[1]));
+// The files the text uses: its pictures, and the originals of pictures that were cropped or turned.
+const placedIds = (html) => [...pictureIds(html),
+  ...[...String(html || "").matchAll(/<img [^>]*data-orig="(\d+)"/g)].map((m) => Number(m[1]))];
 const picSrc = (id) => `${BASE}/api/attachments/${id}`;
 // Stored HTML as shown: pictures get their address (only their id is kept).
-const showBody = (html) => String(html || "").replace(/<img data-file="(\d+)"/g,
-  (_, id) => `<img data-file="${id}" src="${picSrc(id)}" alt="" loading="lazy"`);
+const showBody = (html) => String(html || "").replace(/<img data-file="(\d+)"([^>]*)>/g, (_, id, rest) => {
+  const opacity = rest.match(/data-opacity="(\d+)"/);
+  return `<img data-file="${id}"${rest} src="${picSrc(id)}" alt="" loading="lazy"${opacity ? ` style="opacity:${opacity[1] / 100}"` : ""}>`;
+});
 const fontClass = (n) => (n.font ? ` font-${n.font}` : "");
 
 // ---- search: words (all of them), "a phrase", -word to leave out, and field:value ----
@@ -161,7 +185,7 @@ function noteHas(n, what) {
   if (["picture", "pictures", "image", "photo"].includes(what)) return pictureIds(n.body).length > 0 ||
     n.attachments.some((f) => IMAGE_TYPES.includes(f.mime));
   if (["file", "files", "attachment"].includes(what)) {
-    const placed = new Set(pictureIds(n.body));
+    const placed = new Set(placedIds(n.body));
     return n.attachments.some((f) => !placed.has(f.id));
   }
   if (["link", "links", "url"].includes(what)) return /<a href=/.test(n.body);
@@ -293,7 +317,7 @@ function stampFull(stamp) {
 function noteMeta(n, { date = true } = {}) {
   const cat = categoryById(n.category_id);
   const j = n.journal_id && S.view !== "journal" && journalById(n.journal_id);
-  const placed = new Set(pictureIds(n.body));
+  const placed = new Set(placedIds(n.body));
   const files = n.attachments.filter((f) => !placed.has(f.id)).length;
   const links = n.related.length + n.related_projects.length;
   const area = n.area_id && areaById(n.area_id);
@@ -520,6 +544,7 @@ function openNote(n) {
   dlg.innerHTML = editorHtml(n);
   const body = $(".ne-body", dlg);
   body.innerHTML = showBody(n.body) || "<p><br></p>";
+  fitBehindPictures();
   renderNoteFiles();
   renderNoteDates();
   if (!dlg.open) {
@@ -586,6 +611,11 @@ function editorHtml(n) {
         type="button" data-size="l" title="As wide as the note">L</button>
       <button type="button" data-move="-1" title="Move up" aria-label="Move up">↑</button><button type="button" data-move="1"
         title="Move down" aria-label="Move down">↓</button>
+      <button type="button" class="pic-crop" title="Crop or turn it">Crop</button><button type="button" data-turn="90"
+        title="Turn it a quarter to the right" aria-label="Turn right">⟳</button>
+      <button type="button" class="pic-behind" title="Put it behind the text, like paper with a picture on it">Behind text</button>
+      <label class="pic-fade" title="How see-through it is"><span aria-hidden="true">◐</span><input type="range" class="pic-opacity"
+        min="10" max="100" step="5" aria-label="Opacity"></label>
       <button type="button" class="pic-view" title="View it full size">View</button>
       <button type="button" class="pic-remove" title="Take it out of the text (it stays with the note's files)">Remove</button>
     </div>
@@ -614,7 +644,7 @@ function renderNoteDates() {
 // The note's files that aren't placed in its text: other files, and pictures taken out of it.
 function renderNoteFiles() {
   const n = ned.n, dlg = $("#note-dialog");
-  const placed = new Set(pictureIds($(".ne-body", dlg).innerHTML));
+  const placed = new Set(placedIds($(".ne-body", dlg).innerHTML));
   const files = n.attachments.filter((f) => !placed.has(f.id));
   $(".ne-files", dlg).innerHTML = files.length ? `<div class="att-head">Files</div>` + files.map((f) =>
     fileRow(f, false).replace('<span class="muted small">', (IMAGE_TYPES.includes(f.mime)
@@ -873,6 +903,8 @@ function placeImageBar() {
   if (!img || !dlg.contains(img)) { bar.hidden = true; return; }
   const r = img.getBoundingClientRect();
   for (const b of bar.querySelectorAll("[data-size]")) b.classList.toggle("on", (img.dataset.size || "l") === b.dataset.size);
+  $(".pic-behind", bar).classList.toggle("on", img.dataset.behind === "1");
+  $(".pic-opacity", bar).value = img.dataset.opacity || 100;
   bar.style.left = `${Math.max(8, Math.min(r.left + 6, innerWidth - bar.offsetWidth - 8))}px`;
   bar.style.top = `${Math.max(8, Math.min(r.top + 6, innerHeight - bar.offsetHeight - 8))}px`;
 }
@@ -940,7 +972,7 @@ function bindPictureDrag(dlg) {
     if (rect) Object.assign(caret.style, { left: `${rect.left}px`, top: `${rect.top}px`, height: `${Math.max(16, rect.height)}px` });
   };
   dlg.addEventListener("pointerdown", (e) => {
-    const img = e.target.closest?.(".ne-body img");
+    const img = pictureAt(e);
     if (!img || e.button > 0) return;
     chooseImage(img);
     drag = { img, x: e.clientX, y: e.clientY, touch: e.pointerType !== "mouse", on: false };
@@ -955,7 +987,7 @@ function bindPictureDrag(dlg) {
   });
   // While dragging on a touch screen, the page mustn't scroll instead.
   dlg.addEventListener("touchmove", (e) => { if (drag?.on) e.preventDefault(); }, { passive: false });
-  dlg.addEventListener("contextmenu", (e) => { if (e.target.closest?.(".ne-body img")) e.preventDefault(); });
+  dlg.addEventListener("contextmenu", (e) => { if (pictureAt(e)) e.preventDefault(); });
   dlg.addEventListener("dragstart", (e) => { if (e.target.closest?.(".ne-body img")) e.preventDefault(); });
   const drop = () => {
     if (drag?.on && drag.to) {
@@ -971,6 +1003,272 @@ function bindPictureDrag(dlg) {
   dlg.addEventListener("pointerup", drop);
   dlg.addEventListener("pointercancel", (e) => { if (!drag?.on) stop(); else drop(e); });
 }
+
+// ---- editing a picture: crop, turn, opacity, behind the text ----
+
+// Cropping and turning are drawn in the browser into a new copy of the picture, which takes its
+// place in the text; the original stays with the note (out of its file list) so the crop can be
+// changed or undone later. Opacity and being behind the text are only how it shows.
+const EDITABLE_PICTURES = ["image/jpeg", "image/png", "image/webp"];
+const pictureTurn = (img) => Number(img.dataset.rotate || 0);
+const pictureCrop = (img) => {
+  const [l, t, r, b] = (img.dataset.crop || "0,0,0,0").split(",").map((x) => Number(x) / 1000);
+  return { l, t, r, b };
+};
+// The same crop on the picture turned by a quarter right (90) or left (270).
+const turnCrop = (c, by) => (by === 90 ? { l: c.b, t: c.l, r: c.t, b: c.r } : { l: c.t, t: c.r, r: c.b, b: c.l });
+
+function setPictureOpacity(img, percent) {
+  if (percent >= 100) { delete img.dataset.opacity; img.style.opacity = ""; }
+  else { img.dataset.opacity = percent; img.style.opacity = percent / 100; }
+}
+
+// Pictures behind the text take no room, so the text is made at least as tall as they are (in
+// the editor, and wherever a note is shown, as its pictures load).
+document.addEventListener("load", (e) => {
+  if (e.target.dataset?.behind) fitBehindPictures(e.target.closest(".note-body"));
+}, true);
+
+function fitBehindPictures(body = editorBody()) {
+  if (!body) return;
+  let need = 0;
+  for (const img of body.querySelectorAll("img[data-behind]")) need = Math.max(need, img.offsetTop + img.offsetHeight);
+  body.style.minHeight = need ? `${need}px` : "";
+}
+
+// The picture under the pointer: one in the text, or one behind it (where there are no words
+// over it; on the words, a click is for the words).
+function pictureAt(e) {
+  const img = e.target.closest?.(".ne-body img");
+  if (img) return img;
+  const body = e.target.closest?.(".ne-body");
+  if (!body) return null;
+  const { clientX: x, clientY: y } = e;
+  const under = [...body.querySelectorAll("img[data-behind]")].reverse().find((p) => {
+    const r = p.getBoundingClientRect();
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+  });
+  return under && !onWords(x, y) ? under : null;
+}
+
+function onWords(x, y) {
+  const r = caretRangeAt(x, y), node = r?.startContainer;
+  if (!node || node.nodeType !== Node.TEXT_NODE) return false;
+  for (const at of [r.startOffset - 1, r.startOffset]) {
+    if (at < 0 || at >= node.length) continue;
+    const letter = document.createRange();
+    letter.setStart(node, at);
+    letter.setEnd(node, at + 1);
+    for (const b of letter.getClientRects()) {
+      if (x >= b.left - 2 && x <= b.right + 2 && y >= b.top - 2 && y <= b.bottom + 2) return true;
+    }
+  }
+  return false;
+}
+
+const noteFile = (id) => ned.n?.attachments.find((f) => f.id === Number(id));
+
+function loadPicture(src) {
+  return new Promise((done, fail) => {
+    const img = new Image();
+    img.onload = () => done(img);
+    img.onerror = fail;
+    img.src = src;
+  });
+}
+
+// The original turned (by 0, 90, 180 or 270 degrees, to the right) and then cropped, as a file.
+function drawPicture(original, turn, crop, mime) {
+  const w = original.naturalWidth, h = original.naturalHeight, sideways = turn % 180 !== 0;
+  const width = sideways ? h : w, height = sideways ? w : h;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width * (1 - crop.l - crop.r)));
+  canvas.height = Math.max(1, Math.round(height * (1 - crop.t - crop.b)));
+  const ctx = canvas.getContext("2d");
+  ctx.translate(-Math.round(width * crop.l), -Math.round(height * crop.t));
+  ctx.translate(width / 2, height / 2);
+  ctx.rotate((turn * Math.PI) / 180);
+  ctx.drawImage(original, -w / 2, -h / 2);
+  return new Promise((done) => canvas.toBlob(done, mime, 0.92));
+}
+
+// The text uses these files (as pictures, or the originals of edited ones), not counting skip.
+function filesInText(skip) {
+  return new Set([...editorBody().querySelectorAll("img")].filter((x) => x !== skip)
+    .flatMap((x) => [x.dataset.file, x.dataset.orig]).filter(Boolean).map(Number));
+}
+
+// An edited copy that's no longer used (it was edited again, put back as it was, or taken out of
+// the text) is deleted; it can always be made again from the original.
+async function dropPictureCopy(id) {
+  const n = ned.n;
+  if (!n || filesInText().has(id) || !n.attachments.some((f) => f.id === id)) return;
+  try {
+    n.attachments = (await api("DELETE", `/attachments/${id}`, undefined, { quiet: true })).attachments;
+  } catch { return; }
+  if (ned.n === n) renderNoteFiles();
+}
+
+async function editPicture(img, turn, crop) {
+  const n = ned.n, before = Number(img.dataset.file), origId = Number(img.dataset.orig || img.dataset.file);
+  const original = noteFile(origId);
+  if (!original || !EDITABLE_PICTURES.includes(original.mime)) return toast("Only JPEG, PNG and WebP pictures can be cropped or turned.");
+  if (ned.picBusy) return;
+  const whole = !turn && !crop.l && !crop.t && !crop.r && !crop.b;
+  let id = origId;
+  if (!whole) {
+    await saveNote({ force: true });
+    if (!n.id || n.id < 0) return toast("Wait until this note has been saved (when you're back online), then edit its pictures.");
+    ned.picBusy = true;
+    try {
+      const blob = await drawPicture(await loadPicture(picSrc(origId)), turn, crop, original.mime).catch(() => null);
+      if (!blob) return toast("Couldn't edit that picture (it may be too big for this device).");
+      const ext = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" }[blob.type] || "png";
+      const form = new FormData();
+      form.append("file", blob, `${original.name.replace(/\.[^.]+$/, "")} (edited).${ext}`);
+      let res;
+      try {
+        res = await fetch(`${BASE}/api/notes/${n.id}/attachments`, { method: "POST", body: form, headers: { "X-Requested-With": "entropicide" } });
+      } catch {
+        return toast("You're offline. Editing a picture needs a connection.");
+      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return toast(data.error || "Couldn't save the edited picture.");
+      n.attachments = data.attachments;
+      n.updated_at = data.updated_at;
+      upsertNote(n);
+      id = data.added[0];
+    } finally {
+      ned.picBusy = false;
+    }
+  }
+  if (ned.n !== n || !editorBody().contains(img)) return;
+  img.dataset.file = id;
+  if (whole) {
+    for (const k of ["orig", "crop", "rotate"]) delete img.dataset[k];
+  } else {
+    img.dataset.orig = origId;
+    if (crop.l || crop.t || crop.r || crop.b) img.dataset.crop = [crop.l, crop.t, crop.r, crop.b].map((x) => Math.round(x * 1000)).join(",");
+    else delete img.dataset.crop;
+    if (turn) img.dataset.rotate = turn; else delete img.dataset.rotate;
+  }
+  img.src = picSrc(id);
+  img.addEventListener("load", () => { fitBehindPictures(); placeImageBar(); }, { once: true });
+  noteFieldChanged("body");
+  renderNoteFiles();
+  await saveNote();
+  if (before !== origId && before !== id) dropPictureCopy(before);
+}
+
+// The crop window: the whole original, turned, with a box to drag over the part to keep.
+const pe = { img: null, picture: null, turn: 0, crop: null, drag: null };
+
+async function openPictureEditor(img) {
+  const original = noteFile(img.dataset.orig || img.dataset.file);
+  if (!original || !EDITABLE_PICTURES.includes(original.mime)) return toast("Only JPEG, PNG and WebP pictures can be cropped or turned.");
+  let picture;
+  try { picture = await loadPicture(picSrc(original.id)); } catch { return toast("Couldn't load that picture."); }
+  let dlg = $("#pic-dialog");
+  if (!dlg) {
+    dlg = document.createElement("dialog");
+    dlg.id = "pic-dialog";
+    dlg.setAttribute("aria-label", "Crop or turn the picture");
+    dlg.innerHTML = `<div class="pe-stage"><div class="pe-frame"><canvas></canvas><div class="pe-box">${
+      ["nw", "n", "ne", "e", "se", "s", "sw", "w"].map((x) => `<span class="pe-handle" data-h="${x}"></span>`).join("")}</div></div></div>
+      <div class="pe-bar">
+        <button type="button" data-turn="270" title="Turn left" aria-label="Turn left">⟲</button><button type="button" data-turn="90"
+          title="Turn right" aria-label="Turn right">⟳</button>
+        <button type="button" class="link pe-reset" title="The picture as it was added">Original</button>
+        <span class="ne-space"></span>
+        <button type="button" class="pe-cancel">Cancel</button><button type="button" class="primary pe-save">Save</button>
+      </div>`;
+    document.body.append(dlg);
+    bindPictureEditor(dlg);
+  }
+  Object.assign(pe, { img, picture, turn: pictureTurn(img), crop: pictureCrop(img), drag: null });
+  dlg.showModal();
+  drawPictureEditor();
+}
+
+function drawPictureEditor() {
+  const dlg = $("#pic-dialog"), canvas = $("canvas", dlg), p = pe.picture;
+  const sideways = pe.turn % 180 !== 0, w = sideways ? p.naturalHeight : p.naturalWidth, h = sideways ? p.naturalWidth : p.naturalHeight;
+  const scale = Math.min((Math.min(innerWidth, 900) - 72) / w, (innerHeight - 170) / h, 1);
+  const cssW = Math.max(1, Math.round(w * scale)), cssH = Math.max(1, Math.round(h * scale)), dpr = devicePixelRatio || 1;
+  canvas.width = cssW * dpr;
+  canvas.height = cssH * dpr;
+  canvas.style.width = `${cssW}px`;
+  canvas.style.height = `${cssH}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(scale * dpr, scale * dpr);
+  ctx.translate(w / 2, h / 2);
+  ctx.rotate((pe.turn * Math.PI) / 180);
+  ctx.drawImage(p, -p.naturalWidth / 2, -p.naturalHeight / 2);
+  placeCropBox();
+}
+
+function placeCropBox() {
+  const c = pe.crop;
+  Object.assign($("#pic-dialog .pe-box").style, { left: `${c.l * 100}%`, top: `${c.t * 100}%`,
+    width: `${(1 - c.l - c.r) * 100}%`, height: `${(1 - c.t - c.b) * 100}%` });
+}
+
+function bindPictureEditor(dlg) {
+  const stage = $(".pe-stage", dlg), least = 0.05;
+  const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
+  stage.addEventListener("pointerdown", (e) => {
+    const handle = e.target.dataset.h || (e.target.closest(".pe-box") ? "move" : null);
+    if (!handle) return;
+    e.preventDefault();
+    stage.setPointerCapture(e.pointerId);
+    const r = $("canvas", stage).getBoundingClientRect();
+    pe.drag = { handle, x: e.clientX, y: e.clientY, crop: { ...pe.crop }, w: r.width, h: r.height };
+  });
+  stage.addEventListener("pointermove", (e) => {
+    const d = pe.drag;
+    if (!d) return;
+    const dx = (e.clientX - d.x) / d.w, dy = (e.clientY - d.y) / d.h, c = { ...d.crop };
+    if (d.handle === "move") {
+      const mx = clamp(dx, -c.l, c.r), my = clamp(dy, -c.t, c.b);
+      Object.assign(c, { l: c.l + mx, r: c.r - mx, t: c.t + my, b: c.b - my });
+    } else {
+      if (d.handle.includes("w")) c.l = clamp(d.crop.l + dx, 0, 1 - c.r - least);
+      if (d.handle.includes("e")) c.r = clamp(d.crop.r - dx, 0, 1 - c.l - least);
+      if (d.handle.includes("n")) c.t = clamp(d.crop.t + dy, 0, 1 - c.b - least);
+      if (d.handle.includes("s")) c.b = clamp(d.crop.b - dy, 0, 1 - c.t - least);
+    }
+    pe.crop = c;
+    placeCropBox();
+  });
+  const stop = () => { pe.drag = null; };
+  stage.addEventListener("pointerup", stop);
+  stage.addEventListener("pointercancel", stop);
+  dlg.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (e.target === dlg || b?.classList.contains("pe-cancel")) return dlg.close();
+    if (!b) return;
+    if (b.dataset.turn) {
+      const by = Number(b.dataset.turn);
+      pe.turn = (pe.turn + by) % 360;
+      pe.crop = turnCrop(pe.crop, by);
+      return drawPictureEditor();
+    }
+    if (b.classList.contains("pe-reset")) {
+      pe.turn = 0;
+      pe.crop = { l: 0, t: 0, r: 0, b: 0 };
+      return drawPictureEditor();
+    }
+    if (b.classList.contains("pe-save")) {
+      dlg.close();
+      // (thousandths, as it's kept, so an unchanged crop isn't made again)
+      const c = Object.fromEntries(Object.entries(pe.crop).map(([k, v]) => [k, Math.round(v * 1000) / 1000]));
+      const same = pe.turn === pictureTurn(pe.img) && ["l", "t", "r", "b"].every((k) => c[k] === pictureCrop(pe.img)[k]);
+      if (!same) editPicture(pe.img, pe.turn, c);
+    }
+  });
+  window.addEventListener("resize", () => { if (dlg.open) drawPictureEditor(); });
+}
+
 
 // ---- events ----
 
@@ -991,7 +1289,8 @@ function bindNoteDialog(dlg) {
   dlg.addEventListener("input", (e) => {
     const t = e.target;
     if (t.classList.contains("ne-title")) noteFieldChanged("title");
-    else if (t.closest(".ne-body")) { noteFieldChanged("body"); chooseImage(null); }
+    else if (t.closest(".ne-body")) { noteFieldChanged("body"); chooseImage(null); fitBehindPictures(); }
+    else if (t.classList.contains("pic-opacity") && ned.img) { setPictureOpacity(ned.img, Number(t.value)); noteFieldChanged("body"); }
     else if (t.classList.contains("ne-tags")) noteFieldChanged("tags");
     else if (t.classList.contains("ne-link-search")) {
       const n = ned.n;
@@ -1038,7 +1337,7 @@ function bindNoteDialog(dlg) {
     const b = e.target.closest("button");
     const n = ned.n;
     if (!b) {
-      if (!e.target.closest(".ne-body img, .ne-imgbar")) chooseImage(null);
+      if (!pictureAt(e) && !e.target.closest(".ne-imgbar")) chooseImage(null);
       // A link in the text opens with Ctrl (⌘) held, as in other editors.
       const a = e.target.closest(".ne-body a[href]");
       if (a && (e.ctrlKey || e.metaKey)) window.open(a.href, "_blank", "noopener");
@@ -1068,13 +1367,30 @@ function bindNoteDialog(dlg) {
     if (b.dataset.size && ned.img) {
       ned.img.dataset.size = b.dataset.size;
       noteFieldChanged("body");
+      fitBehindPictures();
       return requestAnimationFrame(placeImageBar);
     }
     if (b.dataset.move && ned.img) return moveImage(ned.img, Number(b.dataset.move));
+    if (b.dataset.turn && ned.img) {
+      const img = ned.img;
+      return editPicture(img, (pictureTurn(img) + 90) % 360, turnCrop(pictureCrop(img), 90));
+    }
+    if (b.classList.contains("pic-crop") && ned.img) return openPictureEditor(ned.img);
+    if (b.classList.contains("pic-behind") && ned.img) {
+      const img = ned.img, behind = img.dataset.behind !== "1";
+      if (behind) {
+        img.dataset.behind = "1";
+        if (!img.dataset.opacity) setPictureOpacity(img, 40);  // faded, so the words can be read over it
+      } else delete img.dataset.behind;
+      noteFieldChanged("body");
+      fitBehindPictures();
+      return requestAnimationFrame(placeImageBar);
+    }
     if (b.classList.contains("pic-view") && ned.img) return openViewer(n.attachments, Number(ned.img.dataset.file));
     if (b.classList.contains("pic-remove") && ned.img) {
-      const block = ned.img.parentNode;
+      const block = ned.img.parentNode, copy = ned.img.dataset.orig && Number(ned.img.dataset.file);
       ned.img.remove();
+      if (copy) saveNote().then(() => dropPictureCopy(copy));  // the original stays with the files
       if (block !== editorBody() && !block.textContent.trim() && !block.querySelector("img")) block.remove();
       chooseImage(null);
       noteFieldChanged("body");

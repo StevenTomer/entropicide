@@ -28,7 +28,8 @@ In brief:
 - **Convert to project:** a task that turns out to be bigger becomes a project with its name,
   notes, dates, tags, files and links; its checklist lines can become the project's tasks.
 - **Notes** (a page of their own): formatted text (bold, italic, underline, strike, fonts,
-  headings, lists, quotes, links) with pictures placed and dragged anywhere in it, other files,
+  headings, lists, quotes, links) with pictures placed and dragged anywhere in it (cropped,
+  turned, faded, or put behind the words), other files,
   a title, a category (each with a colour, which the note shows in), tags, an area, and links to
   tasks and projects (which show their notes). Pin the important ones; sort by last edited,
   newest, oldest, title or best match; filter by category, tag, area, and pinned / pictures /

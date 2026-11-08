@@ -35,6 +35,9 @@ Settings → Troubleshooting.
 - **A tidier sidebar:** projects are no longer listed there; *Projects* (with how many are active)
   opens their page.
 - **Today's calendar** in Focus leaves out events that have already ended.
+- **Editing pictures in notes:** click a picture to crop it (drag a box over the part to keep),
+  turn it, fade it with the ◐ slider, or put it **behind the text**. The original is kept, so a
+  crop can be changed or undone later (*Original*).
 
 - **Priority by dragging:** each task's ▲/▼ is now one ↕: press and drag up to raise the
   priority, down to lower it, and let go to set it. The row stays put until then, so it no

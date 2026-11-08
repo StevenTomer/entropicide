@@ -262,7 +262,7 @@ function applyOffline(op) {
   const { method, path, body } = op;
   const [, kind, rest] = path.split("/");
   if (path === "/reorder/tasks") {
-    body.ids.forEach((id, i) => { const t = taskById(id); if (t) t.position = i; });
+    body.ids.forEach((id, i) => { const t = taskById(id), p = !t && projectById(id); if (t) t.position = i; else if (p) p.step = i; });
     S.data.tasks.sort((a, b) => a.position - b.position || a.id - b.id);
     return null;
   }
@@ -280,7 +280,7 @@ function applyOffline(op) {
   if (method === "POST" && kind === "projects") {
     const p = { id: op.temp, area_id: null, name: "", notes: "", sequential: false, state: "active",
       focus: false, due_date: null, completed_at: null, deleted_at: null, priority: 0, tags: [],
-      attachments: [], blocked_by: [], related: [], parent_id: null,
+      attachments: [], blocked_by: [], related: [], parent_id: null, step: null,
       position: Math.max(0, ...S.data.projects.map((x) => x.position)) + 1 };
     if (!projectById(p.id)) S.data.projects.push(p);
     return changeOffline("projects", p.id, body);
@@ -432,17 +432,25 @@ function projectActive(t) {
   return projectChain(t.project_id).every((p) => p.state === "active");
 }
 
-// The active subprojects of a sequential project go one at a time (by priority, then their
-// order): the ones after the first wait, with everything in them. (app.py's list_tasks agrees.)
-function heldSubprojects() {
-  const held = new Set();
+// A project's steps: its tasks and subprojects, in their one order (a task's position, a
+// subproject's step), as [{kind, x}]. tasks: which of its tasks to include (all, by default).
+function projectSteps(p, tasks = S.data.tasks.filter((t) => t.project_id === p.id)) {
+  const at = (s) => (s.kind === "task" ? s.x.position : s.x.step ?? Infinity);
+  return [...tasks.map((x) => ({ kind: "task", x })), ...subprojects(p).map((x) => ({ kind: "project", x }))]
+    .sort((a, b) => at(a) - at(b) || a.x.id - b.x.id);
+}
+
+// The steps of sequential projects that wait their turn: all but the first of each one's Queue
+// tasks and active subprojects, in their order (a subproject with everything in it). (app.py's
+// list_tasks agrees.)
+function laterSteps() {
+  const later = new Set();
   for (const p of S.data.projects) {
     if (!p.sequential) continue;
-    S.data.projects.filter((q) => q.parent_id === p.id && q.state === "active" && !q.deleted_at)
-      .sort((a, b) => b.priority - a.priority || a.position - b.position || a.id - b.id)
-      .slice(1).forEach((q) => held.add(q.id));
+    projectSteps(p).filter((s) => (s.kind === "task" ? s.x.state === "next" : s.x.state === "active"))
+      .slice(1).forEach((s) => later.add(s.x.id));
   }
-  return held;
+  return later;
 }
 
 // The open item in the editor: a task or a project.
@@ -469,15 +477,9 @@ function waitingOn(x, kind = "task", seen = new Set()) {
 // tasks of a project that's waiting.
 function sequentialBlocked() {
   const blocked = new Set();
-  const seen = new Set();
-  const held = heldSubprojects();
+  const later = laterSteps();
   for (const t of S.data.tasks) {
-    if (waitingOn(t).length || projectChain(t.project_id).some((p) => held.has(p.id))) blocked.add(t.id);
-  }
-  for (const t of S.data.tasks) {
-    const p = t.project_id && projectById(t.project_id);
-    if (!p || !p.sequential || t.state !== "next") continue;
-    if (seen.has(p.id)) blocked.add(t.id); else seen.add(p.id);
+    if (later.has(t.id) || waitingOn(t).length || projectChain(t.project_id).some((p) => later.has(p.id))) blocked.add(t.id);
   }
   return blocked;
 }
@@ -808,16 +810,17 @@ async function setAreaIcon(li, body) {
 
 // depth: how far down a tree of subprojects it is (Projects page); null: shown on its own, so
 // it says what it's part of.
-function projectRow(p, depth = null) {
+function projectRow(p, depth = null, { draggable = false } = {}) {
   const [inside, subs] = projectInside(p);
   const n = inside.length, folded = foldedProjects.has(p.id), kids = subprojects(p).length;
   const area = p.area_id && areaById(p.area_id);
   const waits = waitingOn(p, "project");
-  const parent = depth === null && projectById(p.parent_id);
+  const parent = depth === null && !draggable && projectById(p.parent_id);  // (draggable: on its parent's page)
   const sel = (S.selected?.kind === "project" && S.selected.id === p.id ? " selected" : "") +
     (menu.project === p.id ? " menu-target" : "");
-  return `<div class="row project${sel}${depth ? " sub" : ""}" data-project="${p.id}"${prioTint(p)}>
+  return `<div class="row project${sel}${depth ? " sub" : ""}" data-project="${p.id}"${draggable ? ' draggable="true"' : ""}${prioTint(p)}>
     ${depth ? `<span class="indent" style="width: ${depth * 1.5}rem" aria-hidden="true"></span>` : ""}
+    ${draggable ? '<span class="step-mark" title="A subproject: its tasks are a step of this project">▤</span>' : ""}
     ${depth !== null ? (kids ? `<button type="button" class="fold" aria-expanded="${!folded}" title="${folded ? "Show" : "Hide"} its subprojects">${folded ? "▸" : "▾"}</button>`
       : '<span class="fold"></span>') : ""}
     <button class="star ${p.focus ? "on" : ""}" aria-label="Focus" title="Focus">★</button>
@@ -877,7 +880,7 @@ function renderList() {
     const groups = [["active", "Active"], ["someday", "Someday"], ["later", "Later"], ["done", "Completed"]];
     // Subprojects show under their project (whatever their status), folded away if asked.
     const tree = (p, depth, seen) => projectRow(p, depth) + (foldedProjects.has(p.id) ? "" :
-      byPriority(subprojects(p)).filter((q) => !seen.has(q.id) && seen.add(q.id)).map((q) => tree(q, depth + 1, seen)).join(""));
+      projectSteps(p, []).map((st) => st.x).filter((q) => !seen.has(q.id) && seen.add(q.id)).map((q) => tree(q, depth + 1, seen)).join(""));
     fillList(el, (groups.map(([state, label]) => {
       const ps = byPriority(S.data.projects.filter((p) => p.state === state && inArea(p.area_id) && !projectById(p.parent_id)));
       if (!ps.length) return "";
@@ -908,11 +911,6 @@ function renderList() {
     </div>`;
   }
 
-  if (S.view.startsWith("project:")) {
-    const subs = byPriority(subprojects(projectById(Number(S.view.slice(8)))));
-    if (subs.length) html += '<h2 class="group">Subprojects</h2>' + subs.map((q) => projectRow(q)).join("") + '<h2 class="group">Tasks</h2>';
-  }
-
   if (S.view === "someday" || S.view === "later") {
     const ps = byPriority(S.data.projects.filter((p) => p.state === S.view && inArea(p.area_id)));
     if (ps.length) html += '<h2 class="group">Projects</h2>' + ps.map(projectRow).join("") +
@@ -933,6 +931,7 @@ function renderList() {
   }
 
   const showState = S.view.startsWith("project:") || S.view === "focus";
+  let subs = 0;
   if (S.view === "calendar") {
     html += calendarAgenda(list);
   } else if (S.view === "focus" && eventsLeftToday().length) {
@@ -952,10 +951,15 @@ function renderList() {
       const rows = list.filter((t) => t.state === st);
       if (rows.length) html += `<h2 class="group">${label}</h2>` + rows.map((t) => taskRow(t, {})).join("");
     }
+  } else if (S.view.startsWith("project:") && !S.search && !S.tagFilter.size) {
+    // Its tasks and subprojects, in their one order (drag either to change it).
+    const steps = projectSteps(projectById(Number(S.view.slice(8))), list);
+    subs = steps.length - list.length;
+    html += steps.map((st) => (st.kind === "task" ? taskRow(st.x, { showState }) : projectRow(st.x, null, { draggable: true }))).join("");
   } else {
     html += list.map((t) => taskRow(t, { showState })).join("");
   }
-  if (!list.length && S.view !== "calendar" && !(S.view === "trash" && (S.extraProjects.length || S.extraNotes.length))) {
+  if (!list.length && !subs && S.view !== "calendar" && !(S.view === "trash" && (S.extraProjects.length || S.extraNotes.length))) {
     html += `<p class="empty">${S.search || S.tagFilter.size ? "Nothing matches." :
       { focus: "Star tasks to put them here.",
         recurring: "Set a task's Repeat to see its next copy here." }[S.view] ?? "Nothing here."}</p>`;
@@ -1781,7 +1785,7 @@ function parentChoices(p) {
 }
 
 function subprojectsField(p) {
-  const subs = byPriority(subprojects(p));
+  const subs = projectSteps(p, []).map((st) => st.x);
   return `<div class="deps subprojects"><span class="ln-label">Subprojects</span>
     ${subs.map((q) => `<button type="button" class="link open-subproject${q.state === "done" ? " done" : ""}" data-project="${q.id}">${h(q.name)}</button>`).join("")}
     <button type="button" class="link new-subproject">+ New subproject</button></div>`;
@@ -2013,7 +2017,11 @@ async function dropOnNav(ts, target) {
 // Move the dragged tasks (keeping their order) to just before another, or to the end.
 async function reorderTasks(draggedIds, beforeId) {
   if (draggedIds.includes(beforeId)) return;
-  const ids = filtered(viewTasks(S.view)).map((t) => t.id).filter((id) => !draggedIds.includes(id));
+  const project = S.view.startsWith("project:") && !S.search && !S.tagFilter.size && projectById(Number(S.view.slice(8)));
+  if (!project) draggedIds = draggedIds.filter((id) => taskById(id));  // (subprojects move only on their project's page)
+  if (!draggedIds.length) return;
+  const ids = (project ? projectSteps(project, filtered(viewTasks(S.view))).map((st) => st.x.id)
+    : filtered(viewTasks(S.view)).map((t) => t.id)).filter((id) => !draggedIds.includes(id));
   let at = beforeId == null ? ids.length : ids.indexOf(beforeId);
   if (at < 0) at = ids.length;
   // Where the list is sorted by priority, the dragged tasks take the priority of the spot
@@ -2021,7 +2029,7 @@ async function reorderTasks(draggedIds, beforeId) {
   const ref = PRIORITY_VIEWS.includes(S.view) && taskById(ids[at] ?? ids[at - 1]);
   const repriced = ref ? tasksOf(draggedIds).filter((t) => t.priority !== ref.priority) : [];
   ids.splice(at, 0, ...draggedIds);
-  ids.forEach((id, i) => { const t = taskById(id); if (t) t.position = i; });
+  ids.forEach((id, i) => { const t = taskById(id), p = !t && projectById(id); if (t) t.position = i; else if (p) p.step = i; });
   repriced.forEach((t) => { t.priority = ref.priority; });
   S.data.tasks.sort((a, b) => a.position - b.position || a.id - b.id);
   render();
@@ -4481,10 +4489,10 @@ function bind() {
   bindPriorityDrag(list);
   list.addEventListener("dragstart", (e) => {
     if (prioDrag) return e.preventDefault();
-    const row = e.target.closest(".row.task");
+    const row = e.target.closest(".row.task, .row.project[draggable]");
     if (!row) return;
-    const id = Number(row.dataset.task);
-    dragIds = S.picked.has(id) ? pickedIds() : [id];
+    const id = Number(row.dataset.task || row.dataset.project);
+    dragIds = row.dataset.task && S.picked.has(id) ? pickedIds() : [id];
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", dragIds.join(","));
     if (dragIds.length > 1) {
@@ -4492,7 +4500,7 @@ function bind() {
       badge.textContent = `${dragIds.length} tasks`;
       e.dataTransfer.setDragImage(badge, -10, -10);
     }
-    for (const x of dragIds) list.querySelector(`.row.task[data-task="${x}"]`)?.classList.add("dragging");
+    for (const x of dragIds) list.querySelector(`.row.task[data-task="${x}"], .row.project[data-project="${x}"]`)?.classList.add("dragging");
     document.body.classList.add("is-dragging");
   });
   // Also run on drop: redrawing the list removes the dragged row, and then its dragend
@@ -4509,15 +4517,15 @@ function bind() {
     if (!dragIds || !canReorder()) return;
     e.preventDefault();
     list.querySelectorAll(".drop-before").forEach((x) => x.classList.remove("drop-before"));
-    e.target.closest(".row.task")?.classList.add("drop-before");
+    e.target.closest(".row.task, .row.project[draggable]")?.classList.add("drop-before");
   });
   list.addEventListener("drop", (e) => {
     if (!dragIds || !canReorder()) return;
     e.preventDefault();
-    const target = e.target.closest(".row.task");
+    const target = e.target.closest(".row.task, .row.project[draggable]");
     const ids = dragIds;
     endDrag();
-    reorderTasks(ids, target ? Number(target.dataset.task) : null);
+    reorderTasks(ids, target ? Number(target.dataset.task || target.dataset.project) : null);
   });
   const nav = $("#nav");
   nav.addEventListener("dragover", (e) => {
@@ -4533,7 +4541,7 @@ function bind() {
     e.preventDefault();
     const ts = tasksOf(dragIds);
     endDrag();
-    dropOnNav(ts, target.dataset.drop);
+    if (ts.length) dropOnNav(ts, target.dataset.drop);
   });
 
   $("#select-bar").addEventListener("click", (e) => {

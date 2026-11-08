@@ -69,10 +69,11 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
   moving `/opt/todo`) are deliberate; keep them.
 - **Blocked by / Related to / subprojects:** `blocked_by` and `related` are plain ids of tasks
   and projects (ids are unique across kinds; `related` items carry their `kind`). Projects nest
-  (`parent_id`). A project that's blocked, in Someday or Later, or (in a sequential parent) not
-  the first active subproject holds back everything in it; `waits_on` / `check_no_loops` refuse
+  (`parent_id`); a subproject's `step` orders it among its parent's tasks (comparable with their
+  `position`). A project that's blocked, in Someday or Later, or (in a sequential parent) not yet
+  the first step holds back everything in it; `waits_on` / `check_no_loops` refuse
   waits that could never end. Server (`list_tasks`) and browser (`waitingOn`, `projectActive`,
-  `sequentialBlocked`) must agree on what's blocked.
+  `laterSteps`, `sequentialBlocked`) must agree on what's blocked.
 - Attachments are blobs in the database (deduplicated by sha256), so the DB file is the
   whole backup. Each is on one document; a picture placed in a text is `<img data-file="id">`,
   and the browser adds the `src` (`showBody`).

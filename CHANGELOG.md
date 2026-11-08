@@ -48,8 +48,10 @@ Settings → Troubleshooting.
   *</>* in the toolbar switches between the formatted text and its HTML on any device.
 - **Subprojects:** a project can be a part of a bigger one (*New subproject…*, *Move into*, or *Part
   of* in its details). The Projects page shows them as a tree that folds away. A project that's
-  waiting, or in Someday or Later, holds back everything in it, and a sequential project's
-  subprojects go one at a time. A task converted to a project inside one becomes its subproject.
+  waiting, or in Someday or Later, holds back everything in it. On a project's page its tasks and
+  subprojects are in one order you drag; a sequential project takes them one at a time, a
+  subproject's tasks showing when its turn comes. A task converted to a project inside one becomes
+  its subproject, in the same place.
 - **Change what something is:** a note can become a task or a project (at the bottom of the note),
   and an empty project a task or a note, keeping its title, text, tags, files and links. Converting
   a task now keeps it the same item, so links to it, and what waited on it, simply stay.

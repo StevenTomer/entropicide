@@ -27,8 +27,9 @@ In brief:
   details), Blocked by (holding back all their tasks) and Related to.
 - **Subprojects:** a project can be a part of a bigger one, at any depth (*New subproject…*,
   *Move into*, or *Part of* in its details); the Projects page shows them as a tree that folds. A
-  project that's waiting, or in Someday or Later, holds back everything in it, and a sequential
-  project's subprojects go one at a time.
+  project that's waiting, or in Someday or Later, holds back everything in it. On the project's
+  page, tasks and subprojects are in one order you drag; a sequential project takes them one at a
+  time, a subproject's tasks showing when its turn comes.
 - **Convert to project:** a task that turns out to be bigger becomes a project with its name,
   notes, dates, tags, files and links; its checklist items can become the project's tasks.
 - **Change what something is:** tasks, projects and notes are one kind of thing underneath, so a

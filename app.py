@@ -1349,7 +1349,8 @@ def convert_document(doc_id):
                           "priority": from_kind["priority"]}
                 if to == "task":
                     become(from_kind, "task", fields | {"state": held or "next", "project_id": from_kind["parent_id"],
-                                                        "position": next_position("tasks")})
+                                                        "position": from_kind["step"] if from_kind["parent_id"] and
+                                                        from_kind["step"] is not None else next_position("tasks")})
                 else:
                     become(from_kind, "note", {"area_id": from_kind["area_id"], "updated_at": utcnow()})
             else:  # a note
@@ -1402,6 +1403,7 @@ def task_to_project(t, checklist):
     state = t["state"] if t["state"] in ("someday", "later") else "active"
     become(t, "project", {"notes": notes, "area_id": parent["area_id"] if parent else t["area_id"],
                           "state": state, "focus": t["focus"], "due_date": t["due_date"], "parent_id": t["project_id"],
+                          "step": t["position"] if t["project_id"] else None,
                           "priority": t["priority"], "position": next_position("projects")})
     first = next_position("tasks")
     for i, (title, done) in enumerate(items):
@@ -2292,21 +2294,18 @@ def list_tasks(name, tasks, projects, today):
     open_ids = {t["id"] for t in tasks}
     open_projects = {i for i, p in projects.items() if p["state"] != "done"}
     waits = lambda x: any(b in open_ids or b in open_projects for b in x["blocked_by"])  # noqa: E731
-    held = set()
+    # A sequential project's steps (its Queue tasks and active subprojects, in their shared
+    # order) go one at a time: all but the first wait, a subproject with everything in it.
+    held, later = set(), set()
     for p in projects.values():
         if p["sequential"]:
-            subs = sorted((q for q in projects.values() if q["parent_id"] == p["id"] and q["state"] == "active"),
-                          key=lambda q: (-q["priority"], q["position"], q["id"]))
-            held |= {q["id"] for q in subs[1:]}
+            steps = sorted([(t["position"], t["id"]) for t in tasks if t["project_id"] == p["id"] and t["state"] == "next"]
+                           + [(q["step"] if q["step"] is not None else float("inf"), q["id"])
+                              for q in projects.values() if q["parent_id"] == p["id"] and q["state"] == "active"])
+            later |= {i for _, i in steps[1:]}
+    held = {i for i in later if i in projects}
     blocked = {t["id"] for t in tasks
-               if waits(t) or any(waits(projects[p]) or p in held for p in chain(t["project_id"]))}
-    seen = set()
-    for t in tasks:
-        p = projects.get(t["project_id"])
-        if p and p["sequential"] and t["state"] == "next":
-            if p["id"] in seen:
-                blocked.add(t["id"])
-            seen.add(p["id"])
+               if t["id"] in later or waits(t) or any(waits(projects[p]) or p in held for p in chain(t["project_id"]))}
     by_priority = lambda ts: sorted(ts, key=lambda t: -t["priority"])  # noqa: E731 (stable: keeps their order)
     if name == "focus":
         return by_priority([t for t in tasks if ((t["focus"] and t["state"] != "scheduled")
@@ -2817,7 +2816,10 @@ def reorder(kind):
         abort(400)
     conn = db.get_db()
     for pos, row_id in enumerate(ids):
-        conn.execute(f"UPDATE {table} SET position = ? WHERE id = ? AND user_id = ?",
+        # (A project's page orders its tasks and subprojects together: a subproject's place
+        # there is its step.)
+        sub = kind == "tasks" and kind_of(int(row_id)) == "project"
+        conn.execute(f"UPDATE {'projects SET step' if sub else table + ' SET position'} = ? WHERE id = ? AND user_id = ?",
                      (pos, int(row_id), g.user["id"]))
     conn.commit()
     return "", 204
@@ -2852,6 +2854,8 @@ def project_fields(data):
             out[key] = check_ref("areas", value)
         elif key == "parent_id":
             out[key] = check_ref("projects", value)
+        elif key == "step":
+            out[key] = None if value in (None, "") else float(value)
         elif key == "deleted":
             out["deleted_at"] = (time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
                                  if value else None)
@@ -2881,6 +2885,20 @@ def check_no_loops(doc_id):
                 pending += waits_on(x)
 
 
+def last_step(project_id):
+    """A place after everything now in a project (its tasks and subprojects), for a new step."""
+    row = db.get_db().execute(
+        "SELECT MAX(x) FROM (SELECT position AS x FROM task_data WHERE project_id = ? "
+        "UNION ALL SELECT step FROM project_data WHERE parent_id = ?)", (project_id, project_id)).fetchone()
+    return max(row[0] + 1 if row[0] is not None else 0, next_position("tasks"))
+
+
+def place_in_parent(fields, old_parent=None):
+    """A project moved into another (or out) takes its place at the end of it (or none)."""
+    if "parent_id" in fields and fields["parent_id"] != old_parent and "step" not in fields:
+        fields["step"] = last_step(fields["parent_id"]) if fields["parent_id"] else None
+
+
 def check_parent(project_id, parent_id):
     """ValueError if a project can't be part of parent_id: itself, or something in it."""
     if parent_id and (parent_id == project_id or parent_id in project_contents(project_id)):
@@ -2898,6 +2916,7 @@ def create_project():
         return bad("name is required")
     fields.setdefault("position", next_position("projects"))
     fields["user_id"] = g.user["id"]
+    place_in_parent(fields)
     conn = db.get_db()
     project_id = db.insert(conn, "projects", fields)
     try:
@@ -2920,12 +2939,13 @@ def project_links_and_tags(project_id, data):
 @app.patch("/api/projects/<int:project_id>")
 @login_required
 def update_project(project_id):
-    owned("projects", project_id)
+    old = owned("projects", project_id)
     conn = db.get_db()
     try:
         data = body()
         fields = project_fields(data)
         check_parent(project_id, fields.get("parent_id"))
+        place_in_parent(fields, old["parent_id"])
         if fields:
             sets = ", ".join(f"{k} = ?" for k in fields)
             conn.execute(f"UPDATE projects SET {sets} WHERE id = ?", (*fields.values(), project_id))

@@ -173,11 +173,18 @@ def test_subprojects(app, user_client):
     floors = project(name="Floors", parent_id=house)
     add(title="Buy paint", state="next", project_id=paint)
     add(title="Sand floors", state="next", project_id=floors)
-    add(title="Call the plumber", state="next", project_id=house)
-    # A sequential project's subprojects go one at a time (highest priority first).
-    assert queue() == ["Buy paint", "Call the plumber"]
+    plumber = add(title="Call the plumber", state="next", project_id=house)
+    # A sequential project's steps (its tasks and subprojects, in one order: here Paint, Floors,
+    # then the plumber, as they were added) go one at a time.
+    assert queue() == ["Buy paint"]
     patch(paint, state="done")
-    assert queue() == ["Sand floors", "Call the plumber"]
+    assert queue() == ["Sand floors"]
+    # Dragged first on the project's page, the plumber comes before the floors.
+    client.post("/api/reorder/tasks", json={"ids": [plumber, floors]}, headers=H)
+    assert rows(app, "SELECT step FROM project_data WHERE id = ?", floors) == [{"step": 1.0}]
+    assert queue() == ["Call the plumber"]
+    client.patch(f"/api/tasks/{plumber}", json={"completed": True}, headers=H)
+    assert queue() == ["Sand floors"]
     # A parent that's in Someday, or waiting, holds back everything under it.
     patch(house, state="someday")
     assert queue() == []
@@ -197,3 +204,38 @@ def test_subprojects(app, user_client):
     assert patch(shed, parent_id=house).status_code == 400
     assert rows(app, "SELECT parent_id FROM project_data WHERE id = ?", shed) == [{"parent_id": None}]
     assert client.patch(f"/api/tasks/{gate}", json={"project_id": house}, headers=H).status_code == 400
+
+
+def test_subprojects_get_a_step_on_upgrade(tmp_path):
+    """Databases from before subprojects had places among their parent's tasks get them."""
+    path = str(tmp_path / "db.db")
+    db.init_db(path)
+    conn = db.connect(path)
+    uid = conn.execute("INSERT INTO users (username, password_hash) VALUES ('ann', 'x')").lastrowid
+    house = db.insert(conn, "projects", {"user_id": uid, "name": "House"})
+    db.insert(conn, "tasks", {"user_id": uid, "title": "Paint", "project_id": house, "position": 7})
+    shed = db.insert(conn, "projects", {"user_id": uid, "name": "Shed", "parent_id": house})
+    conn.executescript("DROP VIEW tasks; DROP VIEW projects; DROP VIEW notes; ALTER TABLE project_data DROP COLUMN step;")
+    conn.commit()
+    conn.close()
+    db.init_db(path)
+    conn = db.connect(path)
+    step = conn.execute("SELECT step FROM projects WHERE id = ?", (shed,)).fetchone()[0]
+    assert 8 <= step < 8.001  # after its parent's tasks
+    assert conn.execute("SELECT step FROM projects WHERE id = ?", (house,)).fetchone()[0] is None
+
+
+def test_a_step_keeps_its_place_when_it_changes_kind(app, user_client):
+    client = user_client("ann")
+    house = client.post("/api/projects", json={"name": "House", "sequential": True}, headers=H).get_json()["id"]
+    add = lambda t: client.post("/api/tasks", json={"title": t, "state": "next", "project_id": house}, headers=H).get_json()  # noqa: E731
+    first, second = add("Fix the roof"), add("Paint")
+    p = client.post(f"/api/tasks/{first['id']}/convert", json={}, headers=H).get_json()
+    assert p["parent_id"] == house and p["step"] == first["position"] < second["position"]
+    t = client.post(f"/api/documents/{p['id']}/convert", json={"to": "task"}, headers=H).get_json()
+    assert t["project_id"] == house and t["position"] == first["position"]
+    # Moved into a project, a project goes after what's there.
+    other = client.post("/api/projects", json={"name": "Garage"}, headers=H).get_json()["id"]
+    moved = client.patch(f"/api/projects/{other}", json={"parent_id": house}, headers=H).get_json()
+    assert moved["step"] > second["position"]
+    assert client.patch(f"/api/projects/{other}", json={"parent_id": None}, headers=H).get_json()["step"] is None

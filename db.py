@@ -85,6 +85,10 @@ KINDS = {
         "columns": [
             # the project it's a part of (a subproject), if any
             ("parent_id", "INTEGER REFERENCES project_data(id) ON DELETE SET NULL"),
+            # a subproject's place among its parent's steps: in the same order as the parent's
+            # tasks' positions, so the two can be ordered together (and, in a sequential parent,
+            # taken one at a time)
+            ("step", "REAL"),
             ("sequential", "INTEGER NOT NULL DEFAULT 0"),
             # active | someday | later | done
             ("state", "TEXT NOT NULL DEFAULT 'active'"),
@@ -500,6 +504,11 @@ def migrate(conn):
         conn.execute("ALTER TABLE users ADD COLUMN digest_sent TEXT")
     if legacy:
         to_documents(conn)
+    elif _is_table(conn, "project_data") and "step" not in {r["name"] for r in conn.execute("PRAGMA table_info(project_data)")}:
+        # Subprojects take a place among their parent's tasks (after them, to begin with).
+        conn.execute("ALTER TABLE project_data ADD COLUMN step REAL")
+        conn.execute("UPDATE project_data SET step = (SELECT COALESCE(MAX(t.position), 0) + 1 FROM task_data t "
+                     "WHERE t.project_id = project_data.parent_id) + id / 1e9 WHERE parent_id IS NOT NULL")
 
 
 def _upgrade_legacy(conn):
@@ -605,7 +614,7 @@ def to_documents(conn):
                          f"deleted_at) SELECT id + {p}, user_id, 'project', name, notes, area_id, created_at, created_at, "
                          "deleted_at FROM projects")
             conn.execute(f"INSERT INTO project_data (id, {', '.join(own('project'))}) SELECT id + {p}, "
-                         + ", ".join("NULL" if c == "parent_id" else c for c in own("project")) + " FROM projects")
+                         + ", ".join("NULL" if c in ("parent_id", "step") else c for c in own("project")) + " FROM projects")
         if has("notes"):
             conn.execute(f"INSERT INTO documents (id, user_id, kind, title, body, font, area_id, created_at, updated_at, "
                          f"deleted_at) SELECT id + {n}, user_id, 'note', title, body, font, area_id, created_at, updated_at, "

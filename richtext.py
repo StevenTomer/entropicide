@@ -115,7 +115,11 @@ class _Cleaner(HTMLParser):
                     self.out.append(f"<img {image_attrs(attrs.get)}>")
             return
         written = []
-        if tag in BLOCKS:
+        if tag == "ul" and "data-check" in attrs:
+            written.append(("ul", " data-check"))  # a checklist
+        elif tag == "li" and attrs.get("data-done") == "1":
+            written.append(("li", ' data-done="1"'))  # a ticked checklist item
+        elif tag in BLOCKS:
             written.append((tag, ""))
         elif tag == "a":
             href = (attrs.get("href") or "").strip()
@@ -177,20 +181,24 @@ def clean(value):
     parser = _Cleaner()
     parser.feed(value)
     parser.close()
-    out = parser.result()
+    out = parser.result().replace("<p></p>", "")  # (left by the browser's editor; they show nothing)
     if len(out) > MAX_LENGTH:
         raise ValueError("That note is too long.")
     # An editor left empty still holds a <br> or two.
     return "" if not re.sub(r"<br>|<p>|</p>|<div>|</div>|\s|&nbsp;|\xa0", "", out) else out
 
 
+CHECK_LINE_RE = re.compile(r"^\s*(?:[-*]\s*)?\[([ xX])\]\s?(.*)$")
+
+
 def from_text(text):
     """Plain text (a task's notes, something shared) as note HTML: a paragraph per line, with
-    web addresses as links."""
+    web addresses as links, and lines like "[ ] milk" as a checklist."""
     lines = []
     for line in str(text or "").split("\n"):
-        line = re.sub(r"^(\s*(?:[-*]\s*)?)\[ \]\s*", r"\1☐ ", line)
-        line = re.sub(r"^(\s*(?:[-*]\s*)?)\[[xX]\]\s*", r"\1☑ ", line)
+        check = CHECK_LINE_RE.match(line)
+        if check:
+            line = check[2]
         parts, at = [], 0
         for m in re.finditer(r"https?://[^\s<>\"]+", line):
             url = m[0].rstrip(".,;:!?)")
@@ -199,7 +207,16 @@ def from_text(text):
                          f"{html.escape(url, quote=False)}</a>")
             at = m.start() + len(url)
         parts.append(html.escape(line[at:], quote=False))
-        lines.append(f"<p>{''.join(parts) or '<br>'}</p>")
+        words = "".join(parts)
+        if check:
+            done = ' data-done="1"' if check[1] != " " else ""
+            item = f"<li{done}>{words or '<br>'}</li>"
+            if lines and lines[-1].startswith("<ul data-check>"):
+                lines[-1] = lines[-1][:-5] + item + "</ul>"
+            else:
+                lines.append(f"<ul data-check>{item}</ul>")
+        else:
+            lines.append(f"<p>{words or '<br>'}</p>")
     while lines and lines[-1] == "<p><br></p>":
         lines.pop()
     return "".join(lines)
@@ -210,6 +227,119 @@ def image(file_id, size="l"):
 
 
 def plain(value):
-    """A note's text without its formatting (for the export's CSV, and spoken summaries)."""
-    value = re.sub(r"<br>|</p>|</div>|</li>|</h[1-3]>|</blockquote>|</pre>", "\n", str(value or ""))
+    """A note's text without its formatting (for the export's CSV, and spoken summaries), with
+    checklist items as "[ ] ..." and "[x] ..." lines."""
+    value = re.sub(r"<ul data-check>(.*?)</ul>", lambda m: re.sub(
+        r"<li( data-done=\"1\")?>", lambda li: "[x] " if li[1] else "[ ] ", m[1]), str(value or ""), flags=re.S)
+    value = re.sub(r"<br>|</p>|</div>|</li>|</h[1-3]>|</blockquote>|</pre>", "\n", value)
     return re.sub(r"\n{3,}", "\n\n", html.unescape(re.sub(r"<[^>]+>", "", value))).strip()
+
+
+# --- task and project notes as they were typed, before they were formatted text ------------
+# Until documents, a task's or project's notes were plain text with a little Markdown (the
+# browser's notesHtml): **bold**, *italic*, ~~struck~~, `code`, links and [name](url); lines
+# that were # headings, - and 1. lists, > quotes, --- rules, ``` code blocks and [ ] checklist
+# items. from_markdown turns that into note HTML, once (db.py), and plain() back into text.
+
+_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)|https?://[^\s<>\"']+|www\.[^\s<>\"']+", re.I)
+
+
+def _emphasis(text):
+    out = html.escape(text, quote=False)
+    out = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", r"<b>\1</b>", out)
+    out = re.sub(r"(^|\W)__(?=\S)(.+?)(?<=\S)__(?!\w)", r"\1<b>\2</b>", out)
+    out = re.sub(r"(^|[^\w*])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?![\w*])", r"\1<i>\2</i>", out)
+    out = re.sub(r"(^|\W)_(?=\S)(.+?)(?<=\S)_(?!\w)", r"\1<i>\2</i>", out)
+    return re.sub(r"~~(?=\S)(.+?)(?<=\S)~~", r"<s>\1</s>", out)
+
+
+def _inline(text):
+    out, at = [], 0
+    for part_at, part in enumerate(re.split(r"(`[^`\n]+`)", text)):
+        if part_at % 2:
+            out.append(f"<code>{html.escape(part[1:-1], quote=False)}</code>")
+            continue
+        at = 0
+        for m in _LINK_RE.finditer(part):
+            raw, label, url = m[0], m[1], m[2]
+            if not url:
+                raw = re.sub(r"[.,;:!?'*]+$", "", raw)
+                if raw.endswith(")") and "(" not in raw:
+                    raw = raw[:-1]
+                label, url = raw, ("https://" + raw if raw.lower().startswith("www.") else raw)
+            out.append(_emphasis(part[at:m.start()]))
+            out.append(f'<a href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">'
+                       f"{html.escape(label, quote=False)}</a>")
+            at = m.start() + len(raw)
+        out.append(_emphasis(part[at:]))
+    return "".join(out)
+
+
+def from_markdown(text):
+    """Notes typed with a little Markdown (see above) as note HTML."""
+    blocks, code, lists = [], None, None  # lists: (tag, opening, items) being built
+
+    def end_list():
+        nonlocal lists
+        if lists:
+            blocks.append(f"{lists[1]}{''.join(lists[2])}</{lists[0]}>")
+            lists = None
+
+    def item(tag, opening, li):
+        nonlocal lists
+        if not lists or lists[1] != opening:
+            end_list()
+            lists = (tag, opening, [])
+        lists[2].append(li)
+
+    for line in str(text or "").rstrip().split("\n"):
+        if re.match(r"^\s*```", line):
+            if code is None:
+                end_list()
+                code = []
+            else:
+                blocks.append(f"<pre>{html.escape(chr(10).join(code), quote=False)}</pre>")
+                code = None
+            continue
+        if code is not None:
+            code.append(line)
+            continue
+        if m := CHECK_LINE_RE.match(line):
+            done = ' data-done="1"' if m[1] != " " else ""
+            item("ul", "<ul data-check>", f"<li{done}>{_inline(m[2]) or '<br>'}</li>")
+        elif m := re.match(r"^\s*[-*+]\s+(.*)$", line):
+            item("ul", "<ul>", f"<li>{_inline(m[1])}</li>")
+        elif m := re.match(r"^\s*\d{1,3}[.)]\s+(.*)$", line):
+            item("ol", "<ol>", f"<li>{_inline(m[1])}</li>")
+        else:
+            end_list()
+            if m := re.match(r"^(#{1,3})\s+(.*)$", line):
+                blocks.append(f"<h{len(m[1])}>{_inline(m[2])}</h{len(m[1])}>")
+            elif re.match(r"^\s*([-*_])(\s*\1){2,}\s*$", line):
+                blocks.append("<hr>")
+            elif m := re.match(r"^>\s?(.*)$", line):
+                blocks.append(f"<blockquote>{_inline(m[1]) or '<br>'}</blockquote>")
+            else:
+                blocks.append(f"<p>{_inline(line) or '<br>'}</p>")
+    end_list()
+    if code is not None:  # (never closed)
+        blocks.append(f"<pre>{html.escape(chr(10).join(code), quote=False)}</pre>")
+    return clean("".join(blocks))
+
+
+def uncheck(value):
+    """Formatted text with its checklist items unticked (a repeating task's next copy)."""
+    return str(value or "").replace('<li data-done="1">', "<li>")
+
+
+def take_checklists(value):
+    """(the checklist items in formatted text, as [(text, ticked)], and the text without them)."""
+    items = []
+    def take(m):
+        for li in re.finditer(r"<li( data-done=\"1\")?>(.*?)</li>", m[1], re.S):
+            words = plain(li[2]).strip()
+            if words:
+                items.append((words, bool(li[1])))
+        return ""
+    rest = re.sub(r"<ul data-check>(.*?)</ul>", take, str(value or ""), flags=re.S)
+    return items, rest

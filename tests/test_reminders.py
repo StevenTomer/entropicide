@@ -37,10 +37,10 @@ def test_held_until_quiet_hours_end(app, make_user, monkeypatch):
         conn = entropicide.db.get_db()
         conn.execute("INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES (?, 'https://x', 'k', 'a')",
                      (user["id"],))
-        conn.execute("INSERT INTO tasks (user_id, title, state, remind_at, position) VALUES (?, 'Night reminder', 'inbox', ?, 1)",
-                     (user["id"], utc("2026-11-02T01:00")))
-        conn.execute("INSERT INTO tasks (user_id, title, state, start_date, start_time, position) "
-                     "VALUES (?, 'Late start', 'next', '2026-11-01', '23:30', 2)", (user["id"],))
+        entropicide.db.insert(conn, "tasks", {"user_id": user["id"], "title": "Night reminder", "state": "inbox",
+                                              "remind_at": utc("2026-11-02T01:00"), "position": 1})
+        entropicide.db.insert(conn, "tasks", {"user_id": user["id"], "title": "Late start", "state": "next",
+                                              "start_date": "2026-11-01", "start_time": "23:30", "position": 2})
         conn.commit()
         for t in ("2026-11-01T23:45", "2026-11-02T03:00", "2026-11-02T06:59"):
             entropicide.send_reminders(local(t))
@@ -87,9 +87,9 @@ def test_reminder_before_due_says_when(app, make_user, monkeypatch):
         conn = entropicide.db.get_db()
         conn.execute("INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES (?, 'https://x', 'k', 'a')",
                      (user["id"],))
-        conn.execute("INSERT INTO tasks (user_id, title, state, due_date, remind_before, remind_at, position) "
-                     "VALUES (?, 'Renew passport', 'later', '2026-12-01', 30, ?, 1)",
-                     (user["id"], entropicide.utc_stamp(local("2026-11-01T09:00"))))
+        entropicide.db.insert(conn, "tasks", {"user_id": user["id"], "title": "Renew passport", "state": "later",
+                                              "due_date": "2026-12-01", "remind_before": 30, "position": 1,
+                                              "remind_at": entropicide.utc_stamp(local("2026-11-01T09:00"))})
         conn.commit()
         entropicide.send_reminders(local("2026-11-01T08:59"))
         assert sent == []

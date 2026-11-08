@@ -16,6 +16,8 @@ const REMIND_BEFORE = [[1, "1 day"], [2, "2 days"], [3, "3 days"], [7, "1 week"]
 const isRecurringCopy = (t) => t.state === "scheduled" && t.series_id;
 // Priority is a number, 0 by default; Focus and the Queue list higher numbers first.
 const PRIORITY_VIEWS = ["focus", "next"];
+// Projects whose subprojects are folded away on the Projects page (this device).
+const foldedProjects = new Set((() => { try { return JSON.parse(load("projectsFolded", "[]")); } catch { return []; } })());
 const byPriority = (list) => [...list].sort((a, b) => (b.priority || 0) - (a.priority || 0));  // stable: keeps drag order
 const REPEATS = ["", "daily", "weekdays", "weekly", "monthly", "yearly"];
 
@@ -128,52 +130,6 @@ function mdInline(text) {
     i % 2 ? `<code>${h(part.slice(1, -1))}</code>` : linkify(part, emphasis)).join("");
 }
 
-// Notes as HTML. Lines like "[ ] buy paint" are checklist items (data-line is the line, for
-// ticking them off). limit: how many other lines to show before "… N more lines".
-function notesHtml(notes, { limit = Infinity, locked = false } = {}) {
-  const lines = String(notes ?? "").replace(/\s+$/, "").split("\n");
-  const out = [];
-  let shown = 0, hidden = 0, code = null;
-  const show = (html, n = 1) => {
-    if (shown + n > limit) { hidden += n; return; }
-    shown += n;
-    out.push(html);
-  };
-  const indent = (spaces) => ` md-i${Math.min(3, Math.floor(spaces.length / 2))}`;
-  lines.forEach((line, i) => {
-    if (/^\s*```/.test(line)) {
-      if (code) { show(`<pre class="md-code">${h(code.join("\n"))}</pre>`, code.length); code = null; }
-      else code = [];
-      return;
-    }
-    if (code) { code.push(line); return; }
-    let m = line.match(CHECK_RE);
-    if (m) {
-      const done = m[2] !== " ";
-      out.push(`<label class="check-item${done ? " checked" : ""}">
-        <input type="checkbox" data-line="${i}"${done ? " checked" : ""}${locked ? " disabled" : ""}><span>${mdInline(m[3])}</span></label>`);
-    } else if ((m = /^(#{1,3})\s+(.*)$/.exec(line))) {
-      show(`<div class="md-h${m[1].length}">${mdInline(m[2])}</div>`);
-    } else if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
-      show('<hr class="md-hr">');
-    } else if ((m = /^(\s*)[-*+]\s+(.*)$/.exec(line))) {
-      show(`<div class="md-li${indent(m[1])}">${mdInline(m[2])}</div>`);
-    } else if ((m = /^(\s*)(\d{1,3})[.)]\s+(.*)$/.exec(line))) {
-      show(`<div class="md-li md-ol${indent(m[1])}" data-n="${m[2]}.">${mdInline(m[3])}</div>`);
-    } else if ((m = /^>\s?(.*)$/.exec(line))) {
-      show(`<div class="md-quote">${mdInline(m[1]) || "&nbsp;"}</div>`);
-    } else {
-      show(`<div class="note-line">${mdInline(line) || "&nbsp;"}</div>`);
-    }
-  });
-  if (code) show(`<pre class="md-code">${h(code.join("\n"))}</pre>`, code.length);  // never closed
-  if (hidden) out.push(`<div class="note-more">… ${hidden} more line${hidden > 1 ? "s" : ""}</div>`);
-  return out.join("");
-}
-
-// Notes worth a formatted preview under the editor: anything beyond plain lines.
-const MD_HINT = /[*_~`#>[]|https?:\/\/|www\.|^\s*([-+]|\d+[.)])\s/m;
-
 function fmtDate(iso) {
   if (!iso) return "";
   const t = today();
@@ -258,12 +214,24 @@ function send(method, path, body) {
 // /api/data). Tasks, projects and notes created offline get negative ids until they're sent.
 
 const OFFLINE_PATH = /^\/(tasks(\/bulk|\/-?\d+)?|projects(\/-?\d+)?|notes(\/-?\d+)?|reorder\/tasks)$/;
-const outbox = loadOutbox();  // { uid, ops: [{ method, path, body, temp }], ids: {temp: real} }
+// Version 2: tasks, projects and notes share one set of ids (projects and notes were given new
+// ones then, so older changes to them, or naming them, can't be sent).
+const OUTBOX_VERSION = 2;
+const outbox = loadOutbox();  // { uid, version, ops: [{ method, path, body, temp }], ids: {temp: real} }
 let flushing = false;
 
 function loadOutbox() {
-  try { return { uid: null, ops: [], ids: {}, ...JSON.parse(load("outbox", "{}")) }; }
-  catch { return { uid: null, ops: [], ids: {} }; }
+  let box;
+  try { box = { uid: null, ops: [], ids: {}, ...JSON.parse(load("outbox", "{}")) }; }
+  catch { box = { uid: null, ops: [], ids: {} }; }
+  if (box.ops.length && (box.version || 1) < OUTBOX_VERSION) {
+    const ok = (o) => /^\/(tasks|reorder)/.test(o.path) && !/"(project_id|blocked_by_projects|related_projects)"/.test(JSON.stringify(o.body || {}));
+    const dropped = box.ops.filter((o) => !ok(o)).length;
+    box.ops = box.ops.filter(ok);
+    if (dropped) setTimeout(() => toast(`${dropped} change${dropped > 1 ? "s" : ""} made offline before the update couldn't be sent.`), 1500);
+  }
+  box.version = OUTBOX_VERSION;
+  return box;
 }
 
 function saveOutbox() {
@@ -305,15 +273,14 @@ function applyOffline(op) {
       energy: null, minutes: null, priority: 0, series_id: null, series_index: null,
       missed: false, position: Math.max(0, ...S.data.tasks.map((x) => x.position)) + 1,
       completed_at: null, deleted_at: null, tags: [], repeat: null, on_miss: null,
-      series_latest: null, attachments: [], blocked_by: [], blocked_by_projects: [], related: [],
-      related_projects: [] };
+      series_latest: null, attachments: [], blocked_by: [], related: [] };
     if (!taskById(t.id)) S.data.tasks.push(t);
     return changeOffline("tasks", t.id, body);
   }
   if (method === "POST" && kind === "projects") {
     const p = { id: op.temp, area_id: null, name: "", notes: "", sequential: false, state: "active",
       focus: false, due_date: null, completed_at: null, deleted_at: null, priority: 0, tags: [],
-      attachments: [], blocked_by: [], blocked_by_projects: [], related: [], related_projects: [],
+      attachments: [], blocked_by: [], related: [], parent_id: null,
       position: Math.max(0, ...S.data.projects.map((x) => x.position)) + 1 };
     if (!projectById(p.id)) S.data.projects.push(p);
     return changeOffline("projects", p.id, body);
@@ -322,7 +289,7 @@ function applyOffline(op) {
     const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
     const n = { id: op.temp, title: "", body: "", font: "", category_id: null, area_id: null, journal_id: null,
       entry_date: null, pinned: false, created_at: stamp, updated_at: stamp, deleted_at: null, tags: [],
-      attachments: [], related: [], related_projects: [] };
+      attachments: [], related: [] };
     if (!S.data.notes.some((x) => x.id === n.id)) S.data.notes.push(n);
     return changeOffline("notes", n.id, body);
   }
@@ -453,9 +420,29 @@ function chosenArea() {
   return S.data.areas.find((a) => S.areas.has(String(a.id)))?.id ?? null;
 }
 
+// A project and the projects it's part of, outward (itself first).
+function projectChain(id) {
+  const out = [];
+  for (let p = projectById(id); p && !out.includes(p); p = projectById(p.parent_id)) out.push(p);
+  return out;
+}
+
+// A task's projects (at every level) are all active (not Someday, Later or done).
 function projectActive(t) {
-  const p = t.project_id && projectById(t.project_id);
-  return !p || p.state === "active";
+  return projectChain(t.project_id).every((p) => p.state === "active");
+}
+
+// The active subprojects of a sequential project go one at a time (by priority, then their
+// order): the ones after the first wait, with everything in them. (app.py's list_tasks agrees.)
+function heldSubprojects() {
+  const held = new Set();
+  for (const p of S.data.projects) {
+    if (!p.sequential) continue;
+    S.data.projects.filter((q) => q.parent_id === p.id && q.state === "active" && !q.deleted_at)
+      .sort((a, b) => b.priority - a.priority || a.position - b.position || a.id - b.id)
+      .slice(1).forEach((q) => held.add(q.id));
+  }
+  return held;
 }
 
 // The open item in the editor: a task or a project.
@@ -464,19 +451,16 @@ const selItem = () => S.selected && (S.selected.kind === "task" ? taskById(S.sel
 const openProject = (id) => { const p = projectById(id); return p && p.state !== "done" ? p : null; };
 
 // What a task or project (kind) is blocked by that isn't done yet, as [{kind, id, title}]:
-// open tasks and projects, and for a task, what its project is waiting on too.
-function waitingOn(x, kind = "task") {
+// open tasks and projects, and what the projects it's in (at any depth) are waiting on too.
+function waitingOn(x, kind = "task", seen = new Set()) {
   const out = [];
   for (const id of x.blocked_by || []) {
-    const t = S.data.tasks.find((y) => y.id === id);
+    const t = S.data.tasks.find((y) => y.id === id), p = !t && openProject(id);
     if (t) out.push({ kind: "task", id, title: t.title });
+    else if (p) out.push({ kind: "project", id, title: p.name });
   }
-  for (const id of x.blocked_by_projects || []) {
-    const p = openProject(id);
-    if (p) out.push({ kind: "project", id, title: p.name });
-  }
-  const p = kind === "task" && x.project_id && projectById(x.project_id);
-  if (p) out.push(...waitingOn(p, "project"));
+  const up = projectById(kind === "task" ? x.project_id : x.parent_id);
+  if (up && !seen.has(up.id)) out.push(...waitingOn(up, "project", seen.add(up.id)));
   return out;
 }
 
@@ -486,7 +470,10 @@ function waitingOn(x, kind = "task") {
 function sequentialBlocked() {
   const blocked = new Set();
   const seen = new Set();
-  for (const t of S.data.tasks) if (waitingOn(t).length) blocked.add(t.id);
+  const held = heldSubprojects();
+  for (const t of S.data.tasks) {
+    if (waitingOn(t).length || projectChain(t.project_id).some((p) => held.has(p.id))) blocked.add(t.id);
+  }
   for (const t of S.data.tasks) {
     const p = t.project_id && projectById(t.project_id);
     if (!p || !p.sequential || t.state !== "next") continue;
@@ -576,13 +563,15 @@ function taskTags(t) {
 function filtered(list) {
   const match = searchTest();
   return list.filter((t) =>
-    (!match || match(t.title, t.notes)) &&
+    (!match || match(t.title, textOf(t.notes))) &&
     [...S.tagFilter].every((tag) => taskTags(t).includes(tag)));
 }
 
 async function refresh() {
   S.data = await api("GET", "/data?now=" + nowStamp());
   replayOutbox();
+  // (A project that's gone, or a view saved before projects were given new ids.)
+  if (S.view.startsWith("project:") && !projectById(Number(S.view.slice(8)))) S.view = "projects";
   if (S.view === "logbook") S.extra = await api("GET", "/logbook");
   if (S.view === "trash") {
     const tr = await api("GET", "/trash");
@@ -615,11 +604,11 @@ function replaceProject(p) {
   if (i >= 0) S.data.projects[i] = p;
 }
 
-async function patchProject(id, changes) {
+async function patchProject(id, changes, { quiet } = {}) {
   const p = await api("PATCH", `/projects/${id}`, changes);
   if (p) replaceProject(p);
   if ("deleted" in changes || "state" in changes) await refresh();
-  else render();
+  else if (!quiet) render();
   return p;
 }
 
@@ -767,21 +756,23 @@ function prioTint(t) {
   return ` style="--tint: rgb(${rgb} / ${alpha})"`;
 }
 
-// Notes lines like "[ ] buy paint" or "- [x] sand" are checklist items.
-const CHECK_RE = /^(\s*(?:[-*]\s*)?)\[([ xX])\]\s?(.*)$/;
-const NOTE_TEXT_LINES = 6;  // longer notes are cut off in the list; checklist items always show
-
+// A task's text under it in the list (cut short when long). Its checklist items tick there.
 function notesBlock(t) {
-  if (!t.notes.trim()) return "";
+  if (!t.notes) return "";
   const locked = !!(t.completed_at || t.deleted_at);
-  return `<div class="notes">${notesHtml(t.notes, { limit: NOTE_TEXT_LINES, locked })}</div>`;
+  return `<div class="notes note-body row-text${locked ? " locked" : ""}">${showBody(t.notes)}</div>`;
 }
 
-async function toggleCheckItem(id, line, checked) {
-  const lines = taskById(id).notes.split("\n");
-  lines[line] = lines[line].replace(/\[[ xX]\]/, checked ? "[x]" : "[ ]");
+// A click on a checklist box in a task's text shown in shown (a list row, or Focus): ticks it.
+// True if it was one.
+function tickTask(e, id, shown) {
+  const t = taskById(id);
+  if (!t || t.completed_at || t.deleted_at) return false;
+  const html = tickFromClick(e, t.notes, shown);
+  if (html === null) return false;
   $("#detail").dataset.key = "";
-  await patchTask(id, { notes: lines.join("\n") });
+  patchTask(id, { notes: html });
+  return true;
 }
 
 function areaIconUrl(a) {
@@ -815,26 +806,35 @@ async function setAreaIcon(li, body) {
   toast(body ? "Icon saved." : "Icon removed.");
 }
 
-function projectRow(p) {
-  const n = S.data.tasks.filter((t) => t.project_id === p.id).length;
+// depth: how far down a tree of subprojects it is (Projects page); null: shown on its own, so
+// it says what it's part of.
+function projectRow(p, depth = null) {
+  const [inside, subs] = projectInside(p);
+  const n = inside.length, folded = foldedProjects.has(p.id), kids = subprojects(p).length;
   const area = p.area_id && areaById(p.area_id);
   const waits = waitingOn(p, "project");
+  const parent = depth === null && projectById(p.parent_id);
   const sel = (S.selected?.kind === "project" && S.selected.id === p.id ? " selected" : "") +
     (menu.project === p.id ? " menu-target" : "");
-  return `<div class="row project${sel}" data-project="${p.id}"${prioTint(p)}>
+  return `<div class="row project${sel}${depth ? " sub" : ""}" data-project="${p.id}"${prioTint(p)}>
+    ${depth ? `<span class="indent" style="width: ${depth * 1.5}rem" aria-hidden="true"></span>` : ""}
+    ${depth !== null ? (kids ? `<button type="button" class="fold" aria-expanded="${!folded}" title="${folded ? "Show" : "Hide"} its subprojects">${folded ? "▸" : "▾"}</button>`
+      : '<span class="fold"></span>') : ""}
     <button class="star ${p.focus ? "on" : ""}" aria-label="Focus" title="Focus">★</button>
     ${areaIcon(p.area_id)}
     <div class="row-body">
       <div class="title">${h(p.name)}</div>
       <div class="meta">
+        ${depth && p.state !== "active" ? `<span class="badge">${PROJECT_STATES.find(([s]) => s === p.state)?.[1] || p.state}</span>` : ""}
         ${p.sequential ? '<span class="badge">Sequential</span>' : ""}
+        ${parent ? `<span>in ${h(parent.name)}</span>` : ""}
         ${area ? `<span>${h(area.name)}</span>` : ""}
         <span>${n} open</span>
+        ${subs.length ? `<span>${subs.length} subproject${subs.length > 1 ? "s" : ""}</span>` : ""}
         ${p.due_date ? `<span class="due">Due ${fmtDate(p.due_date)}</span>` : ""}
         ${waits.length ? `<span class="blocked" title="Waiting on: ${h(waits.map((b) => b.title).join(", "))}">🔒 after ${
           h(waits[0].title)}${waits.length > 1 ? ` +${waits.length - 1}` : ""}</span>` : ""}
-        ${p.related?.length || p.related_projects?.length ? `<span class="related" title="Related: ${h([...(p.related || []).map((r) => r.title),
-          ...(p.related_projects || []).map((r) => r.name)].join(", "))}">🔗 ${(p.related?.length || 0) + (p.related_projects?.length || 0)}</span>` : ""}
+        ${p.related?.length ? `<span class="related" title="Related: ${h(p.related.map((r) => r.title).join(", "))}">🔗 ${p.related.length}</span>` : ""}
         ${p.attachments?.length ? `<span title="${h(p.attachments.map((f) => f.name).join(", "))}">📎 ${p.attachments.length}</span>` : ""}
         ${(p.tags || []).map((tag) => `<span class="tag">${h(tag)}</span>`).join("")}
       </div>
@@ -875,10 +875,13 @@ function renderList() {
   if (S.view === "projects") {
     $("#tag-bar").innerHTML = "";
     const groups = [["active", "Active"], ["someday", "Someday"], ["later", "Later"], ["done", "Completed"]];
+    // Subprojects show under their project (whatever their status), folded away if asked.
+    const tree = (p, depth, seen) => projectRow(p, depth) + (foldedProjects.has(p.id) ? "" :
+      byPriority(subprojects(p)).filter((q) => !seen.has(q.id) && seen.add(q.id)).map((q) => tree(q, depth + 1, seen)).join(""));
     fillList(el, (groups.map(([state, label]) => {
-      const ps = byPriority(S.data.projects.filter((p) => p.state === state && inArea(p.area_id)));
+      const ps = byPriority(S.data.projects.filter((p) => p.state === state && inArea(p.area_id) && !projectById(p.parent_id)));
       if (!ps.length) return "";
-      return `<h2 class="group">${label}</h2>` + ps.map(projectRow).join("");
+      return `<h2 class="group">${label}</h2>` + ps.map((p) => tree(p, 0, new Set([p.id]))).join("");
     }).join("") || '<p class="empty">No projects yet. Use + in the sidebar to add one.</p>') +
       `<h2 class="group">Templates</h2>` + (S.data.templates.map(templateRow).join("") ||
         '<p class="empty small">None yet. Open a project, then <em>Save as template</em> in its details.</p>'));
@@ -894,13 +897,20 @@ function renderList() {
   if (S.view.startsWith("project:")) {
     const p = projectById(Number(S.view.slice(8)));
     if (!p) { setView("projects"); return; }
+    const up = projectChain(p.parent_id).reverse();
     html += `<div class="project-head" data-project="${p.id}">
-      ${p.notes ? `<div class="project-notes notes">${notesHtml(p.notes, { locked: true })}</div>` : ""}
+      ${up.length ? `<p class="muted small part-of">Part of ${up.map((q) => `<button type="button" class="link open-subproject" data-project="${q.id}">${h(q.name)}</button>`).join(" › ")}</p>` : ""}
+      ${p.notes ? `<div class="project-notes notes note-body">${showBody(p.notes)}</div>` : ""}
       <button class="link edit-project">Edit project</button>
       ${p.state !== "done"
         ? '<button class="link complete-project">Mark project complete</button>'
         : '<button class="link reopen-project">Reopen project</button>'}
     </div>`;
+  }
+
+  if (S.view.startsWith("project:")) {
+    const subs = byPriority(subprojects(projectById(Number(S.view.slice(8)))));
+    if (subs.length) html += '<h2 class="group">Subprojects</h2>' + subs.map((q) => projectRow(q)).join("") + '<h2 class="group">Tasks</h2>';
   }
 
   if (S.view === "someday" || S.view === "later") {
@@ -1474,14 +1484,17 @@ function renderDetail() {
       <div class="detail-head"><span>Project</span><button class="icon close" aria-label="Close">✕</button></div>
       <input class="d-title" data-field="name" value="${h(p.name)}" aria-label="Name">
       <div class="d-cols"><div class="d-main">
-      <textarea data-field="notes" placeholder="Notes" rows="5">${h(p.notes)}</textarea>
+      ${detailText(p, "project")}
       ${attachmentsSection(p, "project")}
+      ${subprojectsField(p)}
       ${linkedNotes(p, "project")}
       </div><div class="d-side">
       <section class="d-group" aria-label="About the project">
         <label>Status <select data-field="state">${options(
           [["active", "Active"], ["someday", "Someday"], ["later", "Later"], ["done", "Completed"]], p.state)}</select></label>
         <label>Area <select data-field="area_id">${options(areaOpts, p.area_id)}</select></label>
+        <label title="A project can be a part of a bigger one">Part of <select data-field="parent_id">${options(
+          [["", "No project (top level)"], ...parentChoices(p).map((q) => [q.id, q.name])], p.parent_id ?? "")}</select></label>
         <label title="Its tasks show under these tags too">Tags <input data-field="tags" value="${h((p.tags || []).join(", "))}" list="tag-list" placeholder="comma, separated"></label>
         <datalist id="tag-list">${S.data.tags.map((x) => `<option value="${h(x.name)}">`).join("")}</datalist>
         <div class="two">
@@ -1503,9 +1516,10 @@ function renderDetail() {
         ${p.template_id && templateById(p.template_id)
           ? `<button class="update-template" title="Make the template match this project">Update template “${h(templateById(p.template_id).name)}”</button>` : ""}
         <button class="save-template">Save as ${p.template_id && templateById(p.template_id) ? "new " : ""}template</button>
+        ${projectEmpty(p) ? '<button class="convert-to" data-to="task">Make it a task</button><button class="convert-to" data-to="note">Make it a note</button>' : ""}
         <button class="danger delete-project">Delete</button>
       </div>`;
-    el.notesReady = enhanceNotes(el);
+    mountDetailText(el, "project", p.id);
     return;
   }
 
@@ -1527,10 +1541,7 @@ function renderDetail() {
       `<button data-state="${s}" class="${t.state === s ? "on" : ""}">${label}</button>`).join("")}</div>
     <div class="d-cols"><div class="d-main">
     ${t.state === "waiting" ? `<label>Waiting for <input data-field="waiting_for" value="${h(t.waiting_for)}" placeholder="Who or what"></label>` : ""}
-    <textarea data-field="notes" placeholder="Notes" rows="6">${h(t.notes)}</textarea>
-    <div class="notes md-preview" ${MD_HINT.test(t.notes) ? "" : "hidden"}>${notesHtml(t.notes, { locked: !!(t.completed_at || t.deleted_at) })}</div>
-    <p class="muted small hint">**bold**, *italic*, # heading, - list, [ ] checklist, \`code\`,
-      [name](https://…). <a href="${BASE}/help#notes" target="_blank" rel="noopener">More</a></p>
+    ${detailText(t, "task")}
     ${attachmentsSection(t, "task")}
     ${linkedNotes(t, "task")}
     </div><div class="d-side">
@@ -1582,78 +1593,61 @@ function renderDetail() {
           '<button class="danger delete-task">Move to trash</button>'}
     </div>
     <p class="muted small">Created ${fmtDate(utcToLocalInput(t.created_at).slice(0, 10))}</p>`;
-  el.notesReady = enhanceNotes(el);
+  mountDetailText(el, "task", t.id);
 }
 
-// ---- Vim editing for notes (per device: Settings → Notes editor) -------------
-// CodeMirror 5 with its Vim keymap (static/vendor/codemirror), loaded only on devices
-// that choose it. It stands in for the notes textarea and keeps it up to date, so the
-// autosave, preview and offline queue work as with the plain box.
+// ---- a task's or project's text (the editor is editor.js's, as a note's is) ----------
 
-const notesEditor = () => load("notesEditor", "plain");
-let vimLoading = null;
-
-function loadVim() {
-  vimLoading ||= new Promise((ok, fail) => {
-    const css = document.createElement("link");
-    css.rel = "stylesheet";
-    css.href = BASE + "/static/vendor/codemirror/codemirror-vim.css";
-    document.head.append(css);
-    const js = document.createElement("script");
-    js.src = BASE + "/static/vendor/codemirror/codemirror-vim.js";
-    js.onload = () => { defineVimCommands(); ok(); };
-    js.onerror = () => { vimLoading = null; fail(); };
-    document.head.append(js);
-  });
-  return vimLoading;
+function detailText(x, kind) {
+  const locked = !!(x.completed_at || x.deleted_at);
+  return `<div class="d-text${locked ? " locked" : ""}">
+    ${locked ? "" : editorTools()}
+    <div class="ne-body note-body" contenteditable="${!locked}" role="textbox" aria-multiline="true"
+      aria-label="Notes" data-placeholder="Notes" spellcheck="true"></div>
+    ${locked ? "" : editorImageBar(kind)}
+  </div>`;
 }
 
-// :w saves now; :q (and :wq, :x) save and close the task or project.
-function defineVimCommands() {
-  const Vim = window.CodeMirror.Vim;
-  const area = (cm) => cm.getTextArea();
-  const write = (cm) => { cm.save(); clearTimeout(saveTimer); return saveField(area(cm)); };
-  const quit = async (cm) => { await write(cm); S.selected = null; render(); };
-  Vim.defineEx("write", "w", (cm) => { write(cm); toast("Saved."); });
-  Vim.defineEx("quit", "q", quit);
-  Vim.defineEx("wq", "wq", quit);
-  Vim.defineEx("xit", "x", quit);
+// The text's editor host (editor.js) for the task or project kind id in the details el.
+function mountDetailText(el, kind, id) {
+  const root = $(".d-text", el);
+  const item = () => (kind === "task" ? taskById(id) : projectById(id));
+  const host = {
+    root, kind, timer: 0,
+    get item() { return item(); },
+    changed() { clearTimeout(host.timer); host.timer = setTimeout(() => host.save(), 700); },
+    async save() {
+      clearTimeout(host.timer);
+      const x = item(), html = editorText(host);
+      if (!x || html === x.notes) return;
+      if (kind === "task") await patchTask(id, { notes: html }, { quiet: true });
+      else await patchProject(id, { notes: html }, { quiet: true });
+    },
+    uploaded(data) { if (kind === "project") replaceProject(data); else replaceTask(data); },
+    filesChanged() {
+      const x = item(), section = $(".attachments", el);
+      if (x && section?.isConnected) section.outerHTML = attachmentsSection(x, kind, placedIds(editorText(host)));
+    },
+    close() { S.selected = null; render(); },
+  };
+  root.host = host;
+  startEditor(host, item().notes);
 }
 
-async function enhanceNotes(el) {
-  const area = $('textarea[data-field="notes"]', el);
-  if (!area || notesEditor() !== "vim") return;
-  try { await loadVim(); } catch { return; }  // offline before it was ever loaded: the plain box stays
-  if (!area.isConnected || area.cm) return;
-  const cm = window.CodeMirror.fromTextArea(area, {
-    keyMap: "vim", mode: "markdown", lineWrapping: true, viewportMargin: Infinity,
-    showCursorWhenSelecting: true, readOnly: area.disabled,
-  });
-  area.cm = cm;
-  const mode = document.createElement("div");
-  mode.className = "vim-mode muted small";
-  cm.getWrapperElement().after(mode);
-  cm.on("vim-mode-change", (e) => {
-    mode.textContent = e.mode === "insert" ? "-- INSERT --" : e.mode === "replace" ? "-- REPLACE --"
-      : e.mode === "visual" ? (e.subMode === "linewise" ? "-- VISUAL LINE --" : e.subMode === "blockwise" ? "-- VISUAL BLOCK --" : "-- VISUAL --") : "";
-  });
-  // Changes go through the textarea, as typing in it would.
-  cm.on("change", () => { cm.save(); area.dispatchEvent(new Event("input", { bubbles: true })); });
-}
-
-// Puts the cursor at the end of the open item's notes (the Vim editor, once it's ready).
-async function focusNotes() {
-  const el = $("#detail");
-  await el.notesReady;
-  const area = $('textarea[data-field="notes"]', el);
-  if (!area) return;
-  if (area.cm) {
-    area.cm.focus();
-    area.cm.setCursor(area.cm.lastLine(), area.cm.getLine(area.cm.lastLine()).length);
-  } else {
-    area.focus();
-    area.setSelectionRange(area.value.length, area.value.length);
-  }
+// Puts the cursor at the end of the open item's text (or its HTML box).
+function focusNotes() {
+  const root = $("#detail .d-text");
+  if (!root?.host) return;
+  const box = $(".ne-source", root);
+  if (box?.cm) { box.cm.focus(); box.cm.setCursor(box.cm.lastLine(), box.cm.getLine(box.cm.lastLine()).length); return; }
+  if (box && !box.hidden) { box.focus(); return; }
+  const body = $(".ne-body", root);
+  body.focus();
+  const r = document.createRange();
+  r.selectNodeContents(body);
+  r.collapse(false);
+  getSelection().removeAllRanges();
+  getSelection().addRange(r);
 }
 
 // ---- actions -------------------------------------------------------------
@@ -1743,21 +1737,66 @@ async function quickAdd(text, { open = false } = {}) {
   // A new scheduled task opens straight away so its start date (or repeat) can be set.
   if (open || (created.state === "scheduled" && (!parsed.start_date || created.repeat))) {
     select("task", created.id);
-    $(created.state !== "scheduled" ? '#detail textarea[data-field="notes"]'
-      : created.repeat ? '#detail select[data-field="repeat"]'
-      : '#detail input[data-field="start_date"]').focus();
+    if (created.state !== "scheduled") focusNotes();
+    else $(created.repeat ? '#detail select[data-field="repeat"]' : '#detail input[data-field="start_date"]').focus();
   }
 }
 
-async function newProject() {
-  if (S.data.templates?.length) return openNewProject();
-  const name = prompt("Project name");
+async function newProject(parent = null) {
+  if (S.data.templates?.length && !parent) return openNewProject();
+  const name = prompt(parent ? `New subproject of “${parent.name}”` : "Project name");
   if (!name?.trim()) return;
   const p = await api("POST", "/projects", {
-    name: name.trim(), area_id: chosenArea(),
+    name: name.trim(), area_id: parent ? parent.area_id : chosenArea(), parent_id: parent?.id ?? null,
   });
   if (!projectById(p.id)) S.data.projects.push(p);
   setView(`project:${p.id}`);
+}
+
+// ---- subprojects ----
+// A project can be a part of another (parent_id), at any depth. app.py's check_parent refuses
+// loops; projectChain (above) walks outward, these inward.
+
+const subprojects = (p) => S.data.projects.filter((q) => q.parent_id === p.id && !q.deleted_at);
+
+// Everything in a project, at any depth: [tasks, projects].
+function projectInside(p, seen = new Set([p.id])) {
+  const tasks = S.data.tasks.filter((t) => t.project_id === p.id), projects = [];
+  for (const q of subprojects(p)) {
+    if (seen.has(q.id)) continue;
+    seen.add(q.id);
+    const [ts, ps] = projectInside(q, seen);
+    tasks.push(...ts);
+    projects.push(q, ...ps);
+  }
+  return [tasks, projects];
+}
+
+const projectEmpty = (p) => !S.data.tasks.some((t) => t.project_id === p.id) && !subprojects(p).length && p.state !== "done";
+
+// The projects p could be a part of: not itself, nor anything in it, nor finished ones.
+function parentChoices(p) {
+  const inside = new Set(projectInside(p)[1].map((q) => q.id));
+  return S.data.projects.filter((q) => q.id !== p.id && !inside.has(q.id) && !q.deleted_at && (q.state !== "done" || q.id === p.parent_id));
+}
+
+function subprojectsField(p) {
+  const subs = byPriority(subprojects(p));
+  return `<div class="deps subprojects"><span class="ln-label">Subprojects</span>
+    ${subs.map((q) => `<button type="button" class="link open-subproject${q.state === "done" ? " done" : ""}" data-project="${q.id}">${h(q.name)}</button>`).join("")}
+    <button type="button" class="link new-subproject">+ New subproject</button></div>`;
+}
+
+// Makes a task, project or note into another kind: the same item, so it keeps its title,
+// text, tags, files and links (app.py's convert_document). Then opens it.
+async function convertTo(id, to) {
+  const x = await api("POST", `/documents/${id}/convert`, { to });
+  S.selected = null;
+  await refresh();
+  if (to === "note") { setView(x.journal_id ? "journal" : "notes"); openNote(noteById(id) || x); }
+  else if (to === "project") { setView(`project:${id}`); select("project", id); }
+  else openTask(id);
+  toast(`It's a ${to} now.`);
 }
 
 // ---- project templates (and recurring projects) -----------------------------
@@ -2036,7 +2075,9 @@ async function duplicateTasks(ts) {
 function openConvert(t) {
   if (!t) return;
   if (t.id < 0) return toast("Wait until this task has been saved (when you're back online).");
-  const items = t.notes.split("\n").filter((line) => { const m = CHECK_RE.exec(line); return m && m[3].trim(); }).length;
+  const tpl = document.createElement("template");
+  tpl.innerHTML = t.notes;
+  const items = [...tpl.content.querySelectorAll("ul[data-check] > li")].filter((li) => li.textContent.trim()).length;
   const lost = [t.start_date && "its start date", reminderPending(t) && "its reminder", t.waiting_for && "who it's waiting for",
     t.minutes && "its time", t.energy && "its energy", t.people?.length && "its people", t.spent && "its time spent"].filter(Boolean);
   const dlg = $("#proj-dialog");
@@ -2136,7 +2177,7 @@ function fieldValue(input) {
   const v = input.value;
   const f = input.dataset.field;
   if (f === "tags") return v.split(",").map((s) => s.trim()).filter(Boolean);
-  if (["project_id", "area_id", "minutes"].includes(f)) return v === "" ? null : Number(v);
+  if (["project_id", "parent_id", "area_id", "minutes"].includes(f)) return v === "" ? null : Number(v);
   if (f === "priority") return clampPriority(Number(v));
   if (f === "remind_at") return v ? localInputToUtc(v) : null;
   return v;
@@ -2195,38 +2236,51 @@ async function saveStart(t, start) {
 
 // ---- dependencies ("Blocked by") ---------------------------------------------
 
-// Blocked by and Related to are lists of tasks and projects, as refs: "task:12", "project:3".
-// refs(x, "blocked_by") or refs(x, "related"), for a task or project x.
+// Blocked by and Related to are lists of tasks and projects, by id (tasks, projects and notes
+// share one set of ids). refs(x, "blocked_by") or refs(x, "related"), for a task, project or note.
 function refs(x, field) {
-  const id = (r) => (typeof r === "object" ? r.id : r);  // (related: {id, title}; offline: ids)
-  return [...(x[field] || []).map((r) => `task:${id(r)}`), ...(x[field + "_projects"] || []).map((r) => `project:${id(r)}`)];
+  return (x[field] || []).map((r) => (typeof r === "object" ? r.id : r));  // (related: {id, kind, title}; offline: ids)
 }
 
-// What a ref names: {title, open, done}. Only open tasks are loaded, so others are done.
-function refInfo(ref, saved) {
-  const [kind, raw] = ref.split(":");
-  const id = Number(raw);
-  if (kind === "task") {
-    const t = taskById(id);
-    return { title: t?.title ?? saved?.title ?? "a finished task", open: !!t && !t.completed_at && !t.deleted_at };
-  }
+// What an id names: {kind, title, open, done}. Only open tasks are loaded, so others are done.
+function refInfo(id, saved) {
   const p = projectById(id);
-  return { title: "Project: " + (p?.name ?? saved?.name ?? "a finished one"), open: !!p && p.state !== "done" && !p.deleted_at };
+  if (p || saved?.kind === "project") {
+    return { kind: "project", title: "Project: " + (p?.name ?? saved?.title ?? "a finished one"),
+      open: !!p && p.state !== "done" && !p.deleted_at };
+  }
+  const t = taskById(id);
+  return { kind: "task", title: t?.title ?? saved?.title ?? "a finished task", open: !!t && !t.completed_at && !t.deleted_at };
 }
 
-// Tasks and projects matching q that x (kind "task" or "project") could be linked to, as
-// [{ref, title, where}]; not x itself, what's in skip, or, for Blocked by, its own project or tasks.
+// Tasks and projects matching q that x (kind "task", "project" or "note") could be linked to, as
+// [{ref, title, where}]; not x itself, what's in skip (ids), or, for Blocked by, what holds it or what it holds.
 function refMatches(x, kind, q, skip, blocking) {
   q = q.trim().toLowerCase();
   if (!q) return [];
   const fits = (text) => text.toLowerCase().includes(q);
-  const tasks = S.data.tasks.filter((t) => !(kind === "task" && t.id === x.id) && !skip.has(`task:${t.id}`) &&
-    !(blocking && kind === "project" && t.project_id === x.id) && fits(t.title))
-    .map((t) => ({ ref: `task:${t.id}`, title: t.title, where: projectById(t.project_id)?.name || "" }));
-  const projects = S.data.projects.filter((p) => !(kind === "project" && p.id === x.id) && !skip.has(`project:${p.id}`) &&
-    p.state !== "done" && !(blocking && kind === "task" && x.project_id === p.id) && fits(p.name))
-    .map((p) => ({ ref: `project:${p.id}`, title: p.name, where: "Project" }));
+  const mine = blocking ? projectFamily(x, kind) : new Set();
+  const tasks = S.data.tasks.filter((t) => t.id !== x.id && !skip.has(t.id) && !mine.has(t.id) && fits(t.title))
+    .map((t) => ({ ref: t.id, title: t.title, where: projectById(t.project_id)?.name || "" }));
+  const projects = S.data.projects.filter((p) => p.id !== x.id && !skip.has(p.id) && !mine.has(p.id) &&
+    p.state !== "done" && fits(p.name))
+    .map((p) => ({ ref: p.id, title: p.name, where: "Project" }));
   return [...projects, ...tasks].slice(0, 8);
+}
+
+// What x can't wait on, as it would wait on itself: the projects it's in, and (a project)
+// everything in it.
+function projectFamily(x, kind) {
+  const out = new Set();
+  for (let p = projectById(kind === "task" ? x.project_id : x.parent_id); p && !out.has(p.id); p = projectById(p.parent_id)) out.add(p.id);
+  if (kind === "project") {
+    const inside = (id) => {
+      for (const t of S.data.tasks) if (t.project_id === id) out.add(t.id);
+      for (const q of S.data.projects) if (q.parent_id === id && !out.has(q.id)) { out.add(q.id); inside(q.id); }
+    };
+    inside(x.id);
+  }
+  return out;
 }
 
 function refResults(matches, cls) {
@@ -2241,7 +2295,7 @@ function blockersField(x, kind) {
     return `<span class="dep-chip${r.open ? "" : " done"}" data-ref="${ref}">${h(r.title)}
       <button type="button" class="icon del-dep" aria-label="Remove">✕</button></span>`;
   }).join("");
-  const p = kind === "task" && x.project_id && projectById(x.project_id);
+  const p = projectById(kind === "task" ? x.project_id : x.parent_id);
   const inherited = p ? waitingOn(p, "project") : [];
   return `<div class="deps"><label>Blocked by <input class="dep-search" placeholder="Wait for a task or project…" autocomplete="off"></label>
     <div class="dep-chips">${chips}</div><div class="dep-results"></div>
@@ -2249,10 +2303,9 @@ function blockersField(x, kind) {
 }
 
 // "Related to": links both ways to other tasks and projects, to get from one to the other
-// (app.py's task_links and project_links). An open one opens on a click; a done one is struck through.
+// (app.py's document_links). An open one opens on a click; a done one is struck through.
 function relatedField(x, kind) {
-  const saved = new Map([...(x.related || []).map((r) => [`task:${r.id}`, r]),
-    ...(x.related_projects || []).map((r) => [`project:${r.id}`, r])]);
+  const saved = new Map((x.related || []).filter((r) => typeof r === "object").map((r) => [r.id, r]));
   const chips = refs(x, "related").map((ref) => {
     const s = saved.get(ref);
     const r = refInfo(ref, s);
@@ -2264,11 +2317,10 @@ function relatedField(x, kind) {
     <div class="dep-chips">${chips}</div><div class="related-results"></div></div>`;
 }
 
-// Saves the open item's Blocked by or Related to (field) as the given refs.
+// Saves the open item's Blocked by or Related to (field) as the given ids.
 async function setRefs(field, list) {
   const sel = S.selected;
-  const ids = (kind) => list.filter((r) => r.startsWith(kind + ":")).map((r) => Number(r.split(":")[1]));
-  const changes = { [field]: ids("task"), [field + "_projects"]: ids("project") };
+  const changes = { [field]: list.map(Number) };
   $("#detail").dataset.key = "";
   if (sel.kind === "project") await patchProject(sel.id, changes);
   else await patchTask(sel.id, changes);
@@ -2276,12 +2328,12 @@ async function setRefs(field, list) {
   if (field === "related" || sel.kind === "project") await refresh();
 }
 
-function openRef(ref) {
-  const [kind, id] = ref.split(":");
-  if (kind === "task") return openTask(Number(id));
-  if (!projectById(Number(id))) return toast("That project isn't there any more.");
+function openRef(id) {
+  id = Number(id);
+  if (taskById(id)) return openTask(id);
+  if (!projectById(id)) return toast("That isn't there any more.");
   setView(`project:${id}`);
-  select("project", Number(id));
+  select("project", id);
 }
 
 // ---- people (Google Contacts) ---------------------------------------------------
@@ -2451,7 +2503,7 @@ function renderTimer() {
           <button type="button" class="primary tm-done">Complete the task</button><button type="button" class="tm-stop">Stop</button></div>`
       : `<div class="tm-actions"><button type="button" class="tm-pause">${timer.runFrom ? "Pause" : "Resume"}</button>
           <button type="button" class="primary tm-done">✓ Done</button><button type="button" class="tm-stop">Stop</button></div>`}`}
-    ${t.notes.trim() ? `<div class="notes tm-notes">${notesHtml(t.notes)}</div>` : ""}
+    ${t.notes ? `<div class="notes note-body tm-notes">${showBody(t.notes)}</div>` : ""}
     ${t.spent ? `<p class="muted small">Spent before: ${fmtSpent(t.spent)}</p>` : ""}
   </div>`;
   draw();
@@ -2473,7 +2525,10 @@ function bindTimer() {
   });
   // Ticking a checklist item while focusing.
   el.addEventListener("change", (e) => {
-    if (e.target.matches("input[data-line]")) toggleCheckItem(timer.task, Number(e.target.dataset.line), e.target.checked).then(renderTimer);
+  });
+  el.addEventListener("click", (e) => {
+    const shown = e.target.closest(".tm-notes");
+    if (shown && tickTask(e, timer.task, shown)) setTimeout(renderTimer, 400);
   });
   $("#timer-pill").addEventListener("click", () => { timer.small = false; storeTimer(); renderTimer(); });
   document.addEventListener("keydown", (e) => {
@@ -2779,8 +2834,9 @@ function fileRow(f, locked) {
     </div>`;
 }
 
-function attachmentsSection(x, kind) {
-  const files = x.attachments || [];
+function attachmentsSection(x, kind, placed = placedIds(x.notes)) {
+  const inText = new Set(placed);
+  const files = (x.attachments || []).filter((f) => !inText.has(f.id));
   const locked = x.deleted_at;
   const p = kind === "task" && x.project_id && projectById(x.project_id);
   const shared = p?.attachments || [];
@@ -2788,7 +2844,9 @@ function attachmentsSection(x, kind) {
     <div class="att-head">Attachments
       ${locked ? "" : `<button type="button" class="link add-files">+ Add files</button>
         <input type="file" class="file-input" multiple hidden>`}</div>
-    ${files.map((f) => fileRow(f, locked)).join("")}
+    ${files.map((f) => locked || !IMAGE_TYPES.includes(f.mime) ? fileRow(f, locked)
+      : fileRow(f, locked).replace('<span class="muted small">', '<button type="button" class="link place-pic" ' +
+        'title="Put it in the text, where the cursor was">Put in the text</button> <span class="muted small">')).join("")}
     ${locked ? "" : `<p class="muted small hint">${files.length ? "" : "None yet. "}Drop files here, or paste an image. Up to 25 MB each.${
       kind === "project" ? " They go with all of the project's tasks." : ""}</p>`}
     ${shared.length ? `<div class="att-head muted small">From the project “${h(p.name)}”</div>
@@ -3024,13 +3082,6 @@ function bindDetail() {
         (e.target.value.trim() ? '<span class="muted small">No open task or project matches.</span>' : "");
       return;
     }
-    if (e.target.matches('textarea[data-field="notes"]')) {
-      const preview = $(".md-preview", el);
-      if (preview) {
-        preview.hidden = !MD_HINT.test(e.target.value);
-        preview.innerHTML = notesHtml(e.target.value);
-      }
-    }
     const input = e.target.closest("[data-field]");
     if (!input || !["INPUT", "TEXTAREA"].includes(input.tagName) || input.type === "checkbox"
         || input.type === "date" || input.type === "time" || input.type === "datetime-local") return;
@@ -3055,18 +3106,6 @@ function bindDetail() {
     }
     if (e.target.matches(".file-input")) {
       uploadFiles(S.selected, [...e.target.files]);
-      return;
-    }
-    // Ticking a checklist item in the preview: change the notes as typed so far, and save.
-    const tick = e.target.closest(".md-preview input[data-line]");
-    if (tick) {
-      const area = $('textarea[data-field="notes"]', el);
-      const lines = area.value.split("\n");
-      lines[tick.dataset.line] = lines[tick.dataset.line].replace(/\[[ xX]\]/, tick.checked ? "[x]" : "[ ]");
-      area.value = lines.join("\n");
-      if (area.cm) { const at = area.cm.getCursor(); area.cm.setValue(area.value); area.cm.setCursor(at); }
-      clearTimeout(saveTimer);
-      saveField(area);
       return;
     }
     const input = e.target.closest("[data-field]");
@@ -3162,22 +3201,22 @@ function bindDetail() {
       await patchTask(sel.id, { focus: !taskById(sel.id).focus });
     }
     else if (b.dataset.until) snoozeTask(sel.id, b.dataset.until);
-    else if (b.classList.contains("add-dep")) setRefs("blocked_by", [...refs(selItem(), "blocked_by"), b.dataset.ref]);
+    else if (b.classList.contains("add-dep")) setRefs("blocked_by", [...refs(selItem(), "blocked_by"), Number(b.dataset.ref)]);
     else if (b.classList.contains("add-person")) setPeople(sel.id, [...(taskById(sel.id).people || []), b.dataset.person]);
     else if (b.classList.contains("del-person")) {
       const gone = b.closest("[data-person]").dataset.person;
       setPeople(sel.id, taskById(sel.id).people.filter((id) => id !== gone));
     }
-    else if (b.classList.contains("add-related")) setRefs("related", [...refs(selItem(), "related"), b.dataset.ref]);
+    else if (b.classList.contains("add-related")) setRefs("related", [...refs(selItem(), "related"), Number(b.dataset.ref)]);
     else if (b.classList.contains("del-related")) {
-      const gone = b.closest("[data-ref]").dataset.ref;
+      const gone = Number(b.closest("[data-ref]").dataset.ref);
       setRefs("related", refs(selItem(), "related").filter((r) => r !== gone));
     }
     else if (b.classList.contains("open-related")) openRef(b.closest("[data-ref]").dataset.ref);
     else if (b.classList.contains("convert-task")) openConvert(taskById(sel.id));
     else if (b.classList.contains("task-to-note")) taskToNote(taskById(sel.id));
     else if (b.classList.contains("del-dep")) {
-      const gone = b.closest("[data-ref]").dataset.ref;
+      const gone = Number(b.closest("[data-ref]").dataset.ref);
       setRefs("blocked_by", refs(selItem(), "blocked_by").filter((r) => r !== gone));
     }
     else if (b.classList.contains("save-template")) saveAsTemplate(sel.id, false);
@@ -3186,6 +3225,14 @@ function bindDetail() {
     else if (b.classList.contains("update-template")) saveAsTemplate(sel.id, true);
     else if (b.classList.contains("clear-remind")) { $("#detail").dataset.key = ""; await patchTask(sel.id, { remind_at: null, remind_before: null }); }
     else if (b.classList.contains("add-files")) $(".file-input", el).click();
+    else if (b.classList.contains("place-pic") && $(".d-text", el)?.host && !b.closest(".d-text")) {
+      const host = $(".d-text", el).host;
+      ed = host;
+      if (host.source) setSource(host, false);
+      insertPictures([Number(b.closest("[data-file]").dataset.file)]);
+      host.changed();
+      host.filesChanged();
+    }
     else if (b.classList.contains("del-file")) deleteFile(Number(b.closest("[data-file]").dataset.file));
     else if (b.classList.contains("close")) { S.selected = null; render(); }
     else if (b.dataset.state) {
@@ -3204,6 +3251,9 @@ function bindDetail() {
       await api("DELETE", `/tasks/${sel.id}`); S.selected = null; await refresh();
     }
     else if (b.classList.contains("open-project")) setView(`project:${sel.id}`);
+    else if (b.classList.contains("open-subproject")) { setView(`project:${b.dataset.project}`); select("project", Number(b.dataset.project)); }
+    else if (b.classList.contains("new-subproject")) newProject(projectById(sel.id));
+    else if (b.classList.contains("convert-to")) convertTo(sel.id, b.dataset.to);
     else if (b.classList.contains("delete-project")) {
       if (!confirm("Move this project and its tasks to the trash?")) return;
       const id = sel.id;
@@ -3256,8 +3306,9 @@ async function openSettings() {
 
     <section>
       <h3>Notes editor</h3>
-      <p class="muted small">For this device only. <em>Vim</em> edits notes with Vim keys (normal, insert and visual
-        modes, motions, <code>:w</code> to save, <code>:q</code> to close); good with a keyboard, not on a phone.</p>
+      <p class="muted small">For this device only. <em>Vim</em> edits the text of tasks, projects and notes as its HTML,
+        with Vim keys (normal, insert and visual modes, motions, <code>:w</code> to save, <code>:q</code> to close,
+        <code>:check</code> to tick a checklist item); good with a keyboard, not on a phone.</p>
       <label class="check"><select class="notes-editor" aria-label="Notes editor">${options(
         [["plain", "Plain"], ["vim", "Vim"]], notesEditor())}</select></label>
     </section>
@@ -3588,7 +3639,7 @@ function bindSettings() {
       save("notesEditor", t.value);
       if (t.value === "vim") loadVim().catch(() => toast("Couldn't load the Vim editor. Are you offline?"));
       $("#detail").dataset.key = "";
-      toast(t.value === "vim" ? "Notes use Vim keys on this device." : "Notes use the plain box on this device.");
+      toast(t.value === "vim" ? "Text opens as HTML, with Vim keys, on this device." : "Text uses the plain editor on this device.");
       return;
     }
     if (t.classList.contains("share-to")) {
@@ -3667,7 +3718,7 @@ function bindSettings() {
       fillPushState();
     } else if (b.classList.contains("open-task")) {
       $("#dialog").close();
-      if (b.dataset.project) openRef(`project:${b.dataset.project}`);
+      if (b.dataset.project) openRef(b.dataset.project);
       else if (b.dataset.note) openNoteById(Number(b.dataset.note));
       else openTask(Number(b.dataset.task));
     } else if (b.classList.contains("g-connect")) {
@@ -4115,8 +4166,16 @@ function projectMenuItems(p) {
     { sep: true },
     { label: "Open", run: () => setView(`project:${p.id}`) },
     { label: "Details", run: () => { setView(`project:${p.id}`); select("project", p.id); } },
+    { label: "New subproject…", run: () => newProject(p) },
+    { label: "Move into", sub: () => [
+      ...(p.parent_id ? [{ label: "No project (top level)", run: () => changeProject(p, { parent_id: null }, `“${p.name}” is a project of its own now.`) }] : []),
+      ...byPriority(parentChoices(p).filter((q) => q.id !== p.parent_id && q.state !== "done")).map((q) => ({
+        label: q.name, run: () => changeProject(p, { parent_id: q.id }, `“${p.name}” is part of “${q.name}” now.`) })),
+    ] },
     { label: p.focus ? "Unstar" : "Star", run: () => changeProject(p, { focus: !p.focus }) },
     { label: "Sequential", toggle: true, checked: p.sequential, run: () => changeProject(p, { sequential: !p.sequential }) },
+    ...(projectEmpty(p) ? [{ sep: true }, { label: "Make it a task", run: () => convertTo(p.id, "task") },
+      { label: "Make it a note", run: () => convertTo(p.id, "note") }] : []),
     { sep: true },
     { label: "Move to trash", danger: true, run: async () => {
       if (!confirm(`Move “${p.name}” and its tasks to the trash?`)) return;
@@ -4362,6 +4421,7 @@ function bind() {
     if (b?.classList.contains("edit-project")) {
       return select("project", Number(b.closest("[data-project]").dataset.project));
     }
+    if (b?.classList.contains("open-subproject")) return setView(`project:${b.dataset.project}`);
     if (b?.classList.contains("complete-project") || b?.classList.contains("reopen-project")) {
       const id = Number(b.closest("[data-project]").dataset.project);
       const done = b.classList.contains("complete-project");
@@ -4380,11 +4440,8 @@ function bind() {
     }
     if (row.dataset.task) {
       const id = Number(row.dataset.task);
-      if (e.target.closest(".check-item")) {
-        // A click on the label is forwarded to its checkbox, which we handle.
-        if (e.target.matches("input")) toggleCheckItem(id, Number(e.target.dataset.line), e.target.checked);
-        return;
-      }
+      const text = e.target.closest(".row-text");
+      if (text && tickTask(e, id, text)) return;
       if (e.target.classList.contains("complete")) return completeTask(id, e.target.checked);
       if (b?.classList.contains("star")) return patchTask(id, { focus: !taskById(id).focus });
       if (b?.classList.contains("prio-ctl")) return;  // dragged, not clicked (bindPriorityDrag)
@@ -4404,6 +4461,11 @@ function bind() {
         return patchProject(id, { focus: !projectById(id).focus });
       }
       if (b?.classList.contains("prio-ctl")) return;  // dragged, not clicked (bindPriorityDrag)
+      if (b?.classList.contains("fold")) {
+        if (foldedProjects.has(id)) foldedProjects.delete(id); else foldedProjects.add(id);
+        save("projectsFolded", JSON.stringify([...foldedProjects]));
+        return render();
+      }
       if (S.view !== "trash") setView(`project:${id}`);
     }
   });
@@ -4589,7 +4651,8 @@ function bind() {
 window.addEventListener("unhandledrejection", (e) => { if (e.reason?.shown) e.preventDefault(); });
 
 bind();
-refresh().then(afterLoad);
+// (Once editor.js and notes.js have run too: drawing the lists uses them.)
+document.addEventListener("DOMContentLoaded", () => refresh().then(afterLoad));
 // Makes the app installable, and able to open offline (static/sw.js).
 navigator.serviceWorker?.register(BASE + "/sw.js").catch(() => {});
 

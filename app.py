@@ -91,8 +91,6 @@ DEFAULT_SETTINGS = {"defer_options": ["1h", "2h", "6h", "24h", "3d", "1w"], "tim
 REMIND_BEFORE_DAYS = (1, 2, 3, 7, 14, 30, 60, 90)
 REMIND_BEFORE_TIME = "09:00"
 STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$")
-# Checked checklist lines in notes ("[x] ..."), unchecked on each new repeat.
-UNCHECK_RE = re.compile(r"^(\s*(?:[-*]\s*)?)\[[xX]\]", re.MULTILINE)
 MIN_PASSWORD = 8
 MAX_CATCH_UP = 400  # occurrences one series may generate per page load
 
@@ -519,234 +517,228 @@ def task_dict(row, tags, series):
     return d
 
 
-def tags_for(task_ids):
-    if not task_ids:
+# --- what documents share: tags, files, Blocked by, Related to ------------------
+# Tasks, projects and notes are documents (db.py), so these work the same for each.
+
+def marks_for(ids):
+    return ",".join("?" * len(ids))
+
+
+def tags_for(ids):
+    """{document id: [tag names]}."""
+    if not ids:
         return {}
-    marks = ",".join("?" * len(task_ids))
-    rows = db.get_db().execute(
-        f"SELECT tt.task_id, t.name FROM task_tags tt JOIN tags t ON t.id = tt.tag_id "
-        f"WHERE tt.task_id IN ({marks}) ORDER BY t.name", task_ids).fetchall()
     out = {}
-    for r in rows:
-        out.setdefault(r["task_id"], []).append(r["name"])
+    for r in db.get_db().execute(
+            f"SELECT dt.document_id, t.name FROM document_tags dt JOIN tags t ON t.id = dt.tag_id "
+            f"WHERE dt.document_id IN ({marks_for(ids)}) ORDER BY t.name", ids):
+        out.setdefault(r["document_id"], []).append(r["name"])
     return out
 
 
-def attachments_for(ids, column="task_id"):
-    """{task_id: [attachment info]} (without the files themselves); with column="project_id",
-    the same for projects."""
+def attachments_for(ids):
+    """{document id: [attachment info]} (without the files themselves)."""
     if not ids:
         return {}
-    marks = ",".join("?" * len(ids))
     out = {}
     for r in db.get_db().execute(
-            f"SELECT id, {column} AS owner, name, mime, size, created_at FROM attachments "
-            f"WHERE {column} IN ({marks}) ORDER BY id", ids):
-        out.setdefault(r["owner"], []).append(
+            f"SELECT id, document_id, name, mime, size, created_at FROM attachments "
+            f"WHERE document_id IN ({marks_for(ids)}) ORDER BY id", ids):
+        out.setdefault(r["document_id"], []).append(
             {"id": r["id"], "name": r["name"], "mime": r["mime"], "size": r["size"],
              "created_at": r["created_at"]})
     return out
 
 
-def deps_for(task_ids):
-    """{task_id: [ids of the tasks blocking it]}."""
-    if not task_ids:
-        return {}
-    marks = ",".join("?" * len(task_ids))
-    out = {}
-    for r in db.get_db().execute(f"SELECT task_id, blocker_id FROM task_deps WHERE task_id IN ({marks}) "
-                                 "ORDER BY blocker_id", task_ids):
-        out.setdefault(r["task_id"], []).append(r["blocker_id"])
-    return out
-
-
-def project_deps_for(kind, ids):
-    """{id: ([blocking task ids], [blocking project ids])} from project_deps, for tasks
-    (kind "task") or projects ("project"). (Tasks blocked by tasks are in deps_for.)"""
+def blockers_for(ids):
+    """{document id: [ids of the tasks and projects it's blocked by]}."""
     if not ids:
         return {}
-    marks = ",".join("?" * len(ids))
     out = {}
-    for r in db.get_db().execute(
-            f"SELECT {kind}_id AS waiting, blocker_task_id, blocker_project_id FROM project_deps "
-            f"WHERE {kind}_id IN ({marks}) ORDER BY blocker_task_id, blocker_project_id", ids):
-        tasks, projects = out.setdefault(r["waiting"], ([], []))
-        if r["blocker_task_id"]:
-            tasks.append(r["blocker_task_id"])
-        else:
-            projects.append(r["blocker_project_id"])
+    for r in db.get_db().execute(f"SELECT document_id, blocker_id FROM document_deps "
+                                 f"WHERE document_id IN ({marks_for(ids)}) ORDER BY blocker_id", ids):
+        out.setdefault(r["document_id"], []).append(r["blocker_id"])
     return out
 
 
-def waits_on(node):
-    """What a task ("task", id) or project ("project", id) can't be done before: what it's
-    blocked by; for a task, also what its project is blocked by; for a project, its tasks."""
-    kind, item_id = node
+def kind_of(doc_id):
+    row = db.get_db().execute("SELECT kind FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    return row and row[0]
+
+
+def project_chain(project_id):
+    """A project and the projects it's part of, outward (subproject first)."""
+    conn, out = db.get_db(), []
+    while project_id and project_id not in out:
+        out.append(project_id)
+        row = conn.execute("SELECT parent_id FROM project_data WHERE id = ?", (project_id,)).fetchone()
+        project_id = row and row[0]
+    return out
+
+
+def project_contents(project_id):
+    """Everything in a project, at any depth: its tasks, its subprojects and theirs (ids)."""
+    conn, out, pending = db.get_db(), set(), [project_id]
+    while pending:
+        p = pending.pop()
+        for r in conn.execute("SELECT id FROM task_data WHERE project_id = ? UNION ALL "
+                              "SELECT id FROM project_data WHERE parent_id = ?", (p, p)):
+            if r[0] not in out:
+                out.add(r[0])
+                pending.append(r[0])
+    return out
+
+
+def waits_on(doc_id):
+    """What a task or project can't be done before: what it's blocked by, and what the
+    projects it's in (at any depth) are blocked by; for a project, also what's in it."""
     conn = db.get_db()
-    out = [("task", r[0]) for r in conn.execute(
-        "SELECT blocker_id FROM task_deps WHERE task_id = ?", (item_id,))] if kind == "task" else []
-    owners = [item_id]
+    kind = kind_of(doc_id)
     if kind == "task":
-        row = conn.execute("SELECT project_id FROM tasks WHERE id = ?", (item_id,)).fetchone()
-        owners = [] if not row or not row[0] else [row[0]]
-        out += [("task", r[0]) if r[0] else ("project", r[1]) for r in conn.execute(
-            "SELECT blocker_task_id, blocker_project_id FROM project_deps WHERE task_id = ?", (item_id,))]
-    for p in owners:
-        out += [("task", r[0]) if r[0] else ("project", r[1]) for r in conn.execute(
-            "SELECT blocker_task_id, blocker_project_id FROM project_deps WHERE project_id = ?", (p,))]
+        row = conn.execute("SELECT project_id FROM task_data WHERE id = ?", (doc_id,)).fetchone()
+        around = project_chain(row and row[0])
+    else:
+        row = conn.execute("SELECT parent_id FROM project_data WHERE id = ?", (doc_id,)).fetchone()
+        around = project_chain(row and row[0])
+    out = [r[0] for x in [doc_id, *around]
+           for r in conn.execute("SELECT blocker_id FROM document_deps WHERE document_id = ?", (x,))]
     if kind == "project":
-        out += [("task", r[0]) for r in conn.execute(
-            "SELECT id FROM tasks WHERE project_id = ? AND deleted_at IS NULL", (item_id,))]
+        out += [r[0] for r in conn.execute(
+            "SELECT t.id FROM task_data t JOIN documents d ON d.id = t.id WHERE t.project_id = ? AND d.deleted_at IS NULL "
+            "UNION ALL SELECT p.id FROM project_data p JOIN documents d ON d.id = p.id WHERE p.parent_id = ? "
+            "AND d.deleted_at IS NULL", (doc_id, doc_id))]
     return out
 
 
-def set_blockers(kind, item_id, tasks=None, projects=None):
-    """Replace what a task or project (kind "task" or "project") is blocked by: the tasks
-    (tasks, a list of ids) and the projects (projects), each left as it is if None.
-    ValueError for one that isn't the user's, the item itself, or a wait that could never end
-    (one that, in turn, waits on this, or a project and one of its own tasks)."""
+def checked_ids(ids, kinds, what, limit=50):
+    """ids (from the API) as a list of the user's documents of one of kinds; ValueError if not."""
+    if not isinstance(ids, list) or len(ids) > limit:
+        raise ValueError(f"{what} must be a list of ids")
+    out = []
+    for i in dict.fromkeys(int(x) for x in ids):
+        row = db.get_db().execute("SELECT kind FROM documents WHERE id = ? AND user_id = ?",
+                                  (i, g.user["id"])).fetchone()
+        if not row or row[0] not in kinds:
+            raise ValueError(f"No such {' or '.join(kinds)}.")
+        out.append(i)
+    return out
+
+
+def given_ids(data, field):
+    """The ids the API data gives for field ("blocked_by" or "related": tasks and projects,
+    by id), or None if it doesn't. (Older apps sent projects apart, in field + "_projects".)"""
+    if field not in data and field + "_projects" not in data:
+        return None
+    ids = [data.get(field) or [], data.get(field + "_projects") or []]
+    if not all(isinstance(x, list) for x in ids):
+        raise ValueError(f"{field} must be a list of ids")
+    return [x["id"] if isinstance(x, dict) else x for x in ids[0] + ids[1]]
+
+
+def set_blockers(kind, item_id, ids):
+    """Replace what a task or project (kind "task" or "project") is blocked by: ids, tasks and
+    projects (None leaves them). ValueError for one that isn't the user's, the item itself, or
+    a wait that could never end (one that, in turn, waits on this, or a project and something
+    in it)."""
+    if ids is None:
+        return
     conn = db.get_db()
-    current = project_deps_for(kind, [item_id]).get(item_id, ([], []))
-    if tasks is None:
-        tasks = deps_for([item_id]).get(item_id, []) if kind == "task" else current[0]
-    if projects is None:
-        projects = current[1]
-    blockers = []
-    for what, ids in (("task", tasks), ("project", projects)):
-        if not isinstance(ids, list) or len(ids) > 50:
-            raise ValueError(f"blocked by must be a list of {what} ids")
-        for b in dict.fromkeys(int(i) for i in ids):
-            if not conn.execute(f"SELECT 1 FROM {what}s WHERE id = ? AND user_id = ?",
-                                (b, g.user["id"])).fetchone():
-                raise ValueError(f"No such {what} to wait on.")
-            blockers.append((what, b))
-    me = (kind, item_id)
-    # Waiting on b is a loop if b (through what it waits on) waits on this, or on any of
-    # this project's tasks (which would wait on b in turn).
-    targets = {me} | ({("task", r[0]) for r in conn.execute(
-        "SELECT id FROM tasks WHERE project_id = ?", (item_id,))} if kind == "project" else set())
+    blockers = checked_ids(ids, ("task", "project"), "blocked by")
+    # Waiting on b is a loop if b (through what it waits on) waits on this, or on anything in
+    # this project (which would wait on b in turn).
+    targets = {item_id} | (project_contents(item_id) if kind == "project" else set())
     for b in blockers:
-        if b == me:
+        if b == item_id:
             raise ValueError(f"A {kind} can't wait on itself.")
         seen, pending = set(), [b]
         while pending:
             node = pending.pop()
             if node in targets:
                 raise ValueError("That would make them wait on each other in a loop, so neither could start."
-                                 if node != b else "A project can't wait on one of its own tasks.")
+                                 if node != b else "A project can't wait on something in it.")
             if node not in seen:
                 seen.add(node)
                 pending += waits_on(node)
-    if kind == "task":
-        conn.execute("DELETE FROM task_deps WHERE task_id = ?", (item_id,))
-        conn.executemany("INSERT OR IGNORE INTO task_deps (task_id, blocker_id) VALUES (?, ?)",
-                         [(item_id, b) for what, b in blockers if what == "task"])
-    conn.execute(f"DELETE FROM project_deps WHERE {kind}_id = ?", (item_id,))
-    conn.executemany(f"INSERT INTO project_deps ({kind}_id, blocker_task_id, blocker_project_id) VALUES (?, ?, ?)",
-                     [(item_id, b if what == "task" else None, b if what == "project" else None)
-                      for what, b in blockers if kind == "project" or what == "project"])
+    conn.execute("DELETE FROM document_deps WHERE document_id = ?", (item_id,))
+    conn.executemany("INSERT INTO document_deps (document_id, blocker_id) VALUES (?, ?)",
+                     [(item_id, b) for b in blockers])
 
 
-def links_for(task_ids):
-    """{task_id: [{id, title, done, trashed} of each related task]}, by title."""
-    if not task_ids:
+def links_for(ids):
+    """{document id: [{id, kind, title, done, trashed}]}: the tasks and projects each is related
+    (or, a note, linked) to, by title. (Notes linked to it are in the notes' own lists.)"""
+    if not ids:
         return {}
-    marks = ",".join("?" * len(task_ids))
+    marks = marks_for(ids)
     out = {}
     for r in db.get_db().execute(
-            f"SELECT l.a AS mine, t.* FROM task_links l JOIN tasks t ON t.id = l.b WHERE l.a IN ({marks}) "
-            f"UNION ALL SELECT l.b AS mine, t.* FROM task_links l JOIN tasks t ON t.id = l.a WHERE l.b IN ({marks}) "
-            "ORDER BY title COLLATE NOCASE", task_ids * 2):
-        out.setdefault(r["mine"], []).append({"id": r["id"], "title": r["title"], "done": bool(r["completed_at"]),
-                                              "trashed": bool(r["deleted_at"])})
+            f"SELECT l.mine, d.id, d.kind, d.title, d.deleted_at, t.completed_at, p.state FROM "
+            f"(SELECT a AS mine, b AS other FROM document_links WHERE a IN ({marks}) "
+            f"UNION ALL SELECT b, a FROM document_links WHERE b IN ({marks})) l "
+            "JOIN documents d ON d.id = l.other LEFT JOIN task_data t ON t.id = d.id "
+            "LEFT JOIN project_data p ON p.id = d.id WHERE d.kind != 'note' ORDER BY d.title COLLATE NOCASE", ids * 2):
+        out.setdefault(r["mine"], []).append({
+            "id": r["id"], "kind": r["kind"], "title": r["title"], "trashed": bool(r["deleted_at"]),
+            "done": r["state"] == "done" if r["kind"] == "project" else bool(r["completed_at"])})
     return out
 
 
-def project_links_for(kind, ids):
-    """{id: [{id, name, done, trashed} of each related project]} for tasks (kind "task") or
-    projects ("project"), and for projects also {id: [related tasks, as links_for]}."""
-    if not ids:
-        return {}, {}
-    marks = ",".join("?" * len(ids))
+def set_related(kind, item_id, ids):
+    """Replace the tasks and projects (ids; None leaves them) related to (or, for a note,
+    linked to) a task, project or note. Links go both ways; links with notes are the notes'."""
+    if ids is None:
+        return
     conn = db.get_db()
-    projects, tasks = {}, {}
-    if kind == "task":
-        sql = (f"SELECT l.task_id AS mine, p.* FROM project_links l JOIN projects p ON p.id = l.project_id "
-               f"WHERE l.task_id IN ({marks})")
-        args = ids
-    else:
-        sql = (f"SELECT l.project_id AS mine, p.* FROM project_links l JOIN projects p ON p.id = l.other_id "
-               f"WHERE l.project_id IN ({marks}) UNION ALL "
-               f"SELECT l.other_id AS mine, p.* FROM project_links l JOIN projects p ON p.id = l.project_id "
-               f"WHERE l.other_id IN ({marks})")
-        args = ids * 2
-        for r in conn.execute(
-                f"SELECT l.project_id AS mine, t.* FROM project_links l JOIN tasks t ON t.id = l.task_id "
-                f"WHERE l.project_id IN ({marks}) ORDER BY t.title COLLATE NOCASE", ids):
-            tasks.setdefault(r["mine"], []).append({"id": r["id"], "title": r["title"], "done": bool(r["completed_at"]),
-                                                    "trashed": bool(r["deleted_at"])})
-    for r in conn.execute(sql + " ORDER BY name COLLATE NOCASE", args):
-        projects.setdefault(r["mine"], []).append({"id": r["id"], "name": r["name"], "done": r["state"] == "done",
-                                                   "trashed": bool(r["deleted_at"])})
-    return projects, tasks
+    others = checked_ids(ids, ("task", "project"), "related")
+    if item_id in others:
+        raise ValueError(f"A {kind} can't be related to itself.")
+    conn.execute("DELETE FROM document_links WHERE (a = ? AND b IN (SELECT id FROM documents WHERE kind != 'note')) "
+                 "OR (b = ? AND a IN (SELECT id FROM documents WHERE kind != 'note'))", (item_id, item_id))
+    conn.executemany("INSERT OR IGNORE INTO document_links (a, b) VALUES (?, ?)",
+                     [(min(item_id, o), max(item_id, o)) for o in others])
 
 
-def set_related(kind, item_id, tasks=None, projects=None):
-    """Replace the tasks (tasks, a list of ids) and projects (projects) related to a task or
-    project (kind "task" or "project"), each left as it is if None. Each link goes both ways."""
-    conn = db.get_db()
-    for what, ids in (("task", tasks), ("project", projects)):
-        if ids is None:
-            continue
-        if not isinstance(ids, list) or len(ids) > 50:
-            raise ValueError(f"related must be a list of {what} ids")
-        others = []
-        for other in dict.fromkeys(int(i) for i in ids):
-            if what == kind and other == item_id:
-                raise ValueError(f"A {kind} can't be related to itself.")
-            if not conn.execute(f"SELECT 1 FROM {what}s WHERE id = ? AND user_id = ?",
-                                (other, g.user["id"])).fetchone():
-                raise ValueError(f"No such {what} to relate it to.")
-            others.append(other)
-        if kind == "task" and what == "task":
-            conn.execute("DELETE FROM task_links WHERE a = ? OR b = ?", (item_id, item_id))
-            conn.executemany("INSERT OR IGNORE INTO task_links (a, b) VALUES (?, ?)",
-                             [(min(item_id, o), max(item_id, o)) for o in others])
-        elif what == "task" or kind == "task":
-            project, task = ("project_id", "task_id") if kind == "project" else ("task_id", "project_id")
-            conn.execute(f"DELETE FROM project_links WHERE {project} = ? AND task_id IS NOT NULL", (item_id,))
-            conn.executemany(f"INSERT INTO project_links ({project}, {task}) VALUES (?, ?)",
-                             [(item_id, o) for o in others])
-        else:
-            conn.execute("DELETE FROM project_links WHERE other_id IS NOT NULL AND (project_id = ? OR other_id = ?)",
-                         (item_id, item_id))
-            conn.executemany("INSERT INTO project_links (project_id, other_id) VALUES (?, ?)",
-                             [(min(item_id, o), max(item_id, o)) for o in others])
+def link(a, b):
+    """Relate two documents (if they aren't already)."""
+    if a != b:
+        db.get_db().execute("INSERT OR IGNORE INTO document_links (a, b) VALUES (?, ?)", (min(a, b), max(a, b)))
 
 
 def copy_links(from_id, to_id):
-    """Give task to_id the same related tasks and projects as task from_id."""
-    conn = db.get_db()
-    conn.execute(
-        "INSERT OR IGNORE INTO task_links (a, b) SELECT MIN(?, other), MAX(?, other) FROM "
-        "(SELECT b AS other FROM task_links WHERE a = ? UNION SELECT a FROM task_links WHERE b = ?) "
+    """Give document to_id the same links as from_id."""
+    db.get_db().execute(
+        "INSERT OR IGNORE INTO document_links (a, b) SELECT MIN(?, other), MAX(?, other) FROM "
+        "(SELECT b AS other FROM document_links WHERE a = ? UNION SELECT a FROM document_links WHERE b = ?) "
         "WHERE other != ?", (to_id, to_id, from_id, from_id, to_id))
-    conn.execute("INSERT INTO project_links (project_id, task_id) SELECT project_id, ? FROM project_links "
-                 "WHERE task_id = ?", (to_id, from_id))
+
+
+def copy_shared(from_id, to_id, deps=True):
+    """Give document to_id the same tags, links, files (stored once) and, with deps, the same
+    Blocked by as from_id."""
+    conn = db.get_db()
+    conn.execute("INSERT OR IGNORE INTO document_tags SELECT ?, tag_id FROM document_tags WHERE document_id = ?",
+                 (to_id, from_id))
+    copy_links(from_id, to_id)
+    if deps:
+        conn.execute("INSERT OR IGNORE INTO document_deps SELECT ?, blocker_id FROM document_deps "
+                     "WHERE document_id = ? AND blocker_id != ?", (to_id, from_id, to_id))
+    copy_files(from_id, to_id)
+
+
+def copy_files(from_id, to_id):
+    db.get_db().execute(
+        "INSERT INTO attachments (user_id, document_id, name, mime, size, blob_id, created_at) "
+        "SELECT user_id, ?, name, mime, size, blob_id, created_at FROM attachments WHERE document_id = ? ORDER BY id",
+        (to_id, from_id))
 
 
 def tasks_json(rows):
     ids = [r["id"] for r in rows]
     files = attachments_for(ids)
-    deps = deps_for(ids)
-    waits = project_deps_for("task", ids)
+    blockers = blockers_for(ids)
     links = links_for(ids)
-    related_projects, _ = project_links_for("task", ids)
     for_task = lambda d: d | {"attachments": files.get(d["id"], []),  # noqa: E731
-                              "blocked_by": deps.get(d["id"], []),
-                              "blocked_by_projects": waits.get(d["id"], ([], []))[1],
-                              "related": links.get(d["id"], []),
-                              "related_projects": related_projects.get(d["id"], [])}
+                              "blocked_by": blockers.get(d["id"], []), "related": links.get(d["id"], [])}
     return [for_task(d) for d in _tasks_json(rows)]
 
 
@@ -755,9 +747,8 @@ def _tasks_json(rows):
     ids = list({r["series_id"] for r in rows if r["series_id"]})
     series = {}
     if ids:
-        marks = ",".join("?" * len(ids))
         series = {s["id"]: s for s in db.get_db().execute(
-            f"SELECT * FROM series WHERE id IN ({marks})", ids)}
+            f"SELECT * FROM series WHERE id IN ({marks_for(ids)})", ids)}
     return [task_dict(r, tags, series) for r in rows]
 
 
@@ -765,29 +756,29 @@ def project_dict(row):
     return projects_json([row])[0]
 
 
+def document_json(doc_id):
+    """A task, project or note as the API sends it."""
+    kind = kind_of(doc_id)
+    if kind == "project":
+        return project_dict(owned("projects", doc_id))
+    if kind == "note":
+        return note_dict(doc_id)
+    return tasks_json([owned("tasks", doc_id)])[0]
+
+
 def projects_json(rows):
     """Projects as the API sends them: with their tags, files, what they're blocked by and
     what they're related to."""
     ids = [r["id"] for r in rows]
-    tags = {}
-    if ids:
-        for r in db.get_db().execute(
-                f"SELECT pt.project_id, t.name FROM project_tags pt JOIN tags t ON t.id = pt.tag_id "
-                f"WHERE pt.project_id IN ({','.join('?' * len(ids))}) ORDER BY t.name", ids):
-            tags.setdefault(r["project_id"], []).append(r["name"])
-    files = attachments_for(ids, "project_id")
-    waits = project_deps_for("project", ids)
-    related_projects, related_tasks = project_links_for("project", ids)
+    tags, files, blockers, links = tags_for(ids), attachments_for(ids), blockers_for(ids), links_for(ids)
     out = []
     for row in rows:
         d = dict(row)
         d["focus"] = bool(d["focus"])
         d["sequential"] = bool(d["sequential"])
         del d["user_id"]
-        blocked = waits.get(d["id"], ([], []))
         d |= {"tags": tags.get(d["id"], []), "attachments": files.get(d["id"], []),
-              "blocked_by": blocked[0], "blocked_by_projects": blocked[1],
-              "related": related_tasks.get(d["id"], []), "related_projects": related_projects.get(d["id"], [])}
+              "blocked_by": blockers.get(d["id"], []), "related": links.get(d["id"], [])}
         out.append(d)
     return out
 
@@ -827,16 +818,16 @@ def user_settings(user):
     return DEFAULT_SETTINGS | {k: v for k, v in saved.items() if k in DEFAULT_SETTINGS}
 
 
-def set_tags(item_id, names, kind="task"):
-    """Replace a task's tags (or, with kind="project", a project's), making new ones as needed."""
+def set_tags(item_id, names):
+    """Replace a task's, project's or note's tags, making new ones as needed."""
     conn = db.get_db()
-    conn.execute(f"DELETE FROM {kind}_tags WHERE {kind}_id = ?", (item_id,))
+    conn.execute("DELETE FROM document_tags WHERE document_id = ?", (item_id,))
     for name in {n.strip()[:100] for n in names if isinstance(n, str) and n.strip()}:
         conn.execute("INSERT OR IGNORE INTO tags (user_id, name) VALUES (?, ?)",
                      (g.user["id"], name))
         tag = conn.execute("SELECT id FROM tags WHERE user_id = ? AND name = ?",
                            (g.user["id"], name)).fetchone()
-        conn.execute(f"INSERT OR IGNORE INTO {kind}_tags VALUES (?, ?)", (item_id, tag["id"]))
+        conn.execute("INSERT OR IGNORE INTO document_tags VALUES (?, ?)", (item_id, tag["id"]))
 
 
 def check_ref(table, value):
@@ -858,7 +849,9 @@ def task_fields(data):
             if not value:
                 raise ValueError("title is required")
             out[key] = value[:500]
-        elif key in ("notes", "waiting_for"):
+        elif key == "notes":
+            out[key] = richtext.clean(value)  # formatted text, like a note's
+        elif key == "waiting_for":
             out[key] = str(value or "")[:20000]
         elif key == "state":
             if value not in TASK_STATES:
@@ -1085,27 +1078,21 @@ def copy_occurrence(s, template, index, start, due, today):
     """A series' next copy, made from its newest one (so edits carry forward), with fresh
     checklists; returns its id."""
     conn = db.get_db()
-    cur = conn.execute(
-        "INSERT INTO tasks (user_id, project_id, area_id, title, notes, state, focus, "
-        "due_date, start_date, waiting_for, energy, minutes, priority, remind_before, people, "
-        "series_id, series_index, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (s["user_id"], template["project_id"], template["area_id"], template["title"],
-         UNCHECK_RE.sub(r"\1[ ]", template["notes"]),
-         "scheduled" if start and start > today else "next", template["focus"],
-         due, start, template["waiting_for"], template["energy"], template["minutes"],
-         template["priority"], template["remind_before"], template["people"], s["id"], index,
-         template["position"]))
-    conn.execute("INSERT INTO task_tags SELECT ?, tag_id FROM task_tags WHERE task_id = ?",
-                 (cur.lastrowid, template["id"]))
-    copy_links(template["id"], cur.lastrowid)
-    if remind := carried_reminder(template, start, due):
-        conn.execute("UPDATE tasks SET remind_at = ?, remind_plan = ? WHERE id = ?", (remind, remind, cur.lastrowid))
+    remind = carried_reminder(template, start, due)
+    new = db.insert(conn, "tasks", {
+        "user_id": s["user_id"], "project_id": template["project_id"], "area_id": template["area_id"],
+        "title": template["title"], "notes": richtext.uncheck(template["notes"]),
+        "state": "scheduled" if start and start > today else "next", "focus": template["focus"],
+        "due_date": due, "start_date": start, "waiting_for": template["waiting_for"], "energy": template["energy"],
+        "minutes": template["minutes"], "priority": template["priority"], "remind_before": template["remind_before"],
+        "people": template["people"], "series_id": s["id"], "series_index": index, "position": template["position"],
+        "remind_at": remind, "remind_plan": remind})
+    conn.execute("INSERT INTO document_tags SELECT ?, tag_id FROM document_tags WHERE document_id = ?",
+                 (new, template["id"]))
+    copy_links(template["id"], new)
     if s["carry_files"]:
-        # The same files (stored once) on the new copy too.
-        conn.execute("INSERT INTO attachments (user_id, task_id, name, mime, size, blob_id, "
-                     "created_at) SELECT user_id, ?, name, mime, size, blob_id, created_at "
-                     "FROM attachments WHERE task_id = ? ORDER BY id", (cur.lastrowid, template["id"]))
-    return cur.lastrowid
+        copy_files(template["id"], new)  # the same files (stored once) on the new copy too
+    return new
 
 
 def next_after_done(s, task, today):
@@ -1272,23 +1259,19 @@ def insert_task(data, today):
         raise ValueError("title is required")
     fields.setdefault("position", next_position("tasks"))
     fields["user_id"] = g.user["id"]
-    cols = ", ".join(fields)
     conn = db.get_db()
-    cur = conn.execute(f"INSERT INTO tasks ({cols}) VALUES ({', '.join('?' * len(fields))})",
-                       tuple(fields.values()))
+    task_id = db.insert(conn, "tasks", fields)
     if isinstance(data.get("tags"), list):
-        set_tags(cur.lastrowid, data["tags"])
-    if data.get("blocked_by") or data.get("blocked_by_projects"):
-        set_blockers("task", cur.lastrowid, data.get("blocked_by"), data.get("blocked_by_projects"))
-    if data.get("related") or data.get("related_projects"):
-        set_related("task", cur.lastrowid, data.get("related"), data.get("related_projects"))
+        set_tags(task_id, data["tags"])
+    set_blockers("task", task_id, given_ids(data, "blocked_by"))
+    set_related("task", task_id, given_ids(data, "related"))
     if repeat:
-        start_series(owned("tasks", cur.lastrowid), repeat,
+        start_series(owned("tasks", task_id), repeat,
                      on_miss or db.default_on_miss(repeat), today)
         if data.get("repeat_from") == "done":
-            set_repeat_from(cur.lastrowid, True, today)
+            set_repeat_from(task_id, True, today)
     conn.commit()
-    return cur.lastrowid
+    return task_id
 
 
 @app.patch("/api/tasks/<int:task_id>")
@@ -1316,22 +1299,12 @@ def duplicate_task(task_id):
                        (g.user["id"], t["position"])).fetchone()[0]
     cols = ["project_id", "area_id", "title", "notes", "state", "focus", "due_date", "start_date",
             "start_time", "waiting_for", "energy", "minutes", "priority", "people"]
-    cur = conn.execute(
-        f"INSERT INTO tasks (user_id, position, {', '.join(cols)}) VALUES (?, ?, {', '.join('?' * len(cols))})",
-        (g.user["id"], (t["position"] + nxt) / 2 if nxt is not None else t["position"] + 1,
-         *[t[c] for c in cols]))
-    new = cur.lastrowid
+    new = db.insert(conn, "tasks", {"user_id": g.user["id"], **{c: t[c] for c in cols},
+                                    "position": (t["position"] + nxt) / 2 if nxt is not None else t["position"] + 1})
     if t["completed_at"]:  # a copy of a done task starts again, open
         conn.execute("UPDATE tasks SET state = CASE WHEN state = 'scheduled' THEN 'next' ELSE state END "
                      "WHERE id = ?", (new,))
-    conn.execute("INSERT INTO task_tags SELECT ?, tag_id FROM task_tags WHERE task_id = ?", (new, task_id))
-    conn.execute("INSERT INTO task_deps SELECT ?, blocker_id FROM task_deps WHERE task_id = ?", (new, task_id))
-    conn.execute("INSERT INTO project_deps (task_id, blocker_project_id) SELECT ?, blocker_project_id "
-                 "FROM project_deps WHERE task_id = ?", (new, task_id))
-    copy_links(task_id, new)
-    conn.execute("INSERT INTO attachments (user_id, task_id, name, mime, size, blob_id, created_at) "
-                 "SELECT user_id, ?, name, mime, size, blob_id, created_at FROM attachments "
-                 "WHERE task_id = ? ORDER BY id", (new, task_id))
+    copy_shared(task_id, new)
     s = t["series_id"] and conn.execute("SELECT * FROM series WHERE id = ?", (t["series_id"],)).fetchone()
     if s and not t["completed_at"]:
         start_series(owned("tasks", new), s["repeat"], s["on_miss"], client_today())
@@ -1341,70 +1314,118 @@ def duplicate_task(task_id):
     return jsonify(tasks_json([owned("tasks", new)])[0]), 201
 
 
-# Notes lines like "[ ] buy paint" or "- [x] sand" (app.js's CHECK_RE).
-CHECK_LINE_RE = re.compile(r"^(\s*(?:[-*]\s*)?)\[([ xX])\]\s?(.*)$")
+@app.post("/api/documents/<int:doc_id>/convert")
+@login_required
+def convert_document(doc_id):
+    """Make a task, project or note into another kind: {"to": "task" | "project" | "note"}.
+    It stays the same document, so it keeps its id, title, text, area, tags, files and links
+    (and, between tasks and projects, what it's blocked by and what waits on it); what only
+    the old kind had goes. The reply is it, as the new kind."""
+    data = body()
+    to, kind = data.get("to"), kind_of(doc_id)
+    if not kind or not db.get_db().execute("SELECT 1 FROM documents WHERE id = ? AND user_id = ?",
+                                           (doc_id, g.user["id"])).fetchone():
+        abort(404)
+    if to not in db.KINDS or to == kind:
+        return bad("Convert it to a task, a project or a note.")
+    try:
+        if kind == "task" and to == "project":
+            task_to_project(owned("tasks", doc_id), bool(data.get("checklist")))
+        elif kind == "task":
+            t = owned("tasks", doc_id)
+            check_task_can_change(t, "a note")
+            note_from_task(t)
+        else:
+            from_kind = owned(db.KINDS[kind]["view"], doc_id)
+            if from_kind["deleted_at"]:
+                raise ValueError("Restore it from the trash first.")
+            if kind == "project":
+                if project_contents(doc_id):
+                    raise ValueError("Only an empty project can be changed: move its tasks and subprojects out first.")
+                if from_kind["state"] == "done":
+                    raise ValueError("Reopen the project first.")
+                held = from_kind["state"] if from_kind["state"] in ("someday", "later") else None
+                fields = {"area_id": from_kind["area_id"], "focus": from_kind["focus"], "due_date": from_kind["due_date"],
+                          "priority": from_kind["priority"]}
+                if to == "task":
+                    become(from_kind, "task", fields | {"state": held or "next", "project_id": from_kind["parent_id"],
+                                                        "position": next_position("tasks")})
+                else:
+                    become(from_kind, "note", {"area_id": from_kind["area_id"], "updated_at": utcnow()})
+            else:  # a note
+                title = from_kind["title"] or richtext.plain(from_kind["body"]).split("\n")[0][:500] or "Untitled"
+                if to == "task":
+                    become(from_kind, "task", {"title": title, "notes": from_kind["body"], "state": "inbox",
+                                               "position": next_position("tasks")})
+                else:
+                    become(from_kind, "project", {"name": title, "notes": from_kind["body"],
+                                                  "position": next_position("projects")})
+    except ValueError as e:
+        db.get_db().rollback()
+        return bad(str(e))
+    db.get_db().commit()
+    return jsonify(document_json(doc_id)), 201
+
+
+def check_task_can_change(t, into):
+    if t["deleted_at"] or t["completed_at"]:
+        raise ValueError(f"Only an open task can become {into}.")
+    if t["series_id"]:
+        raise ValueError(f"A repeating task can't become {into}. Stop it repeating first.")
 
 
 @app.post("/api/tasks/<int:task_id>/convert")
 @login_required
 def convert_task(task_id):
-    """Make a task into a project: {"checklist": true} also makes its notes' checklist lines
-    the project's tasks (ticked ones done). The project takes the task's name, notes, area,
-    due date, Focus, Someday or Later, tags and files; what it was blocked by, and what was
-    blocked by it, now wait on the project; its related tasks and projects are the project's.
-    Being in a project, it becomes related to that one. The task itself goes."""
-    t = owned("tasks", task_id)
-    if t["deleted_at"] or t["completed_at"]:
-        return bad("Only an open task can become a project.")
-    if t["series_id"]:
-        return bad("A repeating task can't become a project. Stop it repeating first.")
+    """Make a task into a project (what older apps call; /api/documents/<id>/convert does it
+    now): {"checklist": true} makes its checklist the project's tasks."""
+    try:
+        task_to_project(owned("tasks", task_id), bool(body().get("checklist")))
+    except ValueError as e:
+        db.get_db().rollback()
+        return bad(str(e))
+    db.get_db().commit()
+    return jsonify(project_dict(owned("projects", task_id))), 201
+
+
+def task_to_project(t, checklist):
+    """A task as a project (not committed): with checklist, its text's checklist items become
+    the project's tasks (ticked ones done). The project takes its name, notes, area, due date,
+    Focus, priority, and Someday or Later; in a project, it's a subproject of that one."""
+    check_task_can_change(t, "a project")
     conn = db.get_db()
-    data = body()
     notes, items = t["notes"], []
-    if data.get("checklist"):
-        kept = []
-        for line in t["notes"].split("\n"):
-            m = CHECK_LINE_RE.match(line)
-            if m and m[3].strip():
-                items.append((m[3].strip()[:500], m[2] != " "))
-            else:
-                kept.append(line)
-        notes = "\n".join(kept).strip("\n")
+    if checklist:
+        items, notes = richtext.take_checklists(t["notes"])
+        items = [(words[:500], done) for words, done in items]
     parent = t["project_id"] and owned("projects", t["project_id"])
     state = t["state"] if t["state"] in ("someday", "later") else "active"
-    cur = conn.execute(
-        "INSERT INTO projects (user_id, area_id, name, notes, state, focus, due_date, priority, position) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (g.user["id"], parent["area_id"] if parent else t["area_id"], t["title"], notes, state, t["focus"],
-         t["due_date"], t["priority"], next_position("projects")))
-    pid = cur.lastrowid
-    conn.execute("INSERT INTO project_tags SELECT ?, tag_id FROM task_tags WHERE task_id = ?", (pid, task_id))
-    conn.execute("UPDATE attachments SET task_id = NULL, project_id = ? WHERE task_id = ?", (pid, task_id))
-    conn.execute("UPDATE note_links SET task_id = NULL, project_id = ? WHERE task_id = ?", (pid, task_id))
-    # What it waited on, the project waits on; what waited on it, waits on the project.
-    conn.execute("INSERT INTO project_deps (project_id, blocker_task_id) "
-                 "SELECT ?, blocker_id FROM task_deps WHERE task_id = ?", (pid, task_id))
-    conn.execute("UPDATE project_deps SET task_id = NULL, project_id = ? WHERE task_id = ?", (pid, task_id))
-    conn.execute("INSERT INTO project_deps (task_id, blocker_project_id) "
-                 "SELECT task_id, ? FROM task_deps WHERE blocker_id = ?", (pid, task_id))
-    conn.execute("UPDATE project_deps SET blocker_task_id = NULL, blocker_project_id = ? "
-                 "WHERE blocker_task_id = ?", (pid, task_id))
-    # Its related tasks and projects (and the project it was in) are the project's.
-    conn.execute("INSERT INTO project_links (project_id, task_id) SELECT ?, CASE WHEN a = ? THEN b ELSE a END "
-                 "FROM task_links WHERE a = ? OR b = ?", (pid, task_id, task_id, task_id))
-    others = {r[0] for r in conn.execute("SELECT project_id FROM project_links WHERE task_id = ?", (task_id,))}
-    if parent:
-        others.add(parent["id"])
-    conn.executemany("INSERT INTO project_links (project_id, other_id) VALUES (?, ?)",
-                     [(min(pid, o), max(pid, o)) for o in others])
+    become(t, "project", {"notes": notes, "area_id": parent["area_id"] if parent else t["area_id"],
+                          "state": state, "focus": t["focus"], "due_date": t["due_date"], "parent_id": t["project_id"],
+                          "priority": t["priority"], "position": next_position("projects")})
     first = next_position("tasks")
     for i, (title, done) in enumerate(items):
-        conn.execute("INSERT INTO tasks (user_id, project_id, title, state, position, completed_at) "
-                     "VALUES (?, ?, ?, 'next', ?, ?)",
-                     (g.user["id"], pid, title, first + i, utcnow() if done else None))
-    conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-    conn.commit()
-    return jsonify(project_dict(owned("projects", pid))), 201
+        db.insert(conn, "tasks", {"user_id": g.user["id"], "project_id": t["id"], "title": title, "state": "next",
+                                  "position": first + i, "completed_at": utcnow() if done else None})
+
+
+def become(row, kind, fields):
+    """Make a task, project or note (row, from its view) into another kind (not committed):
+    the same document, with kind's own row in place of the old one. fields: the new kind's
+    view columns (the document's, like notes or title, may be among them)."""
+    conn = db.get_db()
+    old = kind_of(row["id"])
+    if old == "task" and row["gcal_event_id"]:  # its calendar event goes, as for a deleted task
+        conn.execute("INSERT INTO gcal_deletions (user_id, event_id) VALUES (?, ?)", (row["user_id"], row["gcal_event_id"]))
+    if "note" in (old, kind):  # (only tasks and projects wait, or are waited on)
+        conn.execute("DELETE FROM document_deps WHERE document_id = ? OR blocker_id = ?", (row["id"], row["id"]))
+    conn.execute(f"DELETE FROM {db.KINDS[old]['table']} WHERE id = ?", (row["id"],))
+    k = db.KINDS[kind]
+    own = {"id": row["id"]} | {c: v for c, v in fields.items() if c in dict(k["columns"])}
+    conn.execute(f"INSERT INTO {k['table']} ({', '.join(own)}) VALUES ({', '.join('?' * len(own))})", tuple(own.values()))
+    shared = {k["document"][c]: v for c, v in fields.items() if c in k["document"]}
+    conn.execute(f"UPDATE documents SET kind = ?{''.join(f', {c} = ?' for c in shared)} WHERE id = ?",
+                 (kind, *shared.values(), row["id"]))
 
 
 @app.post("/api/tasks/bulk")
@@ -1470,10 +1491,10 @@ def apply_task_update(task, data, today):
     if on_miss:
         conn.execute("UPDATE series SET on_miss = ? WHERE id = "
                      "(SELECT series_id FROM tasks WHERE id = ?)", (on_miss, task_id))
-    if "blocked_by" in data or "blocked_by_projects" in data:
-        set_blockers("task", task_id, data.get("blocked_by"), data.get("blocked_by_projects"))
-    if "related" in data or "related_projects" in data:
-        set_related("task", task_id, data.get("related"), data.get("related_projects"))
+    set_blockers("task", task_id, given_ids(data, "blocked_by"))
+    set_related("task", task_id, given_ids(data, "related"))
+    if "project_id" in fields:
+        check_no_loops(task_id)
     if data.get("repeat_from") in ("done", "calendar"):
         set_repeat_from(task_id, data["repeat_from"] == "done", today)
     task = owned("tasks", task_id)
@@ -1534,7 +1555,7 @@ def clean_template(data):
         raise ValueError("a template can have up to 300 tasks")
     area = p.get("area_id")
     out = {"project": {"name": str(p.get("name") or "").strip()[:500] or "Project",
-                       "notes": str(p.get("notes") or "")[:20000],
+                       "notes": richtext.clean(p.get("notes")),
                        "area_id": int(area) if area not in (None, "") else None,
                        "sequential": bool(p.get("sequential")),
                        "due": clean_offset(p.get("due"))},
@@ -1546,7 +1567,7 @@ def clean_template(data):
         state = t.get("state") if t.get("state") in TEMPLATE_STATES else "next"
         after = [int(i) for i in (t.get("after") or []) if str(i).isdigit()]
         out["tasks"].append({
-            "title": title, "notes": str(t.get("notes") or "")[:20000], "state": state,
+            "title": title, "notes": richtext.clean(t.get("notes")), "state": state,
             "focus": bool(t.get("focus")), "priority": max(-PRIORITY_MAX, min(PRIORITY_MAX, int(t.get("priority") or 0))),
             "tags": [str(x)[:100] for x in (t.get("tags") or []) if str(x).strip()][:30],
             "minutes": int(t["minutes"]) if t.get("minutes") not in (None, "") else None,
@@ -1588,7 +1609,7 @@ def template_from_project(project_id):
     return clean_template({
         "project": {"name": p["name"], "notes": p["notes"], "area_id": p["area_id"],
                     "sequential": p["sequential"], "due": days(p["due_date"])},
-        "tasks": [{"title": t["title"], "notes": UNCHECK_RE.sub(r"\1[ ]", t["notes"]),
+        "tasks": [{"title": t["title"], "notes": richtext.uncheck(t["notes"]),
                    "state": "next" if t["state"] in ("inbox", "scheduled") else t["state"],
                    "focus": t["focus"], "priority": t["priority"], "tags": t["tags"],
                    "minutes": t["minutes"], "energy": t["energy"],
@@ -1613,11 +1634,10 @@ def make_project(tpl, anchor, name, today):
         if anchor and off is not None else None  # noqa: E731
     area = p["area_id"] if p["area_id"] and conn.execute(
         "SELECT 1 FROM areas WHERE id = ? AND user_id = ?", (p["area_id"], g.user["id"])).fetchone() else None
-    cur = conn.execute("INSERT INTO projects (user_id, name, notes, area_id, sequential, due_date, "
-                       "template_id, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                       (g.user["id"], name[:500], p["notes"], area, int(p["sequential"]),
-                        on(p["due"]), tpl["id"], next_position("projects")))
-    project_id = cur.lastrowid
+    project_id = db.insert(conn, "projects", {
+        "user_id": g.user["id"], "name": name[:500], "notes": p["notes"], "area_id": area,
+        "sequential": int(p["sequential"]), "due_date": on(p["due"]), "template_id": tpl["id"],
+        "position": next_position("projects")})
     ids = []
     for t in data["tasks"]:
         start = on(t["start"])
@@ -1781,11 +1801,12 @@ def attachment_data(file_id):
 def storage():
     """How much of the attachment allowance is used, and the biggest files."""
     largest = db.get_db().execute(
-        "SELECT a.id, a.name, a.size, a.task_id, a.project_id, a.note_id, "
-        "COALESCE(t.title, p.name, NULLIF(n.title, ''), 'Untitled note') AS title, "
-        "COALESCE(t.completed_at, p.completed_at) AS completed_at, COALESCE(t.deleted_at, p.deleted_at, n.deleted_at) AS deleted_at "
-        "FROM attachments a LEFT JOIN tasks t ON t.id = a.task_id LEFT JOIN projects p ON p.id = a.project_id "
-        "LEFT JOIN notes n ON n.id = a.note_id "
+        "SELECT a.id, a.name, a.size, CASE d.kind WHEN 'task' THEN d.id END AS task_id, "
+        "CASE d.kind WHEN 'project' THEN d.id END AS project_id, CASE d.kind WHEN 'note' THEN d.id END AS note_id, "
+        "COALESCE(NULLIF(d.title, ''), 'Untitled note') AS title, "
+        "COALESCE(t.completed_at, p.completed_at) AS completed_at, d.deleted_at "
+        "FROM attachments a JOIN documents d ON d.id = a.document_id LEFT JOIN task_data t ON t.id = d.id "
+        "LEFT JOIN project_data p ON p.id = d.id "
         "WHERE a.user_id = ? "
         "GROUP BY a.blob_id ORDER BY a.size DESC, a.id LIMIT 8", (g.user["id"],)).fetchall()
     return jsonify(used=storage_used(g.user["id"]), limit=USER_FILES_MAX,
@@ -1796,15 +1817,7 @@ def storage():
 @login_required
 def add_attachments(task_id):
     owned("tasks", task_id)
-    files = request.files.getlist("file")
-    if not files:
-        return bad("Choose a file.")
-    try:
-        save_files(task_id, files)
-    except ValueError as e:
-        return bad(str(e))
-    db.get_db().commit()
-    return jsonify(tasks_json([owned("tasks", task_id)])[0]), 201
+    return attach(task_id, "task")
 
 
 @app.post("/api/projects/<int:project_id>/attachments")
@@ -1812,19 +1825,37 @@ def add_attachments(task_id):
 def add_project_attachments(project_id):
     """Files on a project, which go with all of its tasks."""
     owned("projects", project_id)
+    return attach(project_id, "project")
+
+
+@app.post("/api/notes/<int:note_id>/attachments")
+@login_required
+def add_note_attachments(note_id):
+    owned("notes", note_id)
+    return attach(note_id, "note")
+
+
+def attach(doc_id, kind):
+    """The uploaded files on a task, project or note. The reply is it, with "added": the new
+    files' ids (pictures to place in its text)."""
     files = request.files.getlist("file")
     if not files:
         return bad("Choose a file.")
+    conn = db.get_db()
+    before = conn.execute("SELECT COALESCE(MAX(id), 0) FROM attachments").fetchone()[0]
     try:
-        save_files(project_id, files, "project")
+        save_files(doc_id, files, kind)
     except ValueError as e:
+        conn.rollback()
         return bad(str(e))
-    db.get_db().commit()
-    return jsonify(project_dict(owned("projects", project_id))), 201
+    added = [r[0] for r in conn.execute("SELECT id FROM attachments WHERE document_id = ? AND id > ? ORDER BY id",
+                                        (doc_id, before))]
+    conn.commit()
+    return jsonify(document_json(doc_id) | {"added": added}), 201
 
 
 def save_files(item_id, files, kind="task"):
-    """Attach uploaded files to one of g.user's tasks, or (kind="project") projects (not
+    """Attach uploaded files to one of g.user's tasks, projects or notes (kind; not
     committed). ValueError if one is too big, or they'd take the user over their allowance."""
     conn = db.get_db()
     used = storage_used(g.user["id"])
@@ -1837,11 +1868,11 @@ def save_files(item_id, files, kind="task"):
         if used > USER_FILES_MAX:
             raise ValueError("That would take your attachments over 1 GB. Delete some first.")
         mime = (mimetypes.guess_type(name)[0] or f.mimetype or "application/octet-stream")[:100]
-        conn.execute(f"INSERT INTO attachments (user_id, {kind}_id, name, mime, size, blob_id) "
+        conn.execute("INSERT INTO attachments (user_id, document_id, name, mime, size, blob_id) "
                      "VALUES (?, ?, ?, ?, ?, ?)",
                      (g.user["id"], item_id, name[:200], mime, len(data), db.put_blob(conn, data)))
     if kind in ("task", "note"):
-        conn.execute(f"UPDATE {kind}s SET updated_at = datetime('now') WHERE id = ?", (item_id,))
+        conn.execute("UPDATE documents SET updated_at = datetime('now') WHERE id = ?", (item_id,))
 
 
 @app.route("/share", methods=["GET", "POST"])
@@ -1879,7 +1910,7 @@ def share():
     where = user_settings(g.user)["share_to"]
     try:
         if where in ("inbox", "ask"):
-            task_id = insert_task({"title": name[:500], "notes": notes, "state": "inbox"}, client_today())
+            task_id = insert_task({"title": name[:500], "notes": richtext.from_text(notes), "state": "inbox"}, client_today())
             if files:
                 save_files(task_id, files)
         else:
@@ -1913,14 +1944,13 @@ def share_to_note(where, title, text, link, files):
         elif title:
             words = f"<p><b>{html.escape(title, quote=False)}</b></p>" + words
     else:
-        note_id = conn.execute("INSERT INTO notes (user_id, title) VALUES (?, ?)",
-                               (g.user["id"], title[:500])).lastrowid
+        note_id = db.insert(conn, "notes", {"user_id": g.user["id"], "title": title[:500]})
     conn.execute("UPDATE notes SET body = body || ?, updated_at = datetime('now') WHERE id = ?", (words, note_id))
     if files:
         before = conn.execute("SELECT COALESCE(MAX(id), 0) FROM attachments").fetchone()[0]
         save_files(note_id, files, "note")
         place_pictures(note_id, {r[0] for r in conn.execute(
-            "SELECT id FROM attachments WHERE note_id = ? AND id > ?", (note_id, before))})
+            "SELECT id FROM attachments WHERE document_id = ? AND id > ?", (note_id, before))})
     return note_id
 
 
@@ -2066,7 +2096,7 @@ def app_add():
     notes = "\n\n".join(n for n in (notes.strip(), str(data.get("notes") or "").strip()) if n)
     task = read_quick_add(first.strip(), str(data.get("lang", ""))[:20],
                           str(data.get("now") or request.args.get("now", ""))) or {"title": first.strip()}
-    task |= {"title": task["title"][:500], "notes": notes[:20000]}
+    task |= {"title": task["title"][:500], "notes": richtext.from_text(notes[:20000])}
     task.setdefault("state", "inbox")
     try:
         task_id = insert_task(dict(task), client_today())
@@ -2248,16 +2278,28 @@ def match_task(uid, text, today):
 
 def list_tasks(name, tasks, projects, today):
     """A list's tasks, as the browser's viewTasks (app.js) works them out."""
+    def chain(project_id):  # the task's project and those it's part of, outward
+        out = []
+        while project_id in projects and project_id not in out:
+            out.append(project_id)
+            project_id = projects[project_id]["parent_id"]
+        return out
     def active(t):
-        p = projects.get(t["project_id"])
-        return not p or p["state"] == "active"
-    # Blocked: waiting on an open task or project (or in a project that is), or not the first
-    # Next action of a sequential project.
+        return all(projects[p]["state"] == "active" for p in chain(t["project_id"]))
+    # Blocked: waiting on an open task or project (or in a project that is, at any level), in a
+    # subproject waiting its turn in a sequential project, or not the first Next action of a
+    # sequential project. (app.js's sequentialBlocked agrees.)
     open_ids = {t["id"] for t in tasks}
     open_projects = {i for i, p in projects.items() if p["state"] != "done"}
-    waits = lambda x: (any(b in open_ids for b in x["blocked_by"])  # noqa: E731
-                       or any(b in open_projects for b in x["blocked_by_projects"]))
-    blocked = {t["id"] for t in tasks if waits(t) or (t["project_id"] in projects and waits(projects[t["project_id"]]))}
+    waits = lambda x: any(b in open_ids or b in open_projects for b in x["blocked_by"])  # noqa: E731
+    held = set()
+    for p in projects.values():
+        if p["sequential"]:
+            subs = sorted((q for q in projects.values() if q["parent_id"] == p["id"] and q["state"] == "active"),
+                          key=lambda q: (-q["priority"], q["position"], q["id"]))
+            held |= {q["id"] for q in subs[1:]}
+    blocked = {t["id"] for t in tasks
+               if waits(t) or any(waits(projects[p]) or p in held for p in chain(t["project_id"]))}
     seen = set()
     for t in tasks:
         p = projects.get(t["project_id"])
@@ -2331,11 +2373,7 @@ def delete_attachment(file_id):
     conn = db.get_db()
     conn.execute("DELETE FROM attachments WHERE id = ?", (file_id,))
     conn.commit()
-    if row["project_id"]:
-        return jsonify(project_dict(owned("projects", row["project_id"])))
-    if row["note_id"]:
-        return jsonify(note_dict(row["note_id"]))
-    return jsonify(tasks_json([owned("tasks", row["task_id"])])[0])
+    return jsonify(document_json(row["document_id"]))
 
 
 @app.errorhandler(413)
@@ -2402,38 +2440,21 @@ def trash():
 NOTE_COLORS = {"", "red", "orange", "yellow", "green", "teal", "blue", "navy", "purple", "pink", "brown", "gray"}
 # Changes that make a note "edited" (pinning or trashing it doesn't).
 NOTE_EDITS = ("title", "body", "font", "category_id", "area_id", "journal_id", "entry_date",
-              "tags", "related", "related_projects")
+              "tags", "related", "related_projects")  # (related_projects: from older apps)
 
 
 def notes_json(rows):
     """Notes as the API sends them: with their tags, files, and the tasks and projects they're
-    linked to (related, related_projects; shaped like a task's)."""
+    linked to (related, shaped like a task's)."""
     ids = [r["id"] for r in rows]
-    tags, tasks, projects = {}, {}, {}
-    if ids:
-        conn = db.get_db()
-        marks = ",".join("?" * len(ids))
-        for r in conn.execute(f"SELECT nt.note_id, t.name FROM note_tags nt JOIN tags t ON t.id = nt.tag_id "
-                              f"WHERE nt.note_id IN ({marks}) ORDER BY t.name", ids):
-            tags.setdefault(r["note_id"], []).append(r["name"])
-        for r in conn.execute(f"SELECT l.note_id, t.id, t.title, t.completed_at, t.deleted_at FROM note_links l "
-                              f"JOIN tasks t ON t.id = l.task_id WHERE l.note_id IN ({marks}) "
-                              "ORDER BY t.title COLLATE NOCASE", ids):
-            tasks.setdefault(r["note_id"], []).append({"id": r["id"], "title": r["title"], "done": bool(r["completed_at"]),
-                                                       "trashed": bool(r["deleted_at"])})
-        for r in conn.execute(f"SELECT l.note_id, p.id, p.name, p.state, p.deleted_at FROM note_links l "
-                              f"JOIN projects p ON p.id = l.project_id WHERE l.note_id IN ({marks}) "
-                              "ORDER BY p.name COLLATE NOCASE", ids):
-            projects.setdefault(r["note_id"], []).append({"id": r["id"], "name": r["name"], "done": r["state"] == "done",
-                                                          "trashed": bool(r["deleted_at"])})
-    files = attachments_for(ids, "note_id")
+    tags, files, links = tags_for(ids), attachments_for(ids), links_for(ids)
     out = []
     for row in rows:
         d = dict(row)
         del d["user_id"]
         d["pinned"] = bool(d["pinned"])
         d |= {"tags": tags.get(d["id"], []), "attachments": files.get(d["id"], []),
-              "related": tasks.get(d["id"], []), "related_projects": projects.get(d["id"], [])}
+              "related": links.get(d["id"], [])}
         out.append(d)
     return out
 
@@ -2469,22 +2490,6 @@ def note_fields(data):
     return out
 
 
-def set_note_links(note_id, tasks=None, projects=None):
-    """Replace the tasks and projects (lists of ids; None leaves them) a note is linked to."""
-    conn = db.get_db()
-    for what, ids in (("task", tasks), ("project", projects)):
-        if ids is None:
-            continue
-        if not isinstance(ids, list) or len(ids) > 50:
-            raise ValueError(f"related must be a list of {what} ids")
-        conn.execute(f"DELETE FROM note_links WHERE note_id = ? AND {what}_id IS NOT NULL", (note_id,))
-        for other in dict.fromkeys(int(i) for i in ids):
-            if not conn.execute(f"SELECT 1 FROM {what}s WHERE id = ? AND user_id = ?",
-                                (other, g.user["id"])).fetchone():
-                raise ValueError(f"No such {what} to link it to.")
-            conn.execute(f"INSERT INTO note_links (note_id, {what}_id) VALUES (?, ?)", (note_id, other))
-
-
 def write_note(data, note=None, today=None):
     """Create a note for g.user from API-style data (note=None), or change note (a row);
     returns its id. Not committed."""
@@ -2503,9 +2508,7 @@ def write_note(data, note=None, today=None):
         made = str(data.get("created_at") or "")
         if STAMP_RE.match(made) and made.replace("T", " ") <= utcnow():
             fields["created_at"] = fields["updated_at"] = made.replace("T", " ")[:19]
-        cur = conn.execute(f"INSERT INTO notes ({', '.join(fields)}) VALUES ({', '.join('?' * len(fields))})",
-                           tuple(fields.values()))
-        note_id = cur.lastrowid
+        note_id = db.insert(conn, "notes", fields)
     else:
         note_id = note["id"]
         if any(k in data for k in NOTE_EDITS):
@@ -2514,9 +2517,8 @@ def write_note(data, note=None, today=None):
             conn.execute(f"UPDATE notes SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
                          (*fields.values(), note_id))
     if isinstance(data.get("tags"), list):
-        set_tags(note_id, data["tags"], "note")
-    if "related" in data or "related_projects" in data:
-        set_note_links(note_id, data.get("related"), data.get("related_projects"))
+        set_tags(note_id, data["tags"])
+    set_related("note", note_id, given_ids(data, "related"))
     return note_id
 
 
@@ -2553,28 +2555,6 @@ def purge_note(note_id):
     conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
     conn.commit()
     return "", 204
-
-
-@app.post("/api/notes/<int:note_id>/attachments")
-@login_required
-def add_note_attachments(note_id):
-    """Files on a note. The reply is the note, with "added": the new files' ids (pictures to
-    place in its text)."""
-    owned("notes", note_id)
-    files = request.files.getlist("file")
-    if not files:
-        return bad("Choose a file.")
-    conn = db.get_db()
-    before = conn.execute("SELECT COALESCE(MAX(id), 0) FROM attachments").fetchone()[0]
-    try:
-        save_files(note_id, files, "note")
-    except ValueError as e:
-        conn.rollback()
-        return bad(str(e))
-    added = [r[0] for r in conn.execute("SELECT id FROM attachments WHERE note_id = ? AND id > ? ORDER BY id",
-                                        (note_id, before))]
-    conn.commit()
-    return jsonify(note_dict(note_id) | {"added": added}), 201
 
 
 def category_fields(data, table):
@@ -2643,15 +2623,17 @@ named_list_routes("journals", "journals")
 
 def note_from_task(t, journal_id=None, today=None):
     """Task t as a note: its title, notes (as text), area, tags, files (pictures placed at the
-    end of the text) and links. With journal_id, it's added to the end of today's entry in that
-    journal instead (made if need be). Returns the note's id; not committed."""
+    end of the text) and links, as the same document. With journal_id, it's added to the end
+    of today's entry in that journal instead (made if need be), and the task goes. Returns the
+    note's id; not committed."""
     conn = db.get_db()
     project = t["project_id"] and owned("projects", t["project_id"])
     area = project["area_id"] if project else t["area_id"]
     # Something shared with no words is named after its file (app.py's share): no title for that.
     title = "" if t["title"] == "Shared" or conn.execute(
-        "SELECT 1 FROM attachments WHERE task_id = ? AND name = ?", (t["id"], t["title"])).fetchone() else t["title"]
-    words = richtext.from_text(t["notes"])
+        "SELECT 1 FROM attachments WHERE document_id = ? AND name = ?", (t["id"], t["title"])).fetchone() else t["title"]
+    words = t["notes"]  # (formatted text already, as a note's is)
+    files = {r[0] for r in conn.execute("SELECT id FROM attachments WHERE document_id = ?", (t["id"],))}
     if journal_id:
         note_id = journal_entry_today(journal_id, today or client_today())
         if title and not conn.execute("SELECT title FROM notes WHERE id = ?", (note_id,)).fetchone()[0]:
@@ -2660,27 +2642,24 @@ def note_from_task(t, journal_id=None, today=None):
             words = f"<p><b>{html.escape(title, quote=False)}</b></p>" + words
         conn.execute("UPDATE notes SET body = body || ?, area_id = COALESCE(area_id, ?), updated_at = datetime('now') "
                      "WHERE id = ?", (words, area, note_id))
+        conn.execute("INSERT OR IGNORE INTO document_tags SELECT ?, tag_id FROM document_tags WHERE document_id = ?",
+                     (note_id, t["id"]))
+        conn.execute("UPDATE attachments SET document_id = ? WHERE document_id = ?", (note_id, t["id"]))
+        copy_links(t["id"], note_id)
+        conn.execute("DELETE FROM tasks WHERE id = ?", (t["id"],))
     else:
-        note_id = conn.execute("INSERT INTO notes (user_id, title, body, area_id) VALUES (?, ?, ?, ?)",
-                               (g.user["id"], title, words, area)).lastrowid
-    conn.execute("INSERT OR IGNORE INTO note_tags SELECT ?, tag_id FROM task_tags WHERE task_id = ?", (note_id, t["id"]))
-    new_files = [r[0] for r in conn.execute("SELECT id FROM attachments WHERE task_id = ?", (t["id"],))]
-    conn.execute("UPDATE attachments SET task_id = NULL, note_id = ? WHERE task_id = ?", (note_id, t["id"]))
-    place_pictures(note_id, set(new_files))
-    # Linked to what it was related to, and to its project.
-    conn.execute("INSERT INTO note_links (note_id, task_id) SELECT ?, CASE WHEN a = ? THEN b ELSE a END "
-                 "FROM task_links WHERE a = ? OR b = ?", (note_id, t["id"], t["id"], t["id"]))
-    projects = {r[0] for r in conn.execute("SELECT project_id FROM project_links WHERE task_id = ?", (t["id"],))}
-    if project:
-        projects.add(project["id"])
-    conn.executemany("INSERT INTO note_links (note_id, project_id) VALUES (?, ?)", [(note_id, p) for p in projects])
+        note_id = t["id"]
+        become(t, "note", {"title": title, "body": words, "area_id": area, "updated_at": utcnow()})
+    place_pictures(note_id, files)
+    if project:  # linked to its project
+        link(note_id, project["id"])
     return note_id
 
 
 def place_pictures(note_id, ids=None):
     """Put a note's pictures (those with ids, else all of them) at the end of its text."""
     conn = db.get_db()
-    pics = conn.execute("SELECT id, mime FROM attachments WHERE note_id = ? ORDER BY id", (note_id,)).fetchall()
+    pics = conn.execute("SELECT id, mime FROM attachments WHERE document_id = ? ORDER BY id", (note_id,)).fetchall()
     add = "".join(richtext.image(p["id"]) for p in pics
                   if p["mime"] in IMAGE_TYPES and (ids is None or p["id"] in ids))
     if add:
@@ -2700,9 +2679,7 @@ def task_to_note(task_id):
     if t["series_id"]:
         return bad("A repeating task can't become a note. Stop it repeating first.")
     note_id = note_from_task(t, journal["id"] if journal else None)
-    conn = db.get_db()
-    conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-    conn.commit()
+    db.get_db().commit()
     return jsonify(note_dict(note_id)), 201
 
 
@@ -2713,8 +2690,7 @@ def journal_entry_today(journal_id, today):
                        "ORDER BY id DESC LIMIT 1", (journal_id, today)).fetchone()
     if row:
         return row["id"]
-    return conn.execute("INSERT INTO notes (user_id, journal_id, entry_date) VALUES (?, ?, ?)",
-                        (g.user["id"], journal_id, today)).lastrowid
+    return db.insert(conn, "notes", {"user_id": g.user["id"], "journal_id": journal_id, "entry_date": today})
 
 
 # --- links -----------------------------------------------------------------
@@ -2856,7 +2832,7 @@ def project_fields(data):
                 raise ValueError("name is required")
             out[key] = value[:500]
         elif key == "notes":
-            out[key] = str(value or "")[:20000]
+            out[key] = richtext.clean(value)
         elif key in ("sequential", "focus"):
             out[key] = 1 if value else 0
         elif key == "priority":
@@ -2874,10 +2850,41 @@ def project_fields(data):
             out[key] = clean_date(value)
         elif key == "area_id":
             out[key] = check_ref("areas", value)
+        elif key == "parent_id":
+            out[key] = check_ref("projects", value)
         elif key == "deleted":
             out["deleted_at"] = (time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
                                  if value else None)
     return out
+
+
+def check_no_loops(doc_id):
+    """ValueError if a task or project (as it is now, before committing), or anything it's in
+    or holds, would have to be finished before it can be: a wait that could never end. (A
+    project can't be done before what's in it, which can't start before what the project and
+    those it's in are blocked by.)"""
+    conn = db.get_db()
+    if kind_of(doc_id) == "project":
+        row = conn.execute("SELECT parent_id FROM project_data WHERE id = ?", (doc_id,)).fetchone()
+        mine = {doc_id} | project_contents(doc_id)
+    else:
+        row = conn.execute("SELECT project_id FROM task_data WHERE id = ?", (doc_id,)).fetchone()
+        mine = {doc_id}
+    for node in mine | set(project_chain(row and row[0])):
+        seen, pending = set(), list(waits_on(node))
+        while pending:
+            x = pending.pop()
+            if x == node:
+                raise ValueError("That would make them wait on each other in a loop, so neither could finish.")
+            if x not in seen:
+                seen.add(x)
+                pending += waits_on(x)
+
+
+def check_parent(project_id, parent_id):
+    """ValueError if a project can't be part of parent_id: itself, or something in it."""
+    if parent_id and (parent_id == project_id or parent_id in project_contents(project_id)):
+        raise ValueError("A project can't be part of itself, or of one of its own subprojects.")
 
 
 @app.post("/api/projects")
@@ -2892,26 +2899,22 @@ def create_project():
     fields.setdefault("position", next_position("projects"))
     fields["user_id"] = g.user["id"]
     conn = db.get_db()
-    cur = conn.execute(
-        f"INSERT INTO projects ({', '.join(fields)}) VALUES ({', '.join('?' * len(fields))})",
-        tuple(fields.values()))
+    project_id = db.insert(conn, "projects", fields)
     try:
-        project_links_and_tags(cur.lastrowid, body())
+        project_links_and_tags(project_id, body())
     except (ValueError, TypeError) as e:
         conn.rollback()
         return bad(str(e))
     conn.commit()
-    return jsonify(project_dict(owned("projects", cur.lastrowid))), 201
+    return jsonify(project_dict(owned("projects", project_id))), 201
 
 
 def project_links_and_tags(project_id, data):
     """A project's tags, what it's blocked by and what it's related to, from API-style data."""
     if isinstance(data.get("tags"), list):
-        set_tags(project_id, data["tags"], "project")
-    if "blocked_by" in data or "blocked_by_projects" in data:
-        set_blockers("project", project_id, data.get("blocked_by"), data.get("blocked_by_projects"))
-    if "related" in data or "related_projects" in data:
-        set_related("project", project_id, data.get("related"), data.get("related_projects"))
+        set_tags(project_id, data["tags"])
+    set_blockers("project", project_id, given_ids(data, "blocked_by"))
+    set_related("project", project_id, given_ids(data, "related"))
 
 
 @app.patch("/api/projects/<int:project_id>")
@@ -2922,10 +2925,13 @@ def update_project(project_id):
     try:
         data = body()
         fields = project_fields(data)
+        check_parent(project_id, fields.get("parent_id"))
         if fields:
             sets = ", ".join(f"{k} = ?" for k in fields)
             conn.execute(f"UPDATE projects SET {sets} WHERE id = ?", (*fields.values(), project_id))
         project_links_and_tags(project_id, data)
+        if "parent_id" in fields:
+            check_no_loops(project_id)
     except (ValueError, TypeError) as e:
         conn.rollback()
         return bad(str(e))
@@ -3069,11 +3075,7 @@ def rename_tag(tag_id):
                             (g.user["id"], name, tag_id)).fetchone()
     if existing:
         # Renaming onto an existing tag merges the two.
-        conn.execute("INSERT OR IGNORE INTO task_tags SELECT task_id, ? FROM task_tags "
-                     "WHERE tag_id = ?", (existing["id"], tag_id))
-        conn.execute("INSERT OR IGNORE INTO project_tags SELECT project_id, ? FROM project_tags "
-                     "WHERE tag_id = ?", (existing["id"], tag_id))
-        conn.execute("INSERT OR IGNORE INTO note_tags SELECT note_id, ? FROM note_tags "
+        conn.execute("INSERT OR IGNORE INTO document_tags SELECT document_id, ? FROM document_tags "
                      "WHERE tag_id = ?", (existing["id"], tag_id))
         conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
     else:
@@ -3296,7 +3298,7 @@ def export_data():
                         "yes" if t["focus"] else "", t["priority"], p["name"] if p else "",
                         area["name"] if area else "", ", ".join(t["tags"]), t["start_date"] or "",
                         t["start_time"] or "", t["due_date"] or "", t["repeat"] or "",
-                        t["waiting_for"], t["notes"], ", ".join(f["file"] for f in t["attachments"]),
+                        t["waiting_for"], richtext.plain(t["notes"]), ", ".join(f["file"] for f in t["attachments"]),
                         t["created_at"], t["completed_at"] or "", t["deleted_at"] or ""])
         z.writestr("tasks.csv", "\ufeff" + out.getvalue())  # the mark tells Excel it's UTF-8
         z.writestr("README.txt", f"""Your {APP_NAME} data, exported {stamp}.
@@ -3468,8 +3470,8 @@ def task_message(t, title_prefix=""):
     bits = []
     if t["due_date"]:
         bits.append("Due " + t["due_date"])
-    if t["notes"]:
-        bits.append(t["notes"].strip().split("\n")[0][:120])
+    if words := richtext.plain(t["notes"]):
+        bits.append(words.split("\n")[0][:120])
     return {"title": title_prefix + t["title"], "body": " · ".join(bits), "tag": f"task-{t['id']}",
             "task": t["id"], "snooze": True}
 
@@ -3984,10 +3986,10 @@ def _apply_event(uid, event, token, cal, owned, tz, today):
             return  # the calendar's own events (e.g. the family's) aren't tasks
         # An event added to the app's own calendar in Google becomes a task.
         title, notes = gcal.event_title(event, "start"), gcal.event_notes(event)
-        task_id = insert_task({"title": title, "notes": notes, "start_date": day,
+        task_id = insert_task({"title": title, "notes": richtext.from_text(notes), "start_date": day,
                                "start_time": hhmm,
                                "state": "scheduled" if day > today else "next"}, today)
-        pushed = {"kind": "start", "title": title, "date": day, "time": hhmm, "notes": notes}
+        pushed = {"kind": "start", "title": title, "date": day, "time": hhmm, "notes": richtext.plain(richtext.from_text(notes))}
         conn.execute("UPDATE tasks SET gcal_event_id = ?, gcal_pushed = ? WHERE id = ?",
                      (event["id"], json.dumps(pushed), task_id))
         conn.commit()

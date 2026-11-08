@@ -14,6 +14,8 @@ import urllib.request
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import richtext
+
 CLIENT_ID = os.environ.get("ENTROPICIDE_GOOGLE_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("ENTROPICIDE_GOOGLE_CLIENT_SECRET", "")
 AUTH_URL = os.environ.get("ENTROPICIDE_GOOGLE_AUTH_URL", "https://accounts.google.com/o/oauth2/v2/auth")
@@ -199,7 +201,7 @@ def snapshot(task):
     else:
         return None
     return {"kind": kind, "title": task["title"], "date": day, "time": hhmm,
-            "notes": task["notes"]}
+            "notes": richtext.plain(task["notes"])}  # (the event's description is plain text)
 
 
 def event_body(snap, task_id, tz, link, patch=False):

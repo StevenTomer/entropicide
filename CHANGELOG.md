@@ -38,6 +38,23 @@ Settings → Troubleshooting.
 - **Editing pictures in notes:** click a picture to crop it (drag a box over the part to keep),
   turn it, fade it with the ◐ slider, or put it **behind the text**. The original is kept, so a
   crop can be changed or undone later (*Original*).
+- **Formatted notes on tasks and projects,** in the same editor as notes: bold, italic, headings,
+  lists, links, and pictures placed in the text (cropped, turned, faded, behind the words), instead
+  of typing Markdown. Notes written before are converted as they were shown.
+- **Real checklists:** the ☐ button makes one, in a task, project or note; tick items in the
+  details, on a task's row, in Focus mode, or on a note's card.
+- **Vim keys edit the HTML:** with Settings → Notes editor → Vim, text opens as its HTML (one block
+  to a line), for tasks, projects and notes alike; `:check` ticks a checklist item, `:item` adds one.
+  *</>* in the toolbar switches between the formatted text and its HTML on any device.
+- **Subprojects:** a project can be a part of a bigger one (*New subproject…*, *Move into*, or *Part
+  of* in its details). The Projects page shows them as a tree that folds away. A project that's
+  waiting, or in Someday or Later, holds back everything in it, and a sequential project's
+  subprojects go one at a time. A task converted to a project inside one becomes its subproject.
+- **Change what something is:** a note can become a task or a project (at the bottom of the note),
+  and an empty project a task or a note, keeping its title, text, tags, files and links. Converting
+  a task now keeps it the same item, so links to it, and what waited on it, simply stay.
+- Moving a task into a project that waits on it, or a project into one it waits on, is refused (it
+  could never finish).
 
 - **Priority by dragging:** each task's ▲/▼ is now one ↕: press and drag up to raise the
   priority, down to lower it, and let go to set it. The row stays put until then, so it no

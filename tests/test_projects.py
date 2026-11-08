@@ -3,7 +3,7 @@ import io
 import sqlite3
 
 import db
-from conftest import H, rows
+from conftest import H, legacy_db, rows
 
 
 def helpers(client):
@@ -25,14 +25,13 @@ def test_project_tags_priority_and_related(app, user_client):
     assert house["tags"] == ["home"] and house["priority"] == 3
     garden = project(name="Garden")["id"]
     seeds = add(title="Buy seeds", state="next")["id"]
-    p = patch("projects", house["id"], tags=["home", "weekend"], related=[seeds], related_projects=[garden]).get_json()
+    p = patch("projects", house["id"], tags=["home", "weekend"], related=[seeds, garden]).get_json()
     assert p["tags"] == ["home", "weekend"]
-    assert [r["title"] for r in p["related"]] == ["Buy seeds"]
-    assert [r["name"] for r in p["related_projects"]] == ["Garden"]
+    assert [(r["title"], r["kind"]) for r in p["related"]] == [("Buy seeds", "task"), ("Garden", "project")]
     tasks, projects = data(client)
-    assert [r["name"] for r in tasks[seeds]["related_projects"]] == ["House"]
-    assert [r["name"] for r in projects[garden]["related_projects"]] == ["House"]
-    assert patch("projects", house["id"], related_projects=[house["id"]]).status_code == 400
+    assert [r["title"] for r in tasks[seeds]["related"]] == ["House"]
+    assert [r["title"] for r in projects[garden]["related"]] == ["House"]
+    assert patch("projects", house["id"], related=[house["id"]]).status_code == 400
     assert patch("projects", house["id"], priority=500).status_code == 400
     # Renaming a tag onto another merges them on projects too.
     tags = {t["name"]: t["id"] for t in client.get("/api/data").get_json()["tags"]}
@@ -48,7 +47,7 @@ def test_project_blocked_by_holds_back_its_tasks(app, user_client):
     walls = add(title="Put up walls", state="next", project_id=build)["id"]
     paint = add(title="Paint the shed", state="next")["id"]
     assert patch("projects", build, blocked_by=[permit]).get_json()["blocked_by"] == [permit]
-    assert patch("tasks", paint, blocked_by_projects=[build]).get_json()["blocked_by_projects"] == [build]
+    assert patch("tasks", paint, blocked_by=[build]).get_json()["blocked_by"] == [build]
     queue = lambda: client.get("/api/read/queue", headers={"Authorization": "Bearer " + key}).get_json()  # noqa: E731
     key = client.post("/api/devices", json={"kind": "api", "name": "t", "can_read": True}, headers=H).get_json()["key"]
     assert [t["title"] for t in queue()["tasks"]] == ["Get the permit"]
@@ -58,11 +57,12 @@ def test_project_blocked_by_holds_back_its_tasks(app, user_client):
     assert [t["title"] for t in queue()["tasks"]] == ["Paint the shed"]  # (a done project's tasks leave the Queue)
     # Waits that could never end are refused.
     assert patch("projects", build, blocked_by=[walls]).status_code == 400          # its own task
-    assert patch("tasks", walls, blocked_by_projects=[build]).status_code == 400    # its own project
+    assert patch("tasks", walls, blocked_by=[build]).status_code == 400    # its own project
     other = project(name="Other")["id"]
-    patch("projects", other, blocked_by_projects=[build])
-    assert patch("projects", build, blocked_by_projects=[other]).status_code == 400  # a loop
-    assert patch("tasks", walls, blocked_by_projects=[other]).status_code == 400     # a loop through its project
+    patch("projects", other, blocked_by_projects=[build])  # (as older apps sent projects)
+    assert data(client)[1][other]["blocked_by"] == [build]
+    assert patch("projects", build, blocked_by=[other]).status_code == 400  # a loop
+    assert patch("tasks", walls, blocked_by=[other]).status_code == 400     # a loop through its project
 
 
 def test_project_attachments(app, user_client):
@@ -85,7 +85,8 @@ def test_convert_task_to_project(app, user_client):
     add, project, patch = helpers(client)
     house = project(name="House")["id"]
     plan = add(title="Plan the party", state="someday", due_date="2026-12-20", project_id=house, focus=True,
-               tags=["fun"], priority=2, notes="For Sam's birthday\n[ ] Book the hall\n- [x] Pick a date\n[ ] Invite everyone")["id"]
+               tags=["fun"], priority=2, notes="<p>For Sam's birthday</p><ul data-check><li>Book the hall</li><li data-done=\"1\">Pick a date</li>"
+                     "<li>Invite everyone</li></ul>")["id"]
     client.post(f"/api/tasks/{plan}/attachments", data={"file": (io.BytesIO(b"list"), "guests.txt")},
                 headers=H, content_type="multipart/form-data")
     budget = add(title="Set a budget", state="next")["id"]
@@ -98,22 +99,21 @@ def test_convert_task_to_project(app, user_client):
     p = r.get_json()
     assert (p["name"], p["state"], p["due_date"], p["focus"], p["priority"], p["tags"]) == \
         ("Plan the party", "someday", "2026-12-20", True, 2, ["fun"])
-    assert p["notes"] == "For Sam's birthday"
+    assert p["notes"] == "<p>For Sam's birthday</p>"
     assert [f["name"] for f in p["attachments"]] == ["guests.txt"]
     assert p["blocked_by"] == [budget]
-    assert [r["title"] for r in p["related"]] == ["Ask Jo"]
-    assert [r["name"] for r in p["related_projects"]] == ["House"]
+    assert [r["title"] for r in p["related"]] == ["Ask Jo"] and p["parent_id"] == house  # (a subproject of House)
     tasks, _ = data(client)
     assert plan not in tasks
-    assert tasks[cake]["blocked_by"] == [] and tasks[cake]["blocked_by_projects"] == [p["id"]]
+    assert tasks[cake]["blocked_by"] == [p["id"]] == [plan]  # (the same document)
     mine = rows(app, "SELECT title, completed_at IS NOT NULL AS done FROM tasks WHERE project_id = ? "
                      "ORDER BY position", p["id"])
     assert mine == [{"title": "Book the hall", "done": 0}, {"title": "Pick a date", "done": 1},
                     {"title": "Invite everyone", "done": 0}]
     # Without checklist: the notes stay as they were, and no tasks are made.
-    one = add(title="Paint", notes="[ ] sand")["id"]
+    one = add(title="Paint", notes="<ul data-check><li>sand</li></ul>")["id"]
     p2 = client.post(f"/api/tasks/{one}/convert", json={}, headers=H).get_json()
-    assert p2["notes"] == "[ ] sand" and not rows(app, "SELECT id FROM tasks WHERE project_id = ?", p2["id"])
+    assert p2["notes"] == "<ul data-check><li>sand</li></ul>" and not rows(app, "SELECT id FROM tasks WHERE project_id = ?", p2["id"])
     # A repeating task can't be.
     daily = add(title="Walk", repeat="daily", start_date="2026-11-06")["id"]
     assert client.post(f"/api/tasks/{daily}/convert", json={}, headers=H).status_code == 400
@@ -122,9 +122,7 @@ def test_convert_task_to_project(app, user_client):
 def test_attachments_table_upgrades(tmp_path):
     """A database from before projects had files keeps its attachments."""
     path = str(tmp_path / "old.db")
-    db.init_db(path)
-    conn = sqlite3.connect(path)
-    conn.executescript("""
+    legacy_db(path, """
         DROP TABLE attachments;
         CREATE TABLE attachments (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, task_id INTEGER NOT NULL,
             name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, blob_id INTEGER NOT NULL,
@@ -134,9 +132,9 @@ def test_attachments_table_upgrades(tmp_path):
         INSERT INTO blobs VALUES (1, 'abc', 3, x'616263');
         INSERT INTO attachments (id, user_id, task_id, name, mime, size, blob_id) VALUES (7, 1, 1, 'a.txt', 'text/plain', 3, 1);
     """)
-    conn.close()
     db.init_db(path)
     conn = sqlite3.connect(path)
-    assert conn.execute("SELECT id, task_id, project_id, name FROM attachments").fetchall() == [(7, 1, None, "a.txt")]
+    conn.execute("PRAGMA foreign_keys = ON")
+    assert conn.execute("SELECT id, document_id, name FROM attachments").fetchall() == [(7, 1, "a.txt")]
     conn.execute("DELETE FROM attachments")  # the trigger that drops unused files still works
     assert conn.execute("SELECT COUNT(*) FROM blobs").fetchone()[0] == 0

@@ -29,6 +29,7 @@
       <li><a href="#editor">A task's details</a></li>
       <li><a href="#notes">Notes and formatting</a></li>
       <li><a href="#files">Attachments</a></li>
+      <li><a href="#notes-page">Notes and journals</a></li>
       <li><a href="#projects">Projects</a></li>
       <li><a href="#deps">Blocked by and Related to</a></li>
       <li><a href="#templates">Templates and recurring projects</a></li>
@@ -255,33 +256,31 @@
 
   <section id="notes">
     <h2>Notes and formatting</h2>
-    <p>Notes (and task titles) understand <strong>Markdown</strong>, a simple way to format plain text. In a task's details,
-      a preview under the notes box shows the result as you type; the list shows it on the task's row.</p>
-    <table class="help-table">
-      <thead><tr><th>Type</th><th>Shows as</th></tr></thead>
-      <tbody>
-        <tr><td><code>**bold**</code> or <code>__bold__</code></td><td><strong>bold</strong></td></tr>
-        <tr><td><code>*italic*</code> or <code>_italic_</code></td><td><em>italic</em></td></tr>
-        <tr><td><code>~~struck~~</code></td><td><del>struck</del></td></tr>
-        <tr><td><code>`code`</code></td><td>monospaced, left exactly as typed</td></tr>
-        <tr><td><code># Heading</code>, <code>## Smaller</code>, <code>### Smaller still</code></td><td>a heading line (notes only)</td></tr>
-        <tr><td><code>- item</code> (or <code>*</code>, <code>+</code>); indent two spaces for a sub-item</td><td>a bulleted list</td></tr>
-        <tr><td><code>1. first</code></td><td>a numbered list</td></tr>
-        <tr><td><code>&gt; quoted</code></td><td>a quote</td></tr>
-        <tr><td><code>---</code></td><td>a dividing line</td></tr>
-        <tr><td><code>```</code> on lines before and after</td><td>a block of text shown exactly as typed</td></tr>
-        <tr><td><code>[ ] to do</code>, <code>[x] done</code></td><td>checklist items, tickable on the row and in the preview</td></tr>
-        <tr><td><code>https://…</code>, <code>www.example.com</code>, <code>[name](https://…)</code></td><td>clickable links</td></tr>
-      </tbody>
-    </table>
-    <div class="ex"><code># Trip<br>Book **flights** by *Friday*: [airline](https://example.com)<br>- pack `charger`<br>&nbsp;&nbsp;- spare battery<br>[ ] water plants<br>[x] stop mail</code></div>
-    <p><strong>Vim keys:</strong> on a device with a keyboard, Settings → <strong>Notes editor → Vim</strong> swaps the notes
-      box for one that edits with Vim keys: normal, insert and visual modes, motions and text objects, <code>.</code>, undo
-      (<code>u</code>), <code>/</code> search, registers. <code>:w</code> saves at once (it also saves by itself as you go);
-      <code>:q</code>, <code>:wq</code> or <code>:x</code> closes the task. A line under the box shows <code>-- INSERT --</code> and so on.
-      It's set per device, so a phone can keep the plain box.</p>
-    <p>Words with underscores or stars inside them (<code>snake_case</code>, <code>2*3*4</code>) are left alone. In the list, notes show up to
-      6 lines (checklist items always show); open the task to see them all.</p>
+    <p>A task's notes, a project's and a note's text are all written the same way, in the same editor: type, and use the
+      buttons above the text (or <kbd>Ctrl</kbd>+<kbd>B</kbd>, <kbd>I</kbd>, <kbd>U</kbd>) for <strong>bold</strong>,
+      <em>italic</em>, underline, <del>strike</del>, a heading, bulleted and numbered lists, a <strong>checklist</strong> (☐),
+      a quote and a link. 🖼 puts a picture where the cursor is, 📎 attaches a file, and T̸ clears the formatting of the words
+      selected. Pasting from a web page or document keeps its formatting (what the text can hold). It saves as you type.</p>
+    <ul>
+      <li><strong>Checklists:</strong> click the box in front of an item to tick it, in the details, on the task's row in a list,
+        in Focus mode, and on a note's card. Enter starts the next item; Enter on an empty one ends the list.</li>
+      <li><strong>Pictures</strong> in a task's or project's text work as in a note's: drag them anywhere, click one for its
+        sizes, cropping, turning, fading and <em>Behind text</em> (<a href="#notes-page">see Notes</a>). The task's other files
+        are listed under its text, with <em>Put in the text</em> for pictures.</li>
+      <li>In a list, a task's text shows under it, cut short when it's long; open the task to see it all.</li>
+      <li><strong>&lt;/&gt;</strong> shows the text as its HTML, to edit directly, and back. What the text can't hold (scripts,
+        other tags) is left out when it's saved.</li>
+      <li>Task titles understand a little Markdown: <code>**bold**</code>, <code>*italic*</code>, <code>~~struck~~</code>,
+        <code>`code`</code> and links.</li>
+    </ul>
+    <p><strong>Vim keys:</strong> on a device with a keyboard, Settings → <strong>Notes editor → Vim</strong> opens text as its
+      HTML (each paragraph, heading and list item on a line of its own) in a box that edits with Vim keys: normal, insert and
+      visual modes, motions and text objects, <code>.</code>, undo (<code>u</code>), <code>/</code> search, registers.
+      <code>:w</code> saves at once (it also saves by itself as you go); <code>:q</code>, <code>:wq</code> or <code>:x</code>
+      closes the task, project or note; <code>:check</code> ticks (or unticks) the checklist item on the cursor's line, and
+      <code>:item</code> starts a new one under it. <strong>&lt;/&gt;</strong> goes to the formatted text and back. It's set per
+      device, so a phone can keep the plain editor.</p>
+    <div class="ex"><code>&lt;p&gt;Packing for the &lt;b&gt;trip&lt;/b&gt;:&lt;/p&gt;<br>&lt;ul data-check&gt;<br>&nbsp;&nbsp;&lt;li data-done="1"&gt;passport&lt;/li&gt;<br>&nbsp;&nbsp;&lt;li&gt;charger&lt;/li&gt;<br>&lt;/ul&gt;</code></div>
   </section>
 
   <section id="files">
@@ -305,7 +304,7 @@
     <div class="ex">Warranty: attach the receipt photo to “Register the dishwasher warranty”.</div>
   </section>
 
-  <section id="notes">
+  <section id="notes-page">
     <h2>Notes</h2>
     <p><strong>Notes</strong> (in the sidebar) is a place for anything worth keeping that isn't a task: ideas, recipes, lists,
       gate codes, meeting notes. Click <strong>+ New note</strong> (or press <kbd>N</kbd>), give it a title if you like, and write;
@@ -333,7 +332,8 @@
       <li><strong>Filter</strong> by category (the coloured buttons), by tag (the tags at the top), by area (the sidebar), and to
         notes that are pinned, or have pictures, files, web links or linked tasks.</li>
       <li>A task can become a note: right-click it → <em>Make it a note…</em> (or the button in its details). Its notes, tags,
-        files and links go with it.</li>
+        files and links go with it. And a note can become a task or a project: <em>Make it a task</em> or <em>Make it a
+        project</em> at the bottom of the note (<a href="#kinds">see Changing what something is</a>).</li>
       <li><strong>Move to trash</strong> in the note; the Trash can restore it.</li>
     </ul>
     <h3>Searching notes</h3>
@@ -387,16 +387,28 @@
         <em>Completed</em> projects are listed for 30 days.</li>
       <li><strong>Sequential:</strong> only the first Queue task of the project shows in the Queue and Focus; finishing it
         brings up the next. Good for steps that must happen in order (“Get quotes” → “Choose builder” → “Sign contract”).
-        Order them by dragging in the project.</li>
+        Order them by dragging in the project. Its active <strong>subprojects</strong> go one at a time too (highest priority
+        first): the tasks of the later ones wait until the one before is completed.</li>
+      <li><strong>Subprojects:</strong> a project can be a part of a bigger one, at any depth: right-click a project →
+        <em>New subproject…</em> or <em>Move into</em>, or choose <em>Part of</em> in its details. On the Projects page they show
+        under their project (▾ folds them away), and the project's page lists them above its tasks. What holds a project back
+        holds back everything in it: a project in Someday or Later, or waiting on something, keeps all its subprojects' tasks
+        out of the Queue too. A project can't be a part of itself, nor of one that waits on it.</li>
       <li>A project can have an area, a due date, notes and a star, and, like a task, tags, files, Blocked by and Related to
         (in its details: <em>Edit project</em>). Its <strong>tags</strong> count for all its tasks: choosing the tag above a list
         shows them too. Its <strong>files</strong> show in each of its tasks' details, under <em>From the project</em>.</li>
       <li><strong>Convert to project:</strong> when a task turns out to need several steps, right-click it (or open it) →
         <em>Convert to project</em>. The project takes its name, notes, area, due date, priority, star, tags and files,
         and Someday or Later if it was there. What it was blocked by, the project is blocked by; tasks that waited on it wait on
-        the project; its related tasks are the project's, and the project it was in becomes related. Tick <em>Make its
-        checklist items the project's tasks</em> to turn lines like <code>[ ] Book the hall</code> into tasks (ticked ones are
-        done). A project has no start date, reminder, time, energy or people, so those go; a repeating task can't be converted.</li>
+        the project; its related tasks are the project's; in a project, it becomes a subproject of it. Tick <em>Make its
+        checklist items the project's tasks</em> to turn its checklist's items into tasks (ticked ones are done). A project
+        has no start date, reminder, time, energy or people, so those go; a repeating task can't be converted.</li>
+      <li id="kinds"><strong>Changing what something is:</strong> a task, a project and a note are the same thing underneath
+        (a title, text, an area, tags, files and links), so each can become another and keep all of those: a task →
+        <em>Convert to project</em> or <em>Make it a note</em>; a note → <em>Make it a task</em> or <em>Make it a project</em>
+        (at the bottom of the note); an empty project → <em>Make it a task</em> or <em>Make it a note</em> (right-click it, or
+        its details). What only the old kind had (a note's category, a task's dates) goes. A project with tasks or
+        subprojects in it stays a project until they're moved out.</li>
       <li>Projects you set up again and again can be saved as <a href="#templates">templates</a>, and made on a schedule.</li>
     </ul>
   </section>
@@ -410,8 +422,8 @@
       Queue or Focus. A project counts as done once it's marked complete.</p>
     <div class="ex">“Paint the bedroom”, blocked by “Buy paint” and “Patch the wall”.<br>
       “Send invitations”, blocked by “Book the venue” and “Set the budget”, in another project.</div>
-    <p>A blocker in the Trash counts as done; ✕ on it takes it off. Nothing can wait in a loop, a project can't wait on one
-      of its own tasks, nor a task on its own project.
+    <p>A blocker in the Trash counts as done; ✕ on it takes it off. Nothing can wait in a loop: a project can't wait on
+      anything in it (its tasks and subprojects), nor anything in it on the project.
       <a href="#projects">Sequential projects</a> are the simple case: each step waits on the one before.</p>
     <p><strong>Related to</strong> (under it, in More) links tasks and projects that belong together without either waiting:
       type and pick, and the link goes both ways. Click a related task to open it; done ones are struck through,
@@ -641,7 +653,8 @@
       <dt>Areas</dt><dd>Add, rename, delete; set icons.</dd>
       <dt>Tags</dt><dd>Rename (to merge, rename to an existing tag) or delete.</dd>
       <dt>Defer options</dt><dd>The choices in the Defer menu (<a href="#defer">see Defer</a>).</dd>
-      <dt>Notes editor</dt><dd><em>Plain</em> or <em>Vim</em> (Vim keys in notes), for this device only (<a href="#notes">see Notes</a>).</dd>
+      <dt>Notes editor</dt><dd><em>Plain</em>, or <em>Vim</em> (text edited as its HTML, with Vim keys), for this device only
+        (<a href="#notes">see Notes and formatting</a>).</dd>
       <dt>Text size</dt><dd><strong>A−</strong>/<strong>A+</strong> from 75% to 200%, for <em>this device only</em>: bigger on a tablet, smaller on a laptop. Everything scales with it.</dd>
       <dt>Google Calendar</dt><dd>Connect, choose the calendar, sync now, disconnect.</dd>
       <dt>Notifications</dt><dd>Turn notifications on or off for this device, send a test, and choose what you're notified

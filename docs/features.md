@@ -25,8 +25,15 @@ In brief:
   you drag with each project's ↕ as for tasks. They can be *sequential*, so only their first action
   shows in the Queue, and have tags (which count for all their tasks), files (shown in each task's
   details), Blocked by (holding back all their tasks) and Related to.
+- **Subprojects:** a project can be a part of a bigger one, at any depth (*New subproject…*,
+  *Move into*, or *Part of* in its details); the Projects page shows them as a tree that folds. A
+  project that's waiting, or in Someday or Later, holds back everything in it, and a sequential
+  project's subprojects go one at a time.
 - **Convert to project:** a task that turns out to be bigger becomes a project with its name,
-  notes, dates, tags, files and links; its checklist lines can become the project's tasks.
+  notes, dates, tags, files and links; its checklist items can become the project's tasks.
+- **Change what something is:** tasks, projects and notes are one kind of thing underneath, so a
+  note can become a task or a project, and an empty project a task or a note, keeping its title,
+  text, tags, files and links.
 - **Notes** (a page of their own): formatted text (bold, italic, underline, strike, fonts,
   headings, lists, quotes, links) with pictures placed and dragged anywhere in it (cropped,
   turned, faded, or put behind the words), other files,
@@ -54,9 +61,11 @@ In brief:
   Friday of next week), `next week`/`next month`, `this weekend`, `in 3 days`/`2 weeks`/`a month`,
   `nov 5`, `5 nov`, `11/5`, `2026-11-05`; times `3pm`, `3:30 pm`, `15:00`, `noon`, `at 3`.
   A line under the box shows how it was read before you press Enter.
-- **Notes** (and titles) take Markdown: `**bold**`, `*italic*`, `~~struck~~`, `` `code` ``, `# headings`,
-  `- lists`, `1. lists`, `> quotes`, `---`, code blocks, `[ ]` checklists and links.
-- **Vim keys in notes** (Settings → Notes editor, per device): CodeMirror 5.65.21 with its Vim
+- **Formatted notes** on tasks and projects, in the same editor as notes: bold, italic, underline,
+  strike, headings, lists, tickable checklists (in the details, on the row, in Focus mode), quotes,
+  links and pictures placed in the text; or edit the HTML directly. Titles take a little Markdown.
+- **Vim keys** (Settings → Notes editor, per device), editing the text's HTML, with `:check` to
+  tick a checklist item and `:item` to add one: CodeMirror 5.65.21 with its Vim
   keymap, served from `static/vendor/codemirror` (MIT; loaded only on devices that choose it).
 - **Attachments**: add files to a task from its details (button, drag and drop, or paste an image);
   up to 25 MB each, 1 GB per user, stored in the database. Pictures, PDFs and text open in a

@@ -69,3 +69,13 @@ def user_client(app, make_user):
 def rows(app, sql, *args):
     with app.app_context():
         return [dict(r) for r in db.get_db().execute(sql, args).fetchall()]
+
+
+def legacy_db(path, sql=""):
+    """A database as it was before documents (tests/legacy_schema.sql), then sql run on it."""
+    import sqlite3
+    conn = sqlite3.connect(path)
+    with open(os.path.join(ROOT, "tests", "legacy_schema.sql")) as f:
+        conn.executescript(f.read())
+    conn.executescript(sql)
+    conn.close()

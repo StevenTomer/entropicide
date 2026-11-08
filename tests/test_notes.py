@@ -8,7 +8,7 @@ import zipfile
 
 import db
 import richtext
-from conftest import H, rows
+from conftest import H, legacy_db, rows
 
 
 def note(client, **n):
@@ -41,6 +41,12 @@ def test_formatted_text_is_cleaned():
                  'data-behind="yes">') == '<img data-file="13">'
     assert clean('<img data-file="13" data-orig="12" data-crop="2000,0,0,0" data-rotate="45" data-opacity="3">') == \
         '<img data-file="13" data-orig="12">'
+    # Checklists, and ticked items.
+    assert clean('<ul data-check="" class="x"><li data-done="1">a</li><li data-done="yes">b</li></ul><ul data-done="1">'
+                 '<li>c</li></ul>') == '<ul data-check><li data-done="1">a</li><li>b</li></ul><ul><li>c</li></ul>'
+    assert richtext.from_text("[ ] a\n- [x] b\nc") == '<ul data-check><li>a</li><li data-done="1">b</li></ul><p>c</p>'
+    assert richtext.plain('<p>List</p><ul data-check><li>a</li><li data-done="1">b</li></ul><ul><li>c</li></ul>') == \
+        "List\n[ ] a\n[x] b\nc"
     # Fonts by name; inline styles become tags.
     assert clean('<font face="serif">a</font><font face="Comic Sans MS">b</font><font face="x">c</font>') == \
         '<font face="serif">a</font><font face="hand">b</font>c'
@@ -49,7 +55,7 @@ def test_formatted_text_is_cleaned():
     assert clean("<p><b>a</p>") == "<p><b>a</b></p>"
     assert clean("<div><br></div>") == ""
     assert richtext.from_text("Hi <you>\n[ ] milk\nsee https://e.com.") == \
-        '<p>Hi &lt;you&gt;</p><p>☐ milk</p><p>see <a href="https://e.com" target="_blank" ' \
+        '<p>Hi &lt;you&gt;</p><ul data-check><li>milk</li></ul><p>see <a href="https://e.com" target="_blank" ' \
         'rel="noopener noreferrer">https://e.com</a>.</p>'
 
 
@@ -165,7 +171,7 @@ def test_sharing_to_notes_and_journals(app, user_client):
 def test_task_to_note(app, user_client):
     client = user_client("ann")
     house = client.post("/api/projects", json={"name": "House"}, headers=H).get_json()["id"]
-    t = client.post("/api/tasks", json={"title": "Paint colours", "notes": "Hall: sage\n[ ] test pot",
+    t = client.post("/api/tasks", json={"title": "Paint colours", "notes": "<p>Hall: sage</p><ul data-check><li>test pot</li></ul>",
                                         "tags": ["paint"], "project_id": house}, headers=H).get_json()["id"]
     client.post(f"/api/tasks/{t}/attachments", data={"file": (io.BytesIO(b"img"), "swatch.png")},
                 headers=H, content_type="multipart/form-data")
@@ -174,15 +180,15 @@ def test_task_to_note(app, user_client):
     n = r.get_json()
     pic = n["attachments"][0]["id"]
     assert n["title"] == "Paint colours" and n["tags"] == ["paint"]
-    assert n["body"] == f'<p>Hall: sage</p><p>☐ test pot</p><p><img data-file="{pic}" data-size="l"></p>'
-    assert [p["name"] for p in n["related_projects"]] == ["House"]
+    assert n["body"] == f'<p>Hall: sage</p><ul data-check><li>test pot</li></ul><p><img data-file="{pic}" data-size="l"></p>'
+    assert [(p["title"], p["kind"]) for p in n["related"]] == [("House", "project")]
     assert not any(x["id"] == t for x in data(client)["tasks"])
     # A task that becomes a project keeps its notes, linked to the project.
     t2 = client.post("/api/tasks", json={"title": "Garden"}, headers=H).get_json()["id"]
-    client.patch(f"/api/notes/{n['id']}", json={"related": [t2]}, headers=H)
+    client.patch(f"/api/notes/{n['id']}", json={"related": [t2] + [x["id"] for x in n["related"]]}, headers=H)
     p = client.post(f"/api/tasks/{t2}/convert", json={}, headers=H).get_json()
     linked = data(client)["notes"][0]
-    assert linked["related"] == [] and [x["name"] for x in linked["related_projects"]] == ["Garden", "House"]
+    assert [x["title"] for x in linked["related"]] == ["Garden", "House"]
     assert p["name"] == "Garden"
 
 
@@ -195,11 +201,9 @@ def test_export_has_notes(app, user_client):
 
 
 def test_attachments_table_gets_notes(tmp_path):
-    """A database from before notes had files keeps its attachments."""
+    """A database from before notes had files keeps its attachments (now on the project's document)."""
     path = str(tmp_path / "old.db")
-    db.init_db(path)
-    conn = sqlite3.connect(path)
-    conn.executescript("""
+    legacy_db(path, """
         DROP TABLE attachments;
         CREATE TABLE attachments (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, task_id INTEGER,
             project_id INTEGER, name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL,
@@ -210,10 +214,10 @@ def test_attachments_table_gets_notes(tmp_path):
         INSERT INTO blobs VALUES (1, 'abc', 3, x'616263');
         INSERT INTO attachments (id, user_id, project_id, name, mime, size, blob_id) VALUES (7, 1, 2, 'a.txt', 'text/plain', 3, 1);
     """)
-    conn.close()
     db.init_db(path)
     conn = sqlite3.connect(path)
-    assert conn.execute("SELECT id, task_id, project_id, note_id FROM attachments").fetchall() == [(7, None, 2, None)]
+    assert conn.execute("SELECT a.id, d.kind, d.title FROM attachments a JOIN documents d ON d.id = a.document_id"
+                        ).fetchall() == [(7, "project", "p")]
 
 
 def test_sharing_asks_each_time(app, user_client):

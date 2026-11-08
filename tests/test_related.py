@@ -20,7 +20,7 @@ def test_related_tasks_link_both_ways(app, user_client):
     assert [(x["title"], x["done"]) for x in paint_now["related"]] == [("Choose colours", True), ("Get a quote", False)]
     # Taking one off takes it off both.
     client.patch(f"/api/tasks/{paint}", json={"related": [colours]}, headers=H)
-    assert rows(app, "SELECT a, b FROM task_links ORDER BY a") == [{"a": min(paint, colours), "b": max(paint, colours)}]
+    assert rows(app, "SELECT a, b FROM document_links ORDER BY a") == [{"a": min(paint, colours), "b": max(paint, colours)}]
     assert client.patch(f"/api/tasks/{paint}", json={"related": [paint]}, headers=H).status_code == 400
 
 
@@ -35,4 +35,4 @@ def test_copies_keep_their_links(app, user_client):
     assert [r["id"] for r in dup["related"]] == [bins]
     # Deleting a task forever removes its links.
     assert client.delete(f"/api/tasks/{bins}", headers=H).status_code == 204
-    assert rows(app, "SELECT * FROM task_links WHERE a = ? OR b = ?", bins, bins) == []
+    assert rows(app, "SELECT * FROM document_links WHERE a = ? OR b = ?", bins, bins) == []

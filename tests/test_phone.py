@@ -58,7 +58,7 @@ def test_typed_text_is_read_like_quick_add(app, phone):
     assert r.get_json()["summary"] == "Call dentist · Queue · Mon Nov 2, 3:00 PM · #phone"
     task = next(t for t in tasks(client) if t["title"] == "Call dentist")
     assert (task["state"], task["priority"], task["start_date"], task["start_time"]) == ("next", 2, "2026-11-02", "15:00")
-    assert task["tags"] == ["phone"] and task["notes"] == "ask about Tuesday" and task["area_id"]
+    assert task["tags"] == ["phone"] and task["notes"] == "<p>ask about Tuesday</p>" and task["area_id"]
 
 
 @needs_node
@@ -103,7 +103,7 @@ def test_other_apps_add_with_a_key(app, user_client, send):
     assert r.status_code == 201, r.get_json()
     assert r.get_json()["title"] == "Buy milk" and "#errand" in r.get_json()["summary"]
     task = next(t for t in tasks(client) if t["title"] == "Buy milk")
-    assert task["tags"] == ["errand"] and task["notes"] == "2%" and task["state"] == "scheduled"
+    assert task["tags"] == ["errand"] and task["notes"] == "<p>2%</p>" and task["state"] == "scheduled"
     keys = client.get("/api/devices").get_json()
     assert [(d["name"], d["kind"], bool(d["used_at"])) for d in keys] == [("Alexa", "api", True)]
 

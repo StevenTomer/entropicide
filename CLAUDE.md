@@ -20,14 +20,17 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
 - `app.py`: every route, plus repeats, reminders (`_reminder_loop`), the key-based API
   (`/api/add`, `/api/read/<name>`, `/api/complete`), export, admin, Google OAuth and sync loop.
 - `db.py`: `SCHEMA` (new tables, `CREATE ... IF NOT EXISTS`) and `migrate()` (changes to
-  existing tables). Every schema change must upgrade existing databases in place.
+  existing tables). Every schema change must upgrade existing databases in place
+  (`tests/legacy_schema.sql` is the database from before documents, for upgrade tests).
 - `gcal.py` Google Calendar + Contacts, `push.py` web push, `backup.py`, `icons.py` (SVG
   cleaning), `manage.py` CLI.
 - `static/app.js`: the browser app, sectioned by `// ---- name ----` comments; global
-  state is `S`. `static/quickadd.js`: quick-add parser, loaded before app.js. `static/notes.js`:
-  the Notes and Journal pages and the note editor, loaded after app.js and using its globals.
-- `richtext.py`: the HTML a note's body may hold (notes.js `cleanNoteHtml` mirrors it); the
-  server's copy is the one that counts.
+  state is `S`. `static/quickadd.js`: quick-add parser, loaded before app.js. `static/editor.js`:
+  the formatted-text editor (toolbar, checklists, pictures, the HTML box and Vim) used by both
+  task/project details and the note dialog, and `cleanNoteHtml`. `static/notes.js`: the Notes and
+  Journal pages and the note dialog. Both load after app.js and use its globals.
+- `richtext.py`: the HTML any text may hold (editor.js `cleanNoteHtml` mirrors it); the
+  server's copy is the one that counts. `from_markdown` converted the old typed notes once.
 - `templates/help.html`: the in-app Help page; every user-visible feature belongs there.
 - `alexa/`, `android/`, `deploy/`, `docker/`: integrations and deployment (see `docs/`).
 
@@ -38,10 +41,22 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
 - **quickadd.js runs on the server too**: `quickadd_server.js` runs it in Node's `vm` for
   phone/API adds, with only a stub `S` and `navigator`. Keep it free of DOM and app.js
   dependencies; changes to it affect `/api/add` (tested in `tests/test_phone.py`).
+- **Documents:** tasks, projects and notes are rows of `documents` (title, body, area, dates,
+  trash) plus `task_data` / `project_data` / `note_data`, under one id space. The code reads and
+  writes the views `tasks`, `projects`, `notes` (made in db.py `_views`, with INSTEAD OF
+  triggers), so most SQL looks as it did. **New rows must go through `db.insert(conn, view,
+  fields)`** (an insert straight into a view raises). Tags, files, links and Blocked by are
+  shared (`document_tags`, `attachments.document_id`, `document_links`, `document_deps`).
+  Changing kind keeps the id: `become()` in app.py swaps the `*_data` row.
+- **Text is HTML everywhere**: a task's `notes`, a project's `notes` and a note's `body` are
+  cleaned HTML (checklists are `<ul data-check><li data-done="1">`). Anything plain that comes
+  in (`/api/add`, sharing, Google) goes through `richtext.from_text`; anything going out as
+  plain text (Google, exports, notifications) through `richtext.plain`.
 - **Offline outbox** (app.js, "offline changes"): task/project changes made offline are
   queued and replayed, and `applyOffline` mirrors server behaviour on `S.data`. New task or
   project fields/endpoints must work through it; offline-created items have negative ids.
-  `OFFLINE_PATH` lists which API paths are queued.
+  `OFFLINE_PATH` lists which API paths are queued; `OUTBOX_VERSION` drops changes queued
+  before an incompatible change of ids.
 - **CSRF:** non-GET `/api/` requests need `X-Requested-With: entropicide` (tests use `H` from
   `conftest.py`), except `/api/add` and `/api/complete`, which authenticate by key only.
 - **Repeats** are encoded strings validated by `valid_repeat`: `daily|weekdays|weekly|monthly|
@@ -52,15 +67,15 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
 - **Old "Todo" name:** the app was renamed. Compatibility shims (the `todo` header value,
   `/install/todo.apk`, `todo.*` localStorage keys copied in app.html, `deploy/install.sh`
   moving `/opt/todo`) are deliberate; keep them.
-- **Blocked by / Related to span tasks and projects:** task-on-task lives in `task_deps` and
-  `task_links`, anything with a project in `project_deps` and `project_links`. The API sends
-  `blocked_by`/`related` (tasks) plus `blocked_by_projects`/`related_projects`; the browser
-  works with refs like `"task:12"`/`"project:3"` (`refs()`, `setRefs()`). A blocked project
-  holds back all its tasks; `set_blockers` refuses loops, including through a project's tasks.
-  Server (`list_tasks`) and browser (`waitingOn`, `sequentialBlocked`) must agree on what's blocked.
+- **Blocked by / Related to / subprojects:** `blocked_by` and `related` are plain ids of tasks
+  and projects (ids are unique across kinds; `related` items carry their `kind`). Projects nest
+  (`parent_id`). A project that's blocked, in Someday or Later, or (in a sequential parent) not
+  the first active subproject holds back everything in it; `waits_on` / `check_no_loops` refuse
+  waits that could never end. Server (`list_tasks`) and browser (`waitingOn`, `projectActive`,
+  `sequentialBlocked`) must agree on what's blocked.
 - Attachments are blobs in the database (deduplicated by sha256), so the DB file is the
-  whole backup. Each is on exactly one task, project or note (a CHECK); a picture placed in a
-  note's text is `<img data-file="id">` in its body, and the browser adds the `src`.
+  whole backup. Each is on one document; a picture placed in a text is `<img data-file="id">`,
+  and the browser adds the `src` (`showBody`).
 
 ## Style
 

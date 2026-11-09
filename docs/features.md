@@ -49,6 +49,11 @@ In brief:
   and linked tasks, with `"phrases"`, `-word`, `#tag`, `cat:`, `journal:`, `area:`, `has:`,
   `is:pinned`, `before:` / `after:` / `on:`. Saved as you type, and offline too. A task can
   become a note. Stored as cleaned HTML (`richtext.py`).
+- **Groups and sharing:** people with accounts on the same server, in groups (a family, a club),
+  invited by username, each an owner, editor or viewer. Share a project (with everything in it), a
+  journal (every entry), or a single task or note; give a shared task to someone or leave it for
+  anyone; each person keeps their own star, area and order. Others' changes show within 30 seconds,
+  and two edits of a shared note at once keep both versions.
 - **Weekly review:** a guided GTD review (get clear, get current, each project due, Someday and
   Later), with a review interval per project, stalled projects flagged, and a weekly reminder.
 - **Timelines:** tasks, projects, notes and entries marked as waypoints (⚑) on a line through

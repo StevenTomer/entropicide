@@ -21,7 +21,7 @@ from functools import wraps
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import (Flask, Response, abort, g, jsonify, redirect, render_template,
-                   request, send_file, send_from_directory, session, url_for)
+                   has_request_context, request, send_file, send_from_directory, session, url_for)
 from flask.sessions import SecureCookieSessionInterface
 from itsdangerous import BadSignature
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -491,12 +491,86 @@ def bad(message):
     return jsonify(error=message), 400
 
 
+# Tasks, projects and notes can be shared with a group (documents.group_id): for those views,
+# owned() means "may see", and for a change (any method but GET) "may change" too (viewers may
+# only look). Deleting one for good (purge_document) checks the documents table, so it stays
+# its maker's alone.
+SHARED_VIEWS = ("tasks", "projects", "notes", "journals")
+# What a user can see: theirs, and their groups' (for queries on those views and journals; the
+# user's id goes in twice).
+MINE = "(user_id = ? OR group_id IN (SELECT group_id FROM group_members WHERE user_id = ?))"
+
+
 def owned(table, row_id):
+    if table in SHARED_VIEWS:
+        row = can_see(table, row_id)
+        if request.method != "GET" and not may_change(row):
+            abort(403)
+        return row
     row = db.get_db().execute(
         f"SELECT * FROM {table} WHERE id = ? AND user_id = ?",
         (row_id, g.user["id"])).fetchone()
     if row is None:
         abort(404)
+    return row
+
+
+# ---- groups: who may see and change what ----
+# A document is its user's, and (with a group_id) its group's members' too: owners and editors
+# may change it, viewers only see it. owned() above is for what's only ever one user's.
+
+GROUP_ROLES = ("owner", "editor", "viewer")
+
+
+def my_role(group_id, user_id=None):
+    """g.user's (or user_id's) role in a group, or None."""
+    row = db.get_db().execute("SELECT role FROM group_members WHERE group_id = ? AND user_id = ?",
+                              (group_id, user_id or g.user["id"])).fetchone()
+    return row and row["role"]
+
+
+def visible(alias="d"):
+    """SQL (and its parameters) for documents g.user may see: theirs, and their groups'."""
+    a = f"{alias}." if alias else ""
+    return (f"({a}user_id = ? OR {a}group_id IN (SELECT group_id FROM group_members WHERE user_id = ?))",
+            (g.user["id"], g.user["id"]))
+
+
+def seen_by_me(alias="d"):
+    """visible(), or (outside a request, as in the reminder thread) everything."""
+    return visible(alias) if has_request_context() and g.get("user") else ("1", ())
+
+
+def can_see(table, row_id):
+    """A task, project or note (its view) g.user may see, else 404."""
+    where, params = visible("")
+    row = db.get_db().execute(f"SELECT * FROM {table} WHERE id = ? AND {where}", (row_id, *params)).fetchone()
+    if row is None:
+        abort(404)
+    return row
+
+
+def may_change(row, completing=False):
+    """Whether g.user may change a document they can see: their own, or one of a group they're
+    an owner or editor of (a viewer, only to complete a task assigned to them, if the group allows)."""
+    if row["user_id"] == g.user["id"]:
+        return True
+    group = row["group_id"] and db.get_db().execute(
+        "SELECT g.viewers_complete, m.role FROM user_groups g JOIN group_members m ON m.group_id = g.id "
+        "WHERE g.id = ? AND m.user_id = ?", (row["group_id"], g.user["id"])).fetchone()
+    if not group:
+        return False
+    if group["role"] in ("owner", "editor"):
+        return True
+    keys = row.keys()
+    return bool(completing and group["viewers_complete"] and "assigned_to" in keys and row["assigned_to"] == g.user["id"])
+
+
+def can_change(table, row_id, completing=False):
+    """A document g.user may change, else 404 (can't see it) or 403 (may only look)."""
+    row = can_see(table, row_id)
+    if not may_change(row, completing):
+        abort(403)
     return row
 
 
@@ -687,8 +761,8 @@ def checked_ids(ids, kinds, what, limit=50):
         raise ValueError(f"{what} must be a list of ids")
     out = []
     for i in dict.fromkeys(int(x) for x in ids):
-        row = db.get_db().execute("SELECT kind FROM documents WHERE id = ? AND user_id = ?",
-                                  (i, g.user["id"])).fetchone()
+        where, params = visible("")
+        row = db.get_db().execute(f"SELECT kind FROM documents WHERE id = ? AND {where}", (i, *params)).fetchone()
         if not row or row[0] not in kinds:
             raise ValueError(f"No such {' or '.join(kinds)}.")
         out.append(i)
@@ -739,7 +813,8 @@ def links_for(ids):
             f"(SELECT a AS mine, b AS other FROM document_links WHERE a IN ({marks}) "
             f"UNION ALL SELECT b, a FROM document_links WHERE b IN ({marks})) l "
             "JOIN documents d ON d.id = l.other LEFT JOIN task_data t ON t.id = d.id "
-            "LEFT JOIN project_data p ON p.id = d.id WHERE d.kind != 'note' ORDER BY d.title COLLATE NOCASE", ids * 2):
+            f"LEFT JOIN project_data p ON p.id = d.id WHERE d.kind != 'note' AND {seen_by_me('d')[0]} "
+            "ORDER BY d.title COLLATE NOCASE", [*ids, *ids, *seen_by_me("d")[1]]):
         out.setdefault(r["mine"], []).append({
             "id": r["id"], "kind": r["kind"], "title": r["title"], "trashed": bool(r["deleted_at"]),
             "done": r["state"] == "done" if r["kind"] == "project" else bool(r["completed_at"])})
@@ -792,7 +867,141 @@ def copy_shared(from_id, to_id, deps=True, files=True):
 # What a copy of a task takes from it (Duplicate, and each new copy of a repeating task); the
 # rest (when it was done, reminders sent, time spent, its calendar event) starts afresh.
 TASK_COPY = ("project_id", "area_id", "title", "notes", "state", "focus", "due_date", "start_date", "start_time",
-             "waiting_for", "energy", "minutes", "priority", "remind_before", "people", "position")
+             "waiting_for", "energy", "minutes", "priority", "remind_before", "people", "position", "group_id", "assigned_to")
+
+
+# What's a person's own about someone else's shared document (kept in document_person).
+PERSONAL = {"task": ("focus", "area_id", "position"), "project": ("focus", "area_id", "position"),
+            "note": ("pinned", "category_id")}
+
+
+def keep_personal(row, kind, fields):
+    """Takes what's personal out of fields for a shared document that isn't g.user's, keeping
+    it as theirs alone (document_person). Not committed."""
+    if row["user_id"] == g.user["id"]:
+        return
+    own = {k: fields.pop(k) for k in PERSONAL[kind] if k in fields}
+    if own:
+        db.get_db().execute(
+            f"INSERT INTO document_person (document_id, user_id, {', '.join(own)}) VALUES (?, ?, {', '.join('?' * len(own))}) "
+            f"ON CONFLICT (document_id, user_id) DO UPDATE SET {', '.join(f'{k} = excluded.{k}' for k in own)}",
+            (row["id"], g.user["id"], *own.values()))
+
+
+def container_of(doc_id):
+    """(view, id) of what a document is in: a task's project, a subproject's parent, an entry's
+    journal; or None."""
+    kind = kind_of(doc_id)
+    col = {"task": ("tasks", "project_id", "projects"), "project": ("projects", "parent_id", "projects"),
+           "note": ("notes", "journal_id", "journals")}[kind]
+    row = db.get_db().execute(f"SELECT {col[1]} FROM {col[0]} WHERE id = ?", (doc_id,)).fetchone()
+    return (col[2], row[0]) if row and row[0] else None
+
+
+def set_group(doc_id, group_id):
+    """Shares a document (and, a project, everything in it) with a group, or (None) makes it
+    private: g.user's, as whoever makes it private keeps it. A task no longer shared has no one
+    assigned. Not committed."""
+    ids = [doc_id, *(project_contents(doc_id) if kind_of(doc_id) == "project" else ())]
+    conn = db.get_db()
+    marks = marks_for(ids)
+    if group_id:
+        conn.execute(f"UPDATE documents SET group_id = ? WHERE id IN ({marks})", (group_id, *ids))
+        # (someone assigned who isn't in the new group isn't any more)
+        conn.execute(f"UPDATE task_data SET assigned_to = NULL WHERE id IN ({marks}) AND assigned_to IS NOT NULL "
+                     "AND assigned_to NOT IN (SELECT user_id FROM group_members WHERE group_id = ?)", (*ids, group_id))
+    else:
+        conn.execute(f"UPDATE documents SET group_id = NULL, user_id = ? WHERE id IN ({marks}) AND group_id IS NOT NULL",
+                     (g.user["id"], *ids))
+        conn.execute(f"UPDATE task_data SET assigned_to = NULL WHERE id IN ({marks})", ids)
+        conn.execute(f"DELETE FROM document_person WHERE document_id IN ({marks})", ids)
+
+
+def follow_container(doc_id):
+    """A document put in (or taken out of) a project or journal is shared as that is."""
+    where = container_of(doc_id)
+    group = where and db.get_db().execute(f"SELECT group_id FROM {where[0]} WHERE id = ?", (where[1],)).fetchone()[0]
+    current = db.get_db().execute("SELECT group_id FROM documents WHERE id = ?", (doc_id,)).fetchone()[0]
+    if (group or None) != current:
+        set_group(doc_id, group)
+
+
+def share_document(doc_id, group_id):
+    """Shares one of g.user's documents with a group they can change things in (or, None, takes
+    it back). Something in a project or journal is shared as that is."""
+    row = db.get_db().execute("SELECT user_id, group_id FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if row["user_id"] != g.user["id"]:
+        raise ValueError("Only whoever made it can share it, or stop sharing it.")
+    if container_of(doc_id):
+        raise ValueError("It's shared as what it's in is: move it out first, or share that.")
+    if group_id not in (None, ""):
+        group_id = int(group_id)
+        if my_role(group_id) not in ("owner", "editor"):
+            raise ValueError("You can only share with a group you can change things in.")
+    set_group(doc_id, group_id or None)
+
+
+def assign(task_id, user_id):
+    """Gives a shared task to someone in its group (None: anyone), telling them."""
+    t = db.get_db().execute("SELECT title, group_id, assigned_to FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if user_id in (None, ""):
+        user_id = None
+    else:
+        user_id = int(user_id)
+        if not t["group_id"] or not my_role(t["group_id"], user_id):
+            raise ValueError("A task can be given to someone in the group it's shared with.")
+    db.get_db().execute("UPDATE tasks SET assigned_to = ? WHERE id = ?", (user_id, task_id))
+    if user_id and user_id != g.user["id"] and user_id != t["assigned_to"]:
+        notify(user_id, {"title": f"{g.user['display_name'] or g.user['username']} gave you a task", "body": t["title"],
+                         "tag": f"assigned-{task_id}"})
+
+
+def sharing(doc_id, data, new=False):
+    """API-style {"group_id": …} (share it, or None: stop) and, for a task, {"assigned_to": …}.
+    A new one in a shared project or journal is shared with it. Not committed."""
+    if new:
+        follow_container(doc_id)
+    if "group_id" in data:
+        current = db.get_db().execute("SELECT group_id FROM documents WHERE id = ?", (doc_id,)).fetchone()[0]
+        if (data["group_id"] or None) != current:
+            share_document(doc_id, data["group_id"])
+    if "assigned_to" in data and kind_of(doc_id) == "task":
+        assign(doc_id, data["assigned_to"])
+
+
+def unshare_group(group_id):
+    """Before a group ends: what was shared with it goes back to being private, each thing its
+    maker's, or (inside a project or journal) the maker's of what it's in, so it stays together."""
+    conn = db.get_db()
+    for (doc_id,) in conn.execute("SELECT id FROM documents WHERE group_id = ?", (group_id,)).fetchall():
+        where, seen = container_of(doc_id), set()
+        owner = conn.execute("SELECT user_id FROM documents WHERE id = ?", (doc_id,)).fetchone()[0]
+        while where and where not in seen:
+            seen.add(where)
+            row = conn.execute(f"SELECT * FROM {where[0]} WHERE id = ?", (where[1],)).fetchone()
+            if not row:
+                break
+            owner = row["user_id"]
+            where = container_of(where[1]) if where[0] == "projects" else None
+        conn.execute("UPDATE documents SET user_id = ?, group_id = NULL WHERE id = ?", (owner, doc_id))
+        conn.execute("UPDATE task_data SET assigned_to = NULL WHERE id = ?", (doc_id,))
+        conn.execute("DELETE FROM document_person WHERE document_id = ?", (doc_id,))
+    conn.execute("UPDATE journals SET group_id = NULL WHERE group_id = ?", (group_id,))
+
+
+def people_of(uid):
+    """{id: name} of everyone in a group with uid (and uid)."""
+    return {str(r["id"]): r["display_name"] or r["username"] for r in db.get_db().execute(
+        "SELECT id, username, display_name FROM users WHERE id = ? OR id IN (SELECT user_id FROM group_members "
+        "WHERE group_id IN (SELECT group_id FROM group_members WHERE user_id = ?))", (uid, uid))}
+
+
+def shared_stamp(uid):
+    """Where uid's groups stand: changes when anything shared with them changes, or they join
+    or leave one."""
+    rows = db.get_db().execute("SELECT g.id, g.changed_at FROM user_groups g JOIN group_members m ON m.group_id = g.id "
+                               "WHERE m.user_id = ? ORDER BY g.id", (uid,)).fetchall()
+    return ";".join(f"{r['id']}@{r['changed_at']}" for r in rows)
 
 
 def copy_task(t, changes, deps=True, files=True):
@@ -817,10 +1026,20 @@ def with_shared(rows, kind, shape):
     ids = [r["id"] for r in rows]
     tags, files, links = tags_for(ids), attachments_for(ids), links_for(ids)
     blockers = blockers_for(ids) if kind != "note" else None
+    me = g.user["id"] if has_request_context() and g.get("user") else None
+    theirs = [r["id"] for r in rows if me and r["user_id"] != me]
+    mine = {r["document_id"]: r for r in db.get_db().execute(
+        f"SELECT * FROM document_person WHERE user_id = ? AND document_id IN ({marks_for(theirs)})", (me, *theirs))} if theirs else {}
     out = []
     for row in rows:
         d = shape(row)
-        d.pop("user_id", None)
+        d["by"] = d.pop("user_id", None)  # who made it (for "by Ann" on what's shared)
+        if row["id"] in theirs:
+            # Someone else's, shared: my own star, area and place (and a note's pin and category).
+            own = mine.get(row["id"])
+            for key in PERSONAL[kind]:
+                value = own[key] if own is not None else None
+                d[key] = (bool(value) if key in ("focus", "pinned") else value) if value is not None or key != "position" else d[key]
         d["waypoint"] = bool(d.get("waypoint"))
         d |= {"tags": tags.get(d["id"], []), "attachments": files.get(d["id"], []), "related": links.get(d["id"], [])}
         if blockers is not None:
@@ -867,11 +1086,11 @@ def timeline():
     if request.args.get("journal") or request.args.get("notes"):
         if request.args.get("journal"):
             owned("journals", request.args.get("journal", type=int))
-            rows = conn.execute(f"SELECT * FROM notes WHERE user_id = ? AND journal_id = ? AND deleted_at IS NULL{flagged}",
-                                (uid, request.args.get("journal", type=int))).fetchall()
+            rows = conn.execute(f"SELECT * FROM notes WHERE {MINE} AND journal_id = ? AND deleted_at IS NULL{flagged}",
+                                (uid, uid, request.args.get("journal", type=int))).fetchall()
         else:
-            rows = conn.execute(f"SELECT * FROM notes WHERE user_id = ? AND journal_id IS NULL AND deleted_at IS NULL{flagged}",
-                                (uid,)).fetchall()
+            rows = conn.execute(f"SELECT * FROM notes WHERE {MINE} AND journal_id IS NULL AND deleted_at IS NULL{flagged}",
+                                (uid, uid)).fetchall()
         for n in rows:
             if n["entry_date"]:
                 add(n, "note", n["entry_date"], n["entry_time"], "entry", True)
@@ -884,8 +1103,8 @@ def timeline():
             pid = owned("projects", request.args.get("project", type=int))["id"]
             inside = project_contents(pid) | {pid}
         keep = lambda r: inside is None or r["id"] in inside  # noqa: E731
-        for t in conn.execute(f"SELECT * FROM tasks WHERE user_id = ? AND deleted_at IS NULL AND missed = 0{flagged}",
-                              (uid,)).fetchall():
+        for t in conn.execute(f"SELECT * FROM tasks WHERE {MINE} AND deleted_at IS NULL AND missed = 0{flagged}",
+                              (uid, uid)).fetchall():
             if not keep(t):
                 continue
             if t["completed_at"]:
@@ -895,7 +1114,7 @@ def timeline():
                 add(t, "task", t["due_date"], None, "due", False)
             elif t["start_date"]:
                 add(t, "task", t["start_date"], t["start_time"], "start", False)
-        for p in conn.execute(f"SELECT * FROM projects WHERE user_id = ? AND deleted_at IS NULL{flagged}", (uid,)).fetchall():
+        for p in conn.execute(f"SELECT * FROM projects WHERE {MINE} AND deleted_at IS NULL{flagged}", (uid, uid)).fetchall():
             if not keep(p):
                 continue
             if p["completed_at"] and p["state"] == "done":
@@ -1385,11 +1604,12 @@ def catch_up(uid, today, now):
     run_series(uid, today)
     run_templates(uid, today)
     # Scheduled items whose start date has arrived join the Queue (state "next").
-    conn.execute("UPDATE tasks SET state = 'next' WHERE user_id = ? AND state = 'scheduled' "
+    # (Shared ones too: whoever opens the app first that day.)
+    conn.execute(f"UPDATE tasks SET state = 'next' WHERE {MINE} AND state = 'scheduled' "
                  "AND completed_at IS NULL AND (start_date < ? OR (start_date = ? AND "
-                 "(start_time IS NULL OR start_time <= ?)))", (uid, today, today, now))
-    conn.execute("UPDATE projects SET state = 'next' WHERE user_id = ? AND state = 'scheduled' AND start_date <= ?",
-                 (uid, today))
+                 "(start_time IS NULL OR start_time <= ?)))", (uid, uid, today, today, now))
+    conn.execute(f"UPDATE projects SET state = 'next' WHERE {MINE} AND state = 'scheduled' AND start_date <= ?",
+                 (uid, uid, today))
     conn.commit()
 
 
@@ -1401,12 +1621,12 @@ def all_data():
     conn = db.get_db()
     catch_up(uid, today, now)
     tasks = conn.execute(
-        "SELECT * FROM tasks WHERE user_id = ? AND completed_at IS NULL AND deleted_at IS NULL "
-        "ORDER BY position, id", (uid,)).fetchall()
+        f"SELECT * FROM tasks WHERE {MINE} AND completed_at IS NULL AND deleted_at IS NULL "
+        "ORDER BY position, id", (uid, uid)).fetchall()
     projects = conn.execute(
-        "SELECT * FROM projects WHERE user_id = ? AND deleted_at IS NULL "
+        f"SELECT * FROM projects WHERE {MINE} AND deleted_at IS NULL "
         "AND (state != 'done' OR completed_at > datetime('now', '-30 days')) "
-        "ORDER BY position, id", (uid,)).fetchall()
+        "ORDER BY position, id", (uid, uid)).fetchall()
     areas = conn.execute("SELECT id, name, position, icon_version FROM areas WHERE user_id = ? "
                          "ORDER BY position, id", (uid,)).fetchall()
     tags = conn.execute("SELECT id, name FROM tags WHERE user_id = ? ORDER BY name",
@@ -1429,13 +1649,29 @@ def all_data():
             "SELECT * FROM templates WHERE user_id = ? ORDER BY name COLLATE NOCASE", (uid,))],
         links=[link_dict(r) for r in conn.execute(
             "SELECT * FROM links WHERE user_id = ? ORDER BY position, id", (uid,))],
-        notes=notes_json(conn.execute("SELECT * FROM notes WHERE user_id = ? AND deleted_at IS NULL ORDER BY id",
-                                      (uid,)).fetchall()),
+        notes=notes_json(conn.execute(f"SELECT * FROM notes WHERE {MINE} AND deleted_at IS NULL ORDER BY id",
+                                      (uid, uid)).fetchall()),
         note_categories=[dict(r) for r in conn.execute(
             "SELECT id, name, color, position FROM note_categories WHERE user_id = ? ORDER BY position, id", (uid,))],
         journals=[dict(r) for r in conn.execute(
-            "SELECT id, name, position, created_at FROM journals WHERE user_id = ? ORDER BY position, id", (uid,))],
+            f"SELECT id, user_id, group_id, name, position, created_at FROM journals WHERE {MINE} ORDER BY position, id", (uid, uid))],
+        # Sharing: my groups, the people in them (by id, for "by Ann" and assignees), and where
+        # what's shared stood when this was read (GET /api/changes says when it's moved on).
+        groups=[dict(r) | {"members": [m[0] for m in conn.execute(
+                    "SELECT user_id FROM group_members WHERE group_id = ? ORDER BY user_id", (r["id"],))]}
+                for r in conn.execute(
+            "SELECT g.id, g.name, m.role FROM user_groups g JOIN group_members m ON m.group_id = g.id "
+            "WHERE m.user_id = ? ORDER BY g.name COLLATE NOCASE", (uid,))],
+        people=people_of(uid),
+        shared_stamp=shared_stamp(uid),
     )
+
+
+@app.get("/api/changes")
+@login_required
+def changes():
+    """Where what's shared with g.user stands (shared_stamp): the app reloads when it moves on."""
+    return jsonify(stamp=shared_stamp(g.user["id"]))
 
 
 @app.post("/api/tasks")
@@ -1462,6 +1698,7 @@ def insert_task(data, today):
     conn = db.get_db()
     task_id = db.insert(conn, "tasks", fields)
     join_project(task_id, fields.get("project_id"))
+    sharing(task_id, data, new=True)
     if isinstance(data.get("tags"), list):
         set_tags(task_id, data["tags"])
     set_blockers("task", task_id, given_ids(data, "blocked_by"))
@@ -1478,13 +1715,15 @@ def insert_task(data, today):
 @app.patch("/api/tasks/<int:task_id>")
 @login_required
 def update_task(task_id):
-    task = owned("tasks", task_id)
+    task = can_see("tasks", task_id)
+    if not may_change(task, completing=set(body()) <= {"completed"}):
+        abort(403)
     try:
         apply_task_update(task, body(), client_today())
     except (ValueError, TypeError) as e:
         db.get_db().rollback()
         return bad(str(e))
-    return jsonify(tasks_json([owned("tasks", task_id)])[0])
+    return jsonify(tasks_json([can_see("tasks", task_id)])[0])
 
 
 @app.post("/api/tasks/<int:task_id>/duplicate")
@@ -1521,9 +1760,9 @@ def convert_document(doc_id):
     the old kind had goes. The reply is it, as the new kind."""
     data = body()
     to, kind = data.get("to"), kind_of(doc_id)
-    if not kind or not db.get_db().execute("SELECT 1 FROM documents WHERE id = ? AND user_id = ?",
-                                           (doc_id, g.user["id"])).fetchone():
+    if not kind:
         abort(404)
+    owned(db.KINDS[kind]["view"], doc_id)
     if to not in db.KINDS or to == kind:
         return bad("Convert it to a task, a project or a note.")
     try:
@@ -1654,6 +1893,7 @@ def apply_task_update(task, data, today):
     task_id = task["id"]
     was_done, was_in = task["completed_at"], task["project_id"]
     fields = task_fields(data)
+    keep_personal(task, "task", fields)
     reminder_follows(task, fields)
     repeat, on_miss = repeat_args(data)
     conn = db.get_db()
@@ -1674,7 +1914,7 @@ def apply_task_update(task, data, today):
     if isinstance(data.get("tags"), list):
         set_tags(task_id, data["tags"])
 
-    task = owned("tasks", task_id)
+    task = can_see("tasks", task_id)
     series = task["series_id"] and conn.execute(
         "SELECT * FROM series WHERE id = ?", (task["series_id"],)).fetchone()
     if "repeat" in data:
@@ -1698,9 +1938,11 @@ def apply_task_update(task, data, today):
         check_no_loops(task_id)
         if fields["project_id"] != was_in:
             join_project(task_id, fields["project_id"])
+            follow_container(task_id)
+    sharing(task_id, data)
     if data.get("repeat_from") in ("done", "calendar"):
         set_repeat_from(task_id, data["repeat_from"] == "done", today)
-    task = owned("tasks", task_id)
+    task = can_see("tasks", task_id)
     s = task["series_id"] and conn.execute("SELECT * FROM series WHERE id = ?", (task["series_id"],)).fetchone()
     if s and s["from_done"] and "completed" in data:
         if data["completed"] and not was_done:
@@ -2138,7 +2380,7 @@ def share_to_note(where, title, text, link, files):
     text, after any words. Returns the note's id; not committed."""
     conn = db.get_db()
     journal = where.startswith("journal:") and conn.execute(
-        "SELECT id FROM journals WHERE id = ? AND user_id = ?", (int(where[8:] or 0), g.user["id"])).fetchone()
+        f"SELECT id FROM journals WHERE id = ? AND {MINE}", (int(where[8:] or 0), g.user["id"], g.user["id"])).fetchone()
     words = richtext.from_text("\n\n".join(x for x in (text, link) if x))
     note_id = db.insert(conn, "notes", {"user_id": g.user["id"], "title": title[:500], "body": words}
                         | (entry_now(journal["id"]) if journal else {}))
@@ -2159,6 +2401,212 @@ def share_to_note(where, title, text, link, files):
 
 def device_hash(key):
     return hashlib.sha256(key.encode()).hexdigest()
+
+
+# --- groups -------------------------------------------------------------------
+# Settings → Groups: make one, invite people with an account here (by username), give each a
+# role. What's shared with a group (documents.group_id) comes later; see the helpers above.
+
+def group_owner(group_id):
+    """A group g.user is an owner of, else 404 (not in it) or 403 (in it, not an owner)."""
+    role = my_role(group_id)
+    if role is None:
+        abort(404)
+    if role != "owner":
+        abort(403)
+    return db.get_db().execute("SELECT * FROM user_groups WHERE id = ?", (group_id,)).fetchone()
+
+
+def check_role(value):
+    if value not in GROUP_ROLES:
+        raise ValueError("A role is owner, editor or viewer.")
+    return value
+
+
+def person(row):
+    return {"user_id": row["user_id"], "username": row["username"], "name": row["display_name"] or row["username"]}
+
+
+@app.get("/api/groups")
+@login_required
+def list_groups():
+    """My groups (with their members, and for owners the invitations out), and invitations to me."""
+    conn, me = db.get_db(), g.user["id"]
+    out = []
+    for gr in conn.execute("SELECT g.*, m.role FROM user_groups g JOIN group_members m ON m.group_id = g.id "
+                           "WHERE m.user_id = ? ORDER BY g.name COLLATE NOCASE", (me,)).fetchall():
+        members = conn.execute(
+            "SELECT m.user_id, m.role, u.username, u.display_name FROM group_members m JOIN users u ON u.id = m.user_id "
+            "WHERE m.group_id = ? ORDER BY m.role = 'viewer', u.display_name COLLATE NOCASE, u.username", (gr["id"],)).fetchall()
+        invites = conn.execute(
+            "SELECT i.id, i.role, i.user_id, u.username, u.display_name FROM group_invites i JOIN users u ON u.id = i.user_id "
+            "WHERE i.group_id = ? ORDER BY i.id", (gr["id"],)).fetchall() if gr["role"] == "owner" else []
+        out.append({"id": gr["id"], "name": gr["name"], "default_role": gr["default_role"],
+                    "viewers_complete": bool(gr["viewers_complete"]), "my_role": gr["role"],
+                    "members": [person(m) | {"role": m["role"]} for m in members],
+                    "invites": [person(i) | {"id": i["id"], "role": i["role"]} for i in invites]})
+    mine = conn.execute(
+        "SELECT i.id, i.role, g.id AS group_id, g.name AS group_name, u.username, u.display_name "
+        "FROM group_invites i JOIN user_groups g ON g.id = i.group_id LEFT JOIN users u ON u.id = i.invited_by "
+        "WHERE i.user_id = ? ORDER BY i.id", (me,)).fetchall()
+    return jsonify(groups=out, invites=[{"id": i["id"], "role": i["role"], "group_id": i["group_id"], "group_name": i["group_name"],
+                                         "from": (i["display_name"] or i["username"]) if i["username"] else None} for i in mine])
+
+
+@app.post("/api/groups")
+@login_required
+def create_group():
+    name = str(body().get("name") or "").strip()[:100]
+    if not name:
+        return bad("Give the group a name.")
+    conn = db.get_db()
+    group_id = conn.execute("INSERT INTO user_groups (name) VALUES (?)", (name,)).lastrowid
+    conn.execute("INSERT INTO group_members (group_id, user_id, role) VALUES (?, ?, 'owner')", (group_id, g.user["id"]))
+    conn.commit()
+    return list_groups(), 201
+
+
+@app.patch("/api/groups/<int:group_id>")
+@login_required
+def update_group(group_id):
+    group_owner(group_id)
+    data, sets = body(), {}
+    if "name" in data:
+        sets["name"] = str(data["name"] or "").strip()[:100]
+        if not sets["name"]:
+            return bad("Give the group a name.")
+    if "default_role" in data:
+        if data["default_role"] not in ("editor", "viewer"):
+            return bad("New members start as editors or viewers.")
+        sets["default_role"] = data["default_role"]
+    if "viewers_complete" in data:
+        sets["viewers_complete"] = 1 if data["viewers_complete"] else 0
+    conn = db.get_db()
+    if sets:
+        conn.execute(f"UPDATE user_groups SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?", (*sets.values(), group_id))
+        conn.commit()
+    return list_groups()
+
+
+@app.delete("/api/groups/<int:group_id>")
+@login_required
+def delete_group(group_id):
+    """Ends a group: what was shared with it is its makers' alone again."""
+    group_owner(group_id)
+    conn = db.get_db()
+    unshare_group(group_id)
+    conn.execute("DELETE FROM user_groups WHERE id = ?", (group_id,))
+    conn.commit()
+    return list_groups()
+
+
+@app.post("/api/groups/<int:group_id>/invites")
+@login_required
+def invite_to_group(group_id):
+    gr = group_owner(group_id)
+    data, conn = body(), db.get_db()
+    who = conn.execute("SELECT id FROM users WHERE username = ? AND disabled = 0",
+                       (str(data.get("username") or "").strip(),)).fetchone()
+    if not who:
+        return bad("There's no one here with that username.")
+    if my_role(group_id, who["id"]):
+        return bad("They're in the group already.")
+    try:
+        role = check_role(data.get("role") or gr["default_role"])
+    except ValueError as e:
+        return bad(str(e))
+    conn.execute("INSERT INTO group_invites (group_id, user_id, invited_by, role) VALUES (?, ?, ?, ?) "
+                 "ON CONFLICT (group_id, user_id) DO UPDATE SET role = excluded.role, invited_by = excluded.invited_by",
+                 (group_id, who["id"], g.user["id"], role))
+    conn.commit()
+    notify(who["id"], {"title": f"{g.user['display_name'] or g.user['username']} invited you to {gr['name']}",
+                       "body": "Accept it in Settings → Groups.", "tag": f"invite-{group_id}"})
+    return list_groups(), 201
+
+
+@app.delete("/api/groups/<int:group_id>/invites/<int:invite_id>")
+@login_required
+def cancel_invite(group_id, invite_id):
+    group_owner(group_id)
+    conn = db.get_db()
+    conn.execute("DELETE FROM group_invites WHERE id = ? AND group_id = ?", (invite_id, group_id))
+    conn.commit()
+    return list_groups()
+
+
+@app.post("/api/invites/<int:invite_id>/<any(accept, decline):answer>")
+@login_required
+def answer_invite(invite_id, answer):
+    conn = db.get_db()
+    inv = conn.execute("SELECT * FROM group_invites WHERE id = ? AND user_id = ?", (invite_id, g.user["id"])).fetchone()
+    if not inv:
+        abort(404)
+    if answer == "accept":
+        conn.execute("INSERT OR IGNORE INTO group_members (group_id, user_id, role) VALUES (?, ?, ?)",
+                     (inv["group_id"], g.user["id"], inv["role"]))
+    conn.execute("DELETE FROM group_invites WHERE id = ?", (invite_id,))
+    conn.commit()
+    return list_groups()
+
+
+def owners_left(group_id, without):
+    return db.get_db().execute("SELECT COUNT(*) FROM group_members WHERE group_id = ? AND role = 'owner' AND user_id != ?",
+                               (group_id, without)).fetchone()[0]
+
+
+@app.patch("/api/groups/<int:group_id>/members/<int:user_id>")
+@login_required
+def change_member(group_id, user_id):
+    group_owner(group_id)
+    try:
+        role = check_role(body().get("role"))
+    except ValueError as e:
+        return bad(str(e))
+    current = my_role(group_id, user_id)
+    if current is None:
+        abort(404)
+    if current == "owner" and role != "owner" and not owners_left(group_id, user_id):
+        return bad("A group needs an owner: make someone else one first.")
+    conn = db.get_db()
+    conn.execute("UPDATE group_members SET role = ? WHERE group_id = ? AND user_id = ?", (role, group_id, user_id))
+    conn.commit()
+    return list_groups()
+
+
+@app.delete("/api/groups/<int:group_id>/members/<int:user_id>")
+@login_required
+def remove_member(group_id, user_id):
+    """An owner takes someone out, or anyone leaves. The last one out ends the group."""
+    if user_id != g.user["id"]:
+        group_owner(group_id)
+    elif my_role(group_id) is None:
+        abort(404)
+    conn = db.get_db()
+    others = conn.execute("SELECT COUNT(*) FROM group_members WHERE group_id = ? AND user_id != ?",
+                          (group_id, user_id)).fetchone()[0]
+    if not others:
+        unshare_group(group_id)
+        conn.execute("DELETE FROM user_groups WHERE id = ?", (group_id,))
+    elif my_role(group_id, user_id) == "owner" and not owners_left(group_id, user_id):
+        return bad("A group needs an owner: make someone else one first.")
+    else:
+        conn.execute("DELETE FROM group_members WHERE group_id = ? AND user_id = ?", (group_id, user_id))
+    conn.commit()
+    return list_groups()
+
+
+def groups_without(user_id):
+    """Before a user is deleted: groups they'd leave without an owner get their longest-standing
+    member as one; groups they're alone in end."""
+    conn = db.get_db()
+    for (gid,) in conn.execute("SELECT group_id FROM group_members WHERE user_id = ?", (user_id,)).fetchall():
+        rest = conn.execute("SELECT user_id, role FROM group_members WHERE group_id = ? AND user_id != ? "
+                            "ORDER BY joined_at, user_id", (gid, user_id)).fetchall()
+        if not rest:
+            unshare_group(gid)
+            conn.execute("DELETE FROM user_groups WHERE id = ?", (gid,))
+        elif not any(r["role"] == "owner" for r in rest):
+            conn.execute("UPDATE group_members SET role = 'owner' WHERE group_id = ? AND user_id = ?", (gid, rest[0]["user_id"]))
 
 
 @app.get("/api/devices")
@@ -2370,12 +2818,13 @@ def read_list(name):
     conn.execute("UPDATE devices SET used_at = datetime('now') WHERE id = ?", (device["id"],))
     conn.commit()
     tasks = tasks_json(conn.execute(
-        "SELECT * FROM tasks WHERE user_id = ? AND completed_at IS NULL AND deleted_at IS NULL "
-        "ORDER BY position, id", (uid,)).fetchall())
+        f"SELECT * FROM tasks WHERE {MINE} AND completed_at IS NULL AND deleted_at IS NULL "
+        "ORDER BY position, id", (uid, uid)).fetchall())
     projects = {p["id"]: p for p in projects_json(conn.execute(
-        "SELECT * FROM projects WHERE user_id = ? AND deleted_at IS NULL", (uid,)).fetchall())}
+        f"SELECT * FROM projects WHERE {MINE} AND deleted_at IS NULL", (uid, uid)).fetchall())}
     areas = {a["id"]: a["name"] for a in conn.execute("SELECT id, name FROM areas WHERE user_id = ?", (uid,))}
     area_of = lambda t: projects[t["project_id"]]["area_id"] if t["project_id"] in projects else t["area_id"]  # noqa: E731
+    tasks = [t for t in tasks if t["assigned_to"] in (None, uid)]  # (not what's someone else's to do)
     shown = list_tasks(name, tasks, projects, today)
     if request.args.get("area"):
         want = request.args["area"].strip().lower()
@@ -2423,8 +2872,8 @@ def complete_by_key():
     catch_up(uid, today, local.strftime("%H:%M"))
     if data.get("id") not in (None, ""):
         try:
-            task = conn.execute("SELECT * FROM tasks WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
-                                (int(data["id"]), uid)).fetchone()
+            task = conn.execute(f"SELECT * FROM tasks WHERE id = ? AND {MINE} AND deleted_at IS NULL",
+                                (int(data["id"]), uid, uid)).fetchone()
         except (TypeError, ValueError):
             task = None
         if task is None:
@@ -2472,8 +2921,8 @@ def match_task(uid, text, today):
     (the oldest that's started), and tasks that are current (Focus, Queue, Inbox, Soon,
     Waiting) beat ones that are scheduled or put off."""
     rows = db.get_db().execute(
-        "SELECT * FROM tasks WHERE user_id = ? AND completed_at IS NULL AND deleted_at IS NULL "
-        "ORDER BY position, id", (uid,)).fetchall()
+        f"SELECT * FROM tasks WHERE {MINE} AND completed_at IS NULL AND deleted_at IS NULL "
+        "AND (assigned_to IS NULL OR assigned_to = ?) ORDER BY position, id", (uid, uid, uid)).fetchall()
     said = [w for w in words(text) if w not in FILLER] or words(text)
     key = lambda t: [w for w in words(t["title"]) if w not in FILLER] or words(t["title"])  # noqa: E731
     found = [t for t in rows if key(t) == said]
@@ -2574,7 +3023,7 @@ def file_size(f):
 @app.get("/api/attachments/<int:file_id>/<path:_name>")  # the name, for the browser's sake
 @login_required
 def get_attachment(file_id, _name=None):
-    row = owned("attachments", file_id)
+    row = attachment(file_id)
     inline = row["mime"] in INLINE_TYPES
     res = send_file(io.BytesIO(attachment_data(file_id)),
                     mimetype=row["mime"] if inline else "application/octet-stream",
@@ -2587,14 +3036,31 @@ def get_attachment(file_id, _name=None):
     return res
 
 
+def attachment(file_id):
+    """A file on a document g.user may see (and, to delete it, change)."""
+    row = db.get_db().execute("SELECT * FROM attachments WHERE id = ?", (file_id,)).fetchone()
+    kind = row and kind_of(row["document_id"])
+    if not kind:
+        abort(404)
+    owned(db.KINDS[kind]["view"], row["document_id"])
+    return row
+
+
 @app.delete("/api/attachments/<int:file_id>")
 @login_required
 def delete_attachment(file_id):
-    row = owned("attachments", file_id)
+    row = attachment(file_id)
     conn = db.get_db()
     conn.execute("DELETE FROM attachments WHERE id = ?", (file_id,))
     conn.commit()
     return jsonify(document_json(row["document_id"]))
+
+
+@app.errorhandler(403)
+def not_allowed(_e):
+    if request.path.startswith("/api/"):
+        return jsonify(error="You can look at that, but not change it: you're a viewer in its group."), 403
+    return "Not allowed", 403
 
 
 @app.errorhandler(413)
@@ -2665,9 +3131,9 @@ def empty_trash():
 @login_required
 def logbook():
     rows = db.get_db().execute(
-        "SELECT * FROM tasks WHERE user_id = ? AND completed_at IS NOT NULL "
+        f"SELECT * FROM tasks WHERE {MINE} AND completed_at IS NOT NULL "
         "AND deleted_at IS NULL ORDER BY completed_at DESC LIMIT 500",
-        (g.user["id"],)).fetchall()
+        (g.user["id"], g.user["id"])).fetchall()
     return jsonify(tasks_json(rows))
 
 
@@ -2679,18 +3145,18 @@ def trash():
     # comes back with it; something trashed on its own before is listed apart.
     went_with = "IN (SELECT o.id FROM documents o WHERE o.deleted_at = {}.deleted_at)"
     rows = conn.execute(
-        "SELECT * FROM tasks WHERE user_id = ? AND deleted_at IS NOT NULL "
+        f"SELECT * FROM tasks WHERE {MINE} AND deleted_at IS NOT NULL "
         f"AND (project_id IS NULL OR project_id NOT {went_with.format('tasks')}) ORDER BY deleted_at DESC",
-        (g.user["id"],)).fetchall()
+        (g.user["id"], g.user["id"])).fetchall()
     projects = conn.execute(
-        "SELECT * FROM projects WHERE user_id = ? AND deleted_at IS NOT NULL "
+        f"SELECT * FROM projects WHERE {MINE} AND deleted_at IS NOT NULL "
         f"AND (parent_id IS NULL OR parent_id NOT {went_with.format('projects')}) ORDER BY deleted_at DESC",
-        (g.user["id"],)).fetchall()
+        (g.user["id"], g.user["id"])).fetchall()
     with_it = lambda p: conn.execute(  # noqa: E731
         f"SELECT COUNT(*) FROM documents WHERE deleted_at = ? AND id IN ({marks_for(list(project_contents(p['id'])) or [0])})",
         (p["deleted_at"], *(project_contents(p["id"]) or [0]))).fetchone()[0]
-    notes = conn.execute("SELECT * FROM notes WHERE user_id = ? AND deleted_at IS NOT NULL "
-                         "ORDER BY deleted_at DESC", (g.user["id"],)).fetchall()
+    notes = conn.execute(f"SELECT * FROM notes WHERE {MINE} AND deleted_at IS NOT NULL "
+                         "ORDER BY deleted_at DESC", (g.user["id"], g.user["id"])).fetchall()
     return jsonify(tasks=tasks_json(rows), notes=notes_json(notes),
                    projects=[p | {"inside": with_it(p)} for p in projects_json(projects)])
 
@@ -2758,6 +3224,8 @@ def write_note(data, note=None, today=None):
     if not journal and old.get("entry_date"):
         fields["entry_date"] = fields["entry_time"] = None
     conn = db.get_db()
+    if note is not None:
+        keep_personal(note, "note", fields)
     if note is None:
         fields["user_id"] = g.user["id"]
         # Made offline: when it was written (sent with it), if that's believable.
@@ -2772,6 +3240,9 @@ def write_note(data, note=None, today=None):
         if fields:
             conn.execute(f"UPDATE notes SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
                          (*fields.values(), note_id))
+    if note is None or ("journal_id" in fields and fields["journal_id"] != note.get("journal_id")):
+        follow_container(note_id)
+    sharing(note_id, data)
     if isinstance(data.get("tags"), list):
         set_tags(note_id, data["tags"])
     set_related("note", note_id, given_ids(data, "related"))
@@ -2794,13 +3265,22 @@ def create_note():
 @login_required
 def update_note(note_id):
     note = dict(owned("notes", note_id))
+    data = body()
+    # A shared note's text changed by someone else since this edit began (base: the updated_at
+    # it began from): this one is saved, and theirs kept as a note of its own, so nothing's lost.
+    other = None
+    if (note["group_id"] and data.get("base") and data["base"] != note["updated_at"]
+            and any(k in data for k in ("title", "body"))):
+        other = write_note({"title": f"{note['title'] or 'Untitled'} (the other version)", "body": note["body"],
+                            "journal_id": note["journal_id"], "entry_date": note["entry_date"],
+                            "entry_time": note["entry_time"]} | ({} if note["journal_id"] else {"group_id": note["group_id"]}))
     try:
-        write_note(body(), note)
+        write_note(data, note)
     except (ValueError, TypeError) as e:
         db.get_db().rollback()
         return bad(str(e))
     db.get_db().commit()
-    return jsonify(note_dict(note_id))
+    return jsonify(note_dict(note_id) | ({"clash": other} if other else {}))
 
 
 def category_fields(data, table):
@@ -2820,7 +3300,7 @@ def category_fields(data, table):
 def named_list_routes(table, path):
     """Add, rename (and recolour) and delete for areas, note categories and journals. (Areas'
     icons have routes of their own.)"""
-    shown = lambda row: {k: row[k] for k in row.keys() if k not in ("user_id", "icon_svg")}  # noqa: E731
+    shown = lambda row: {k: row[k] for k in row.keys() if k not in ("icon_svg",) and (k != "user_id" or table == "journals")}  # noqa: E731
     def create():
         try:
             fields = category_fields(body(), table)
@@ -2836,20 +3316,24 @@ def named_list_routes(table, path):
         return jsonify(shown(conn.execute(f"SELECT * FROM {table} WHERE id = ?", (cur.lastrowid,)).fetchone())), 201
 
     def update(item_id):
-        owned(table, item_id)
+        row = owned(table, item_id)
         try:
             fields = category_fields(body(), table)
+            if table == "journals" and "group_id" in body():
+                share_journal(row, body()["group_id"])
         except ValueError as e:
+            db.get_db().rollback()
             return bad(str(e))
         conn = db.get_db()
         if fields:
             conn.execute(f"UPDATE {table} SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
                          (*fields.values(), item_id))
-            conn.commit()
+        conn.commit()
         return jsonify(shown(owned(table, item_id)))
 
     def delete(item_id):
-        owned(table, item_id)
+        if owned(table, item_id)["user_id"] != g.user["id"]:
+            abort(403)  # (a shared journal goes only when whoever made it says)
         conn = db.get_db()
         # A journal's entries go to the trash with it (restored, they're notes); a
         # category's notes just lose it.
@@ -2863,6 +3347,19 @@ def named_list_routes(table, path):
     for fn, rule, methods in ((create, f"/api/{path}", ["POST"]), (update, f"/api/{path}/<int:item_id>", ["PATCH"]),
                               (delete, f"/api/{path}/<int:item_id>", ["DELETE"])):
         app.add_url_rule(rule, f"{table}_{fn.__name__}", login_required(fn), methods=methods)
+
+
+def share_journal(journal, group_id):
+    """Shares a journal (and every entry in it) with a group, or (None) stops: whoever made it."""
+    if journal["user_id"] != g.user["id"]:
+        raise ValueError("Only whoever made the journal can share it, or stop sharing it.")
+    group_id = int(group_id) if group_id not in (None, "") else None
+    if group_id and my_role(group_id) not in ("owner", "editor"):
+        raise ValueError("You can only share with a group you can change things in.")
+    conn = db.get_db()
+    conn.execute("UPDATE journals SET group_id = ? WHERE id = ?", (group_id, journal["id"]))
+    for (entry,) in conn.execute("SELECT id FROM notes WHERE journal_id = ?", (journal["id"],)).fetchall():
+        set_group(entry, group_id)
 
 
 named_list_routes("areas", "areas")
@@ -3056,6 +3553,11 @@ def reorder(kind):
         # (A project's page orders its tasks and subprojects together: a subproject's place
         # there is its step.)
         sub = kind == "tasks" and kind_of(int(row_id)) == "project"
+        if table != "areas" and not sub:
+            row = conn.execute(f"SELECT * FROM {table} WHERE id = ? AND {MINE}", (int(row_id), g.user["id"], g.user["id"])).fetchone()
+            if row and row["user_id"] != g.user["id"]:
+                keep_personal(row, "task" if table == "tasks" else "project", {"position": pos})
+                continue
         conn.execute(f"UPDATE {'projects SET step' if sub else table + ' SET position'} = ? WHERE id = ? AND user_id = ?",
                      (pos, int(row_id), g.user["id"]))
     conn.commit()
@@ -3156,6 +3658,7 @@ def create_project():
     try:
         if fields.get("parent_id"):
             join_project(project_id, fields["parent_id"])
+        sharing(project_id, body(), new=True)
         project_links_and_tags(project_id, body())
     except (ValueError, TypeError) as e:
         conn.rollback()
@@ -3180,6 +3683,7 @@ def update_project(project_id):
     try:
         data = body()
         fields = project_fields(data)
+        keep_personal(old, "project", fields)
         check_parent(project_id, fields.get("parent_id"))
         place_in_parent(fields, old["parent_id"])
         schedule_project(fields, old)
@@ -3190,6 +3694,9 @@ def update_project(project_id):
             carry_state(project_id, old["state"], fields["state"])
         if fields.get("parent_id") and fields["parent_id"] != old["parent_id"]:
             join_project(project_id, fields["parent_id"])
+        if "parent_id" in fields and fields["parent_id"] != old["parent_id"]:
+            follow_container(project_id)
+        sharing(project_id, data)
         if "deleted_at" in fields:
             trashed(project_id, fields["deleted_at"], old["deleted_at"])
         project_links_and_tags(project_id, data)
@@ -3566,6 +4073,7 @@ def delete_user(user_id):
     if user_id == g.user["id"]:
         return bad("You can't delete yourself.")
     google_forget(user_id)
+    groups_without(user_id)
     conn = db.get_db()
     conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
     conn.commit()
@@ -3723,7 +4231,8 @@ def send_reminders(now=None):
         tz = ZoneInfo(user_tz(user))
         local = now.astimezone(tz)
         local_s = local.strftime("%Y-%m-%d %H:%M")
-        open_tasks = "user_id = ? AND completed_at IS NULL AND deleted_at IS NULL"
+        # (a shared task's reminders go to whoever it's given to, else whoever made it)
+        open_tasks = "COALESCE(assigned_to, user_id) = ? AND completed_at IS NULL AND deleted_at IS NULL"
         # Quiet hours: everything waits. Reminders stay due, and starts from the quiet hours
         # are still sent when they end (below), so they all arrive then.
         spell = quiet_spell(local, settings["quiet_hours"])

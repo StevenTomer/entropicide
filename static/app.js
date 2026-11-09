@@ -262,12 +262,12 @@ const OFFLINE_NEW = {
   tasks: () => ({ project_id: null, title: "", notes: "", state: "inbox", focus: false, due_date: null, start_date: null,
     start_time: null, waiting_for: "", energy: null, minutes: null, priority: 0, series_id: null, series_index: null,
     missed: false, completed_at: null, repeat: null, on_miss: null, series_latest: null, blocked_by: [], people: [],
-    spent: 0, remind_at: null, remind_before: null }),
+    spent: 0, remind_at: null, remind_before: null, group_id: null, assigned_to: null, by: S.data.user.id }),
   projects: () => ({ name: "", notes: "", sequential: false, state: "next", focus: false, due_date: null, start_date: null,
     completed_at: null, priority: 0, blocked_by: [], parent_id: null, step: null, review_every: 7, last_reviewed: null,
-    review_due: false, stalled: true }),
+    review_due: false, stalled: true, group_id: null, by: S.data.user.id }),
   notes: () => ({ title: "", body: "", font: "", category_id: null, journal_id: null, entry_date: null, entry_time: null,
-    pinned: false, archived_at: null }),
+    pinned: false, archived_at: null, group_id: null, by: S.data.user.id }),
 };
 
 // Changes op as the server would (near enough) on S.data, and returns what it would reply.
@@ -324,6 +324,11 @@ function changeOffline(kind, id, changes) {
     if (x.state !== wasState) carryState(x, wasState, x.state);
   }
   if (kind !== "notes" && (x.project_id ?? x.parent_id ?? null) !== (wasIn ?? null)) joinProject(x, kind === "tasks" ? "task" : "project");
+  // (Put in a shared project, it's shared as that is; as app.py's follow_container.)
+  if (kind !== "notes" && (x.project_id ?? x.parent_id ?? null) !== (wasIn ?? null)) {
+    x.group_id = projectById(x.project_id ?? x.parent_id)?.group_id ?? null;
+    if (!x.group_id) x.assigned_to = null;
+  }
   if (kind === "notes") noteChangedOffline(x, changes, stamp);
   // Like /api/data: only open tasks, and projects and notes not in the trash.
   const gone = kind === "tasks" ? x.completed_at || x.deleted_at : x.deleted_at;
@@ -569,14 +574,112 @@ function viewTasks(view) {
   } else if (view.startsWith("project:")) {
     const id = Number(view.slice(8));
     list = S.data.tasks.filter((t) => t.project_id === id);
+  } else if (view === "shared") {
+    list = S.data.tasks.filter((t) => t.group_id);
   } else if (view === "logbook" || view === "trash") {
     list = S.extra;
   } else {
     list = [];
   }
   if (!view.startsWith("project:")) list = list.filter((t) => inArea(taskArea(t)));
+  // A shared task given to someone else is theirs to do: on its project's page and in Shared,
+  // not in my lists.
+  if (!view.startsWith("project:") && !["shared", "logbook", "trash"].includes(view)) list = list.filter((t) => !othersToDo(t));
   return list;
 }
+
+// ---- sharing ----
+// What's shared with a group (Settings → Groups) shows 👥, with who it's given to; its maker's
+// name when it isn't mine. S.data.groups: mine (with my role, and who's in each); S.data.people:
+// names by id. GET /api/changes says when something shared has changed, and the app reloads.
+
+const myGroups = () => S.data.groups || [];
+const groupById = (id) => myGroups().find((gr) => gr.id === id);
+const personName = (id) => (id === S.data.user.id ? "me" : S.data.people?.[id] || "someone");
+// A shared task given to someone else.
+const othersToDo = (t) => !!t.assigned_to && t.assigned_to !== S.data.user.id;
+
+// Whether I may change it: mine, or shared with a group I'm an owner or editor of.
+function canChange(x) {
+  if (!x || !x.group_id || x.by == null || x.by === S.data.user.id) return true;
+  return ["owner", "editor"].includes(groupById(x.group_id)?.role);
+}
+
+function sharedMeta(x, kind) {
+  const gr = groupById(x.group_id);
+  const who = kind === "task" ? (x.assigned_to ? ` → ${h(personName(x.assigned_to))}` : " → anyone") : "";
+  return `<span class="shared" title="Shared with ${h(gr?.name || "a group")}${x.by !== S.data.user.id ? `, by ${h(personName(x.by))}` : ""}">👥${who}</span>`;
+}
+
+// Who it's shared with (and, a task, who's to do it), in its details.
+function shareField(x, kind) {
+  if (!myGroups().length && !x.group_id) return "";
+  const gr = groupById(x.group_id);
+  const inside = kind === "task" ? projectById(x.project_id) : kind === "project" ? projectById(x.parent_id) : null;
+  let html;
+  if (x.group_id && inside?.group_id === x.group_id) {
+    html = `<p class="muted small share-note">👥 Shared with ${h(gr?.name || "a group")}, as its project is.</p>`;
+  } else if (x.by != null && x.by !== S.data.user.id) {
+    html = `<p class="muted small share-note">👥 Shared with ${h(gr?.name || "a group")} by ${h(personName(x.by))}.</p>`;
+  } else {
+    html = `<label title="Who else sees it (and, with a project, everything in it)">Shared with <select data-field="group_id">${options(
+      [["", "Only me"], ...myGroups().filter((g) => g.role !== "viewer" || g.id === x.group_id).map((g) => [g.id, g.name])], x.group_id ?? "")}</select></label>`;
+  }
+  if (kind === "task" && x.group_id && gr) {
+    html += `<label title="Whose lists it's in: theirs alone, or everyone's in the group">For <select data-field="assigned_to">${options(
+      [["", `Anyone in ${gr.name}`], ...gr.members.map((id) => [id, id === S.data.user.id ? "Me" : personName(id)])], x.assigned_to ?? "")}</select></label>`;
+  }
+  return html;
+}
+
+// Moving something out of a shared project (or into one shared differently) changes who sees
+// it: asked first. False if not.
+function leavingShared(kind, id, changes) {
+  const key = { task: "project_id", project: "parent_id" }[kind];
+  if (!key || !(key in changes)) return true;
+  const x = kind === "task" ? taskById(id) : projectById(id);
+  if (!x?.group_id) return true;
+  const into = projectById(changes[key]);
+  if ((into?.group_id ?? null) === x.group_id) return true;
+  const gr = groupById(x.group_id)?.name || "the group";
+  return confirm(into?.group_id ? `“${into.name}” is shared with ${groupById(into.group_id)?.name || "another group"}: it'll be shared there instead of with ${gr}. Move it?`
+    : `It'll no longer be shared with ${gr}: it'll be yours alone. Move it?`);
+}
+
+// The Shared list: shared projects, then shared tasks: mine to do, anyone's, then others'.
+function sharedListHtml(list) {
+  const me = S.data.user.id;
+  const projects = byPriority(S.data.projects.filter((p) => p.group_id && p.state !== "done"));
+  let html = "", rows = 0;
+  if (projects.length) {
+    html += '<h2 class="group">Projects</h2>' + projects.map((p) => projectRow(p)).join("");
+    rows += projects.length;
+  }
+  const groups = [["For me", list.filter((t) => t.assigned_to === me)], ["For anyone", list.filter((t) => !t.assigned_to)],
+    ...[...new Set(list.map((t) => t.assigned_to).filter((id) => id && id !== me))].map((id) => [`For ${personName(id)}`, list.filter((t) => t.assigned_to === id)])];
+  for (const [label, ts] of groups) {
+    if (ts.length) html += `<h2 class="group">${h(label)}</h2>` + ts.map((t) => taskRow(t, { showState: true })).join("");
+  }
+  if (!projects.length && !list.length) {
+    html += '<p class="empty">Nothing shared yet. Share a project, a task, a note or a journal with a group from its details.</p>';
+    rows++;
+  }
+  return { html, rows };
+}
+
+// Checking for what others have changed: every 30 seconds while the app's in view (and when
+// it comes back into view), if I'm in a group. Not while I'm typing or a dialog's open: then
+// at the next check.
+async function checkShared() {
+  if (!S.data || !myGroups().length || document.hidden || !navigator.onLine) return;
+  let r;
+  try { r = await api("GET", "/changes", undefined, { quiet: true }); } catch { return; }
+  if (!r || r.stamp === S.data.shared_stamp) return;
+  const busy = document.querySelector("dialog[open]") || document.activeElement?.closest?.("input, textarea, select, [contenteditable='true']");
+  if (!busy) await refresh();
+}
+setInterval(checkShared, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkShared(); });
 
 // ---- lists by project ----
 // In a list (Inbox, Queue, Soon …), tasks with a project come under it, by where its first one
@@ -773,9 +876,9 @@ function replaceTask(task) {
 // Saving a task, project or note: where it's saved, how the reply takes its place, and the
 // changes that alter which rows there are (so everything's reloaded after them).
 const SAVING = {
-  task: { path: "tasks", put: (x) => replaceTask(x), reload: ["completed", "deleted"] },
+  task: { path: "tasks", put: (x) => replaceTask(x), reload: ["completed", "deleted", "group_id", "assigned_to", "project_id"] },
   // (A project's state, start date and parent can move what's in it.)
-  project: { path: "projects", put: (x) => replaceProject(x), reload: ["deleted", "state", "start_date", "parent_id"] },
+  project: { path: "projects", put: (x) => replaceProject(x), reload: ["deleted", "state", "start_date", "parent_id", "group_id"] },
   note: { path: "notes", put: (x) => upsertNote(x), reload: [] },
 };
 
@@ -783,6 +886,7 @@ const SAVING = {
 // change that adds or removes rows; else the page, or with quiet just the sidebar's counts.
 async function patchItem(kind, id, changes, { quiet } = {}) {
   const how = SAVING[kind];
+  if (!leavingShared(kind, id, changes)) { render(); return null; }
   const x = await api("PATCH", `/${how.path}/${id}`, changes);
   if (x) how.put(x);
   if (how.reload.some((k) => k in changes)) await refresh();
@@ -834,7 +938,7 @@ function setAreas(ids) {
 
 function navItem(view, label, count, extraClass = "") {
   const active = S.view === view ? " active" : "";
-  return `<a href="#" class="nav-item${active} ${extraClass}" data-view="${h(view)}"${["recurring", "all", "calendar", "links", "notes", "journal", "timeline", "review"].includes(view) ? "" : ` data-drop="${h(view)}"`}>
+  return `<a href="#" class="nav-item${active} ${extraClass}" data-view="${h(view)}"${["recurring", "all", "calendar", "links", "notes", "journal", "timeline", "review", "shared"].includes(view) ? "" : ` data-drop="${h(view)}"`}>
     <span class="nav-label">${label}</span>${count ? `<span class="count">${count}</span>` : ""}</a>`;
 }
 
@@ -858,6 +962,7 @@ function renderNav() {
        <button class="icon add-project" title="New project" aria-label="New project">+</button>
      </div>` +
     navItem("review", "Review", reviewDue().length) +
+    (myGroups().length ? navItem("shared", "👥 Shared", viewTasks("shared").filter((t) => t.assigned_to === S.data.user.id).length) : "") +
     navItem("timeline", "Timeline", 0, S.view.startsWith("timeline:") ? "active" : "") +
     navItem("notes", "Notes", 0) +
     navItem("journal", "Journal", 0) +
@@ -880,6 +985,7 @@ function viewTitle() {
   if (S.view.startsWith("project:")) return projectById(Number(S.view.slice(8)))?.name ?? "Project";
   if (S.view === "timeline") return "Timeline";
   if (S.view === "review") return "Weekly review";
+  if (S.view === "shared") return "Shared";
   if (S.view.startsWith("timeline:")) {
     const [, kind, id] = S.view.split(":");
     return `${(kind === "project" ? projectById(Number(id))?.name : journalById(Number(id))?.name) ?? ""} · timeline`;
@@ -893,6 +999,7 @@ function taskRow(t, { showState, grouped = false }) {
   const meta = [];
   if (showState && t.state !== "next") meta.push(`<span class="badge">${STATE_LABEL[t.state]}</span>`);
   if (p && !grouped && !S.view.startsWith("project:")) meta.push(`<span class="proj">${h(p.name)}</span>`);
+  if (t.group_id) meta.push(sharedMeta(t, "task"));
   if (t.state === "scheduled" && t.start_date) meta.push(`<span class="start">Starts ${fmtWhen(t.start_date, t.start_time)}</span>`);
   if (t.waiting_for) meta.push(`<span class="waiting">⧗ ${h(t.waiting_for)}</span>`);
   if (t.due_date) {
@@ -1031,6 +1138,7 @@ function projectRow(p, depth = null, { draggable = false, onPage = draggable } =
       <div class="meta">
         ${depth && p.state !== "next" ? `<span class="badge">${PROJECT_STATES.find(([s]) => s === p.state)?.[1] || p.state}</span>` : ""}
         ${p.sequential ? '<span class="badge">Sequential</span>' : ""}
+        ${p.group_id ? sharedMeta(p, "project") : ""}
         ${parent ? `<span>in ${h(parent.name)}</span>` : ""}
         ${area ? `<span>${h(area.name)}</span>` : ""}
         <span>${n} open</span>
@@ -1064,7 +1172,7 @@ function renderList() {
   document.title = viewTitle() + " · Entropicide";
   const el = $("#list");
   const readOnly = S.view === "logbook" || S.view === "trash";
-  $("#quick-add").hidden = readOnly || ["projects", "links", "notes", "journal", "timeline", "review"].includes(S.view) || S.view.startsWith("timeline:");
+  $("#quick-add").hidden = readOnly || ["projects", "links", "notes", "journal", "timeline", "review", "shared"].includes(S.view) || S.view.startsWith("timeline:");
   if (S.view === "notes" || S.view === "journal") {
     $("#main").append($("#detail"));  // (as for links)
     renderNotes(el);
@@ -1163,6 +1271,10 @@ function renderList() {
       const rows = list.filter((t) => t.state === st);
       if (rows.length) html += `<h2 class="group">${label}</h2>` + rows.map((t) => taskRow(t, {})).join("");
     }
+  } else if (S.view === "shared") {
+    const shared = sharedListHtml(list);
+    html += shared.html;
+    subs = shared.rows;
   } else if (STATE_LABEL[S.view]) {
     const grouped = groupedByProject(list);
     html += grouped.html;
@@ -1719,6 +1831,7 @@ function renderDetail() {
           <label title="Not before: it (and what's in it) waits in Scheduled until then">Starts <input type="date" data-field="start_date" value="${h(p.start_date || "")}"></label>
         </div>
         <label>Area <select data-field="area_id">${options(areaOpts, p.area_id)}</select></label>
+        ${shareField(p, "project")}
         <label title="A project can be a part of a bigger one">Part of <select data-field="parent_id">${options(
           [["", "No project (top level)"], ...parentChoices(p).map((q) => [q.id, q.name])], p.parent_id ?? "")}</select></label>
         <label title="Its tasks show under these tags too">Tags <input data-field="tags" value="${h((p.tags || []).join(", "))}" list="tag-list" placeholder="comma, separated"></label>
@@ -1784,6 +1897,7 @@ function renderDetail() {
       <label>Tags <input data-field="tags" value="${h(t.tags.join(", "))}" list="tag-list" placeholder="comma, separated"></label>
       <datalist id="tag-list">${S.data.tags.map((x) => `<option value="${h(x.name)}">`).join("")}</datalist>
       ${peopleField(t)}
+      ${shareField(t, "task")}
     </section>
     <section class="d-group" aria-label="When">
       <h3>When</h3>
@@ -1832,7 +1946,7 @@ function renderDetail() {
 // ---- a task's or project's text (the editor is editor.js's, as a note's is) ----------
 
 function detailText(x, kind) {
-  const locked = !!(x.completed_at || x.deleted_at);
+  const locked = !!(x.completed_at || x.deleted_at) || !canChange(x);
   return `<div class="d-text${locked ? " locked" : ""}">
     ${locked ? "" : editorTools()}
     <div class="ne-body note-body" contenteditable="${!locked}" role="textbox" aria-multiline="true"
@@ -1841,8 +1955,14 @@ function detailText(x, kind) {
   </div>`;
 }
 
-// The text's editor host (editor.js) for the task or project kind id in the details el.
+// The text's editor host (editor.js) for the task or project kind id in the details el. (For a
+// viewer of a shared one, the details are only to look at.)
 function mountDetailText(el, kind, id) {
+  const x = kind === "task" ? taskById(id) : projectById(id);
+  el.classList.toggle("read-only", !canChange(x));
+  if (!canChange(x)) {
+    for (const c of el.querySelectorAll("input, select, textarea, .detail-actions button, .state-picker button, .d-star, .d-waypoint")) c.disabled = true;
+  }
   const root = $(".d-text", el);
   const item = () => (kind === "task" ? taskById(id) : projectById(id));
   const host = {
@@ -2653,7 +2773,7 @@ function fieldValue(input) {
   const v = input.value;
   const f = input.dataset.field;
   if (f === "tags") return v.split(",").map((s) => s.trim()).filter(Boolean);
-  if (["project_id", "parent_id", "area_id", "minutes", "review_every"].includes(f)) return v === "" ? null : Number(v);
+  if (["project_id", "parent_id", "area_id", "minutes", "review_every", "group_id", "assigned_to"].includes(f)) return v === "" ? null : Number(v);
   if (f === "priority") return clampPriority(Number(v));
   if (f === "remind_at") return v ? localInputToUtc(v) : null;
   return v;
@@ -3903,6 +4023,14 @@ async function openSettings() {
       <div class="device-state small">…</div>
     </section>
 
+    <section class="groups">
+      <h3>Groups</h3>
+      <p class="muted small">A group (a family, a club) is people with an account here who share things.
+        Make one and invite them by their username; each is an <em>owner</em> (manages the group),
+        an <em>editor</em> (changes what's shared) or a <em>viewer</em> (sees it).</p>
+      <div class="group-state small">…</div>
+    </section>
+
     <section class="api-keys">
       <h3>Add from other apps</h3>
       <p class="muted small">Give another app or gadget a key of its own to add tasks: an Alexa skill, Home
@@ -3958,6 +4086,7 @@ async function openSettings() {
   fillAppVersion();
   fillDevices();
   fillApiKeys();
+  fillGroups();
   fillPushState();
   fillStorage();
 }
@@ -5291,6 +5420,72 @@ async function fillApiKeys(made) {
     await api("DELETE", `/devices/${b.closest("[data-device]").dataset.device}`);
     fillApiKeys();
   });
+}
+
+// Settings → Groups: mine (with their people, and for an owner, invitations and roles) and
+// invitations to me. Each change returns the whole picture again (GET /api/groups).
+const ROLE_LABEL = { owner: "Owner", editor: "Editor", viewer: "Viewer" };
+
+async function fillGroups(data) {
+  const el = $(".group-state");
+  if (!el) return;
+  try { data ||= await api("GET", "/groups", undefined, { quiet: true }); } catch { el.textContent = "Couldn't load your groups."; return; }
+  const me = S.data.user.id;
+  const roleSelect = (cls, value, owner = true) => `<select class="${cls}" aria-label="Role">${options(
+    Object.entries(ROLE_LABEL).filter(([r]) => owner || r !== "owner"), value)}</select>`;
+  el.innerHTML = data.invites.map((i) => `<div class="group-invite" data-invite="${i.id}">
+      <b>${h(i.from || "Someone")}</b> invited you to <b>${h(i.group_name)}</b> (as ${ROLE_LABEL[i.role].toLowerCase()}).
+      <button type="button" class="accept-invite">Join</button> <button type="button" class="link decline-invite">No, thanks</button></div>`).join("") +
+    data.groups.map((gr) => {
+      const owner = gr.my_role === "owner";
+      return `<div class="group-card" data-group="${gr.id}">
+        <div class="group-name">${owner ? `<input class="group-rename" value="${h(gr.name)}" aria-label="Group name" maxlength="100">` : `<b>${h(gr.name)}</b>`}
+          <span class="muted">you're ${ROLE_LABEL[gr.my_role].toLowerCase()}</span></div>
+        <ul class="plain group-members">${gr.members.map((m) => `<li data-user="${m.user_id}">
+          ${h(m.name)}${m.name.toLowerCase() !== m.username.toLowerCase() ? ` <span class="muted">${h(m.username)}</span>` : ""}
+          ${owner ? roleSelect("member-role", m.role) : `<span class="badge">${ROLE_LABEL[m.role]}</span>`}
+          ${m.user_id === me ? '<button type="button" class="link danger leave-group">Leave</button>'
+            : owner ? '<button type="button" class="link danger remove-member">Remove</button>' : ""}</li>`).join("")}
+          ${gr.invites.map((i) => `<li class="muted" data-invite="${i.id}">${h(i.name)} (${h(i.username)}): invited as
+            ${ROLE_LABEL[i.role].toLowerCase()} <button type="button" class="link cancel-invite">Cancel</button></li>`).join("")}</ul>
+        ${owner ? `<form class="inline invite-form"><input name="username" placeholder="Username to invite" required autocomplete="off">
+            ${roleSelect("invite-role", gr.default_role)}<button>Invite</button></form>
+          <label class="check">New people join as ${roleSelect("default-role", gr.default_role, false)}</label>
+          <label class="check"><input type="checkbox" class="viewers-complete" ${gr.viewers_complete ? "checked" : ""}>
+            Viewers can tick off tasks assigned to them</label>
+          <p><button type="button" class="link danger end-group">End the group</button></p>` : ""}
+      </div>`;
+    }).join("") +
+    `<form class="inline new-group"><input name="name" placeholder="New group (e.g. Family)" required maxlength="100"><button>Make it</button></form>`;
+  const groupOf = (x) => Number(x.closest("[data-group]")?.dataset.group);
+  const run = async (method, path, payload) => {
+    try { fillGroups(await api(method, path, payload)); } catch { /* (api shows why) */ }
+  };
+  el.onsubmit = (e) => {
+    e.preventDefault();
+    const f = e.target;
+    if (f.matches(".new-group")) run("POST", "/groups", { name: f.elements.name.value.trim() });
+    else if (f.matches(".invite-form")) run("POST", `/groups/${groupOf(f)}/invites`, { username: f.elements.username.value.trim(), role: $(".invite-role", f).value });
+  };
+  el.onclick = (e) => {
+    const b = e.target.closest("button");
+    if (!b || b.type === "submit" || b.closest("form")) return;
+    const gid = groupOf(b), uid = Number(b.closest("[data-user]")?.dataset.user), inv = b.closest("[data-invite]")?.dataset.invite;
+    if (b.matches(".accept-invite")) run("POST", `/invites/${inv}/accept`);
+    else if (b.matches(".decline-invite")) run("POST", `/invites/${inv}/decline`);
+    else if (b.matches(".cancel-invite")) run("DELETE", `/groups/${gid}/invites/${inv}`);
+    else if (b.matches(".remove-member") && confirm("Take them out of the group? They'll no longer see what's shared with it.")) run("DELETE", `/groups/${gid}/members/${uid}`);
+    else if (b.matches(".leave-group") && confirm("Leave the group? You'll no longer see what's shared with it.")) run("DELETE", `/groups/${gid}/members/${uid}`);
+    else if (b.matches(".end-group") && confirm("End the group? Everyone leaves it, and what was shared with it goes back to whoever made it.")) run("DELETE", `/groups/${gid}`);
+  };
+  el.onchange = (e) => {
+    const t = e.target, gid = groupOf(t);
+    e.stopPropagation();  // (not the settings dialog's own change handler)
+    if (t.matches(".member-role")) run("PATCH", `/groups/${gid}/members/${t.closest("[data-user]").dataset.user}`, { role: t.value });
+    else if (t.matches(".group-rename") && t.value.trim()) run("PATCH", `/groups/${gid}`, { name: t.value.trim() });
+    else if (t.matches(".default-role")) run("PATCH", `/groups/${gid}`, { default_role: t.value });
+    else if (t.matches(".viewers-complete")) run("PATCH", `/groups/${gid}`, { viewers_complete: t.checked });
+  };
 }
 
 // Settings → Troubleshooting: which Android app this is, and whether there's a newer one.

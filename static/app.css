@@ -1053,3 +1053,18 @@ dialog.draw-dlg:not([open]) { display: none; }
 .proj-group .link { color: var(--muted); }
 .proj-group .link:hover { color: var(--accent); }
 .row.task.in-group { margin-left: 1.25rem; }
+
+/* Settings → Groups */
+.group-card { margin: 0.625rem 0; padding: 0.625rem 0.75rem; border: 1px solid var(--line); border-radius: var(--radius); }
+.group-name { display: flex; gap: 0.625rem; align-items: baseline; margin-bottom: 0.375rem; }
+.group-name input { flex: 1; font-weight: 600; }
+.group-members li { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; padding: 0.1875rem 0; }
+.group-members select, .group-card .check select, .invite-form select { width: auto; }
+.group-invite { margin: 0.5rem 0; padding: 0.5rem 0.75rem; border-radius: var(--radius); background: var(--accent-soft); }
+
+/* Sharing: 👥 on what's shared (with who's to do it), and details only to look at for a viewer */
+.meta .shared, .note-meta .shared { color: var(--accent); white-space: nowrap; }
+.share-note { margin: 0.25rem 0; }
+#detail.read-only .d-main, #note-dialog.read-only .ne-body { opacity: 0.92; }
+#detail.read-only .detail-head::after { content: "Only to look at: you're a viewer in its group"; font-size: 0.75rem; color: var(--muted); }
+.ne-share, .journal-share { width: auto; }

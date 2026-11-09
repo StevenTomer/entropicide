@@ -62,6 +62,13 @@ Settings → Troubleshooting.
   **Sketch** (pen and ink, in six colours and three sizes, with an eraser and undo; it follows a
   stylus's pressure) or a **Diagram** (boxes, arrows, shapes and words, with Excalidraw built in).
   They're placed like any picture, and *Edit drawing* opens them again to carry on.
+- **Groups:** Settings → Groups makes a group (a family, a club) of people with an account here,
+  invited by username, each an owner, editor or viewer.
+- **Sharing:** share a project (and everything in it), a journal (and every entry), or a single
+  task or note with a group. 👥 marks what's shared, *by Ann* who made it, and **👥 Shared** in the
+  sidebar lists it. A shared task can be given to someone (in their lists alone, with a
+  notification and its reminders) or left for anyone; your star, area and order stay your own.
+  Viewers only look. Changes by others show within 30 seconds; two edits of a note at once keep both.
 - **Projects use the same lists as tasks:** Inbox, Queue (what was Active), Soon, Waiting,
   Scheduled, Someday and Later, or Completed. Moving a project further off takes its tasks and
   subprojects with it (unless they're further off already), and moving it nearer brings them back;

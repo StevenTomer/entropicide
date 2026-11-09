@@ -39,12 +39,15 @@ KINDS = {
     "task": {
         "view": "tasks", "table": "task_data",
         "document": {"title": "title", "notes": "body", "area_id": "area_id", "created_at": "created_at",
-                     "updated_at": "updated_at", "deleted_at": "deleted_at", "waypoint": "waypoint"},
+                     "updated_at": "updated_at", "deleted_at": "deleted_at", "waypoint": "waypoint",
+                     "group_id": "group_id"},
         "columns": [
             ("project_id", "INTEGER REFERENCES project_data(id) ON DELETE SET NULL"),
             # inbox | next | soon | waiting | scheduled | someday | later
             ("state", "TEXT NOT NULL DEFAULT 'inbox'"),
             ("focus", "INTEGER NOT NULL DEFAULT 0"),
+            # A shared task's person to do it (in their lists only); NULL: whoever's in its group.
+            ("assigned_to", "INTEGER REFERENCES users(id) ON DELETE SET NULL"),
             ("due_date", "TEXT"),
             ("start_date", "TEXT"),
             # optional HH:MM (user's local time) on start_date; set by short deferrals
@@ -81,7 +84,8 @@ KINDS = {
     "project": {
         "view": "projects", "table": "project_data",
         "document": {"name": "title", "notes": "body", "area_id": "area_id", "created_at": "created_at",
-                     "updated_at": "updated_at", "deleted_at": "deleted_at", "waypoint": "waypoint"},
+                     "updated_at": "updated_at", "deleted_at": "deleted_at", "waypoint": "waypoint",
+                     "group_id": "group_id"},
         "columns": [
             # the project it's a part of (a subproject), if any
             ("parent_id", "INTEGER REFERENCES project_data(id) ON DELETE SET NULL"),
@@ -111,7 +115,7 @@ KINDS = {
         "view": "notes", "table": "note_data",
         "document": {"title": "title", "body": "body", "font": "font", "area_id": "area_id",
                      "created_at": "created_at", "updated_at": "updated_at", "deleted_at": "deleted_at",
-                     "waypoint": "waypoint"},
+                     "waypoint": "waypoint", "group_id": "group_id"},
         "columns": [
             ("category_id", "INTEGER REFERENCES note_categories(id) ON DELETE SET NULL"),
             ("journal_id", "INTEGER REFERENCES journals(id) ON DELETE SET NULL"),
@@ -129,7 +133,7 @@ VIEW_KINDS = {k["view"]: kind for kind, k in KINDS.items()}
 
 # What a new document takes for a documents column its insert leaves out (fmt: the value given).
 DOCUMENT_DEFAULTS = {"title": "coalesce({}, '')", "body": "coalesce({}, '')", "font": "coalesce({}, '')",
-                     "area_id": "{}", "deleted_at": "{}", "waypoint": "coalesce({}, 0)", "created_at": "coalesce({}, created_at)",
+                     "area_id": "{}", "deleted_at": "{}", "group_id": "{}", "waypoint": "coalesce({}, 0)", "created_at": "coalesce({}, created_at)",
                      "updated_at": "coalesce({}, NEW.created_at, updated_at)"}
 
 
@@ -204,6 +208,57 @@ CREATE TABLE IF NOT EXISTS users (
     last_login    TEXT
 );
 
+-- Groups of people (a family, a club) who share things: a project, a journal or one item is
+-- shared by giving its document the group's id (documents.group_id). ("groups" is a word SQL
+-- keeps for itself, hence user_groups.)
+CREATE TABLE IF NOT EXISTS user_groups (
+    id           INTEGER PRIMARY KEY,
+    name         TEXT NOT NULL,
+    -- the role someone invited gets unless the invitation says otherwise: editor or viewer
+    default_role TEXT NOT NULL DEFAULT 'editor' CHECK (default_role IN ('editor', 'viewer')),
+    -- viewers may still tick off tasks assigned to them
+    viewers_complete INTEGER NOT NULL DEFAULT 1,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    -- when anything shared with it last changed (to the millisecond; triggers keep it), for
+    -- members' apps to know to reload (GET /api/changes)
+    changed_at   TEXT NOT NULL DEFAULT ''
+);
+
+-- What's one person's own about a shared document (someone else's): their star, area and place
+-- in the order, and for a note whether it's pinned and its category. NULL: as it starts (not
+-- starred, no area, its maker's place).
+CREATE TABLE IF NOT EXISTS document_person (
+    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    focus       INTEGER,
+    area_id     INTEGER REFERENCES areas(id) ON DELETE SET NULL,
+    position    REAL,
+    pinned      INTEGER,
+    category_id INTEGER REFERENCES note_categories(id) ON DELETE SET NULL,
+    PRIMARY KEY (document_id, user_id)
+);
+
+-- owner: manages the group and changes what's shared; editor: changes what's shared;
+-- viewer: sees it. A group always has an owner while it has anyone in it.
+CREATE TABLE IF NOT EXISTS group_members (
+    group_id  INTEGER NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
+    user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role      TEXT NOT NULL CHECK (role IN ('owner', 'editor', 'viewer')),
+    joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (group_id, user_id)
+);
+
+-- Invitations to join a group, waiting for the person to accept (Settings → Groups).
+CREATE TABLE IF NOT EXISTS group_invites (
+    id         INTEGER PRIMARY KEY,
+    group_id   INTEGER NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    invited_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    role       TEXT NOT NULL CHECK (role IN ('owner', 'editor', 'viewer')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (group_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS areas (
     id       INTEGER PRIMARY KEY,
     user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -249,6 +304,9 @@ CREATE TABLE IF NOT EXISTS documents (
     -- a waypoint: shown on timelines (of the project it's in, of all tasks, of its journal)
     waypoint   INTEGER NOT NULL DEFAULT 0,
     area_id    INTEGER REFERENCES areas(id) ON DELETE SET NULL,
+    -- shared with this group's members (NULL: only its user's). Ending the group makes it
+    -- its user's alone again.
+    group_id   INTEGER REFERENCES user_groups(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     deleted_at TEXT
@@ -371,6 +429,8 @@ CREATE TABLE IF NOT EXISTS note_categories (
 CREATE TABLE IF NOT EXISTS journals (
     id         INTEGER PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- shared with this group, and so are all its entries (NULL: its user's alone)
+    group_id   INTEGER REFERENCES user_groups(id) ON DELETE SET NULL,
     name       TEXT NOT NULL,
     position   REAL NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -433,6 +493,24 @@ SCHEMA = SCHEMA.replace("{ATTACHMENTS}", ATTACHMENTS).replace("{KIND_TABLES}", _
 VIEWS = _views()
 
 INDEXES = """
+CREATE INDEX IF NOT EXISTS documents_group ON documents(group_id) WHERE group_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS group_members_user ON group_members(user_id);
+-- A change to anything shared with a group (or a document leaving one) moves the group's
+-- changed_at on, so the other members' apps reload.
+CREATE TRIGGER IF NOT EXISTS shared_insert AFTER INSERT ON documents WHEN NEW.group_id IS NOT NULL BEGIN
+    UPDATE user_groups SET changed_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = NEW.group_id;
+END;
+CREATE TRIGGER IF NOT EXISTS shared_update AFTER UPDATE ON documents
+        WHEN NEW.group_id IS NOT NULL OR OLD.group_id IS NOT NULL BEGIN
+    UPDATE user_groups SET changed_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id IN (NEW.group_id, OLD.group_id);
+END;
+CREATE TRIGGER IF NOT EXISTS shared_delete AFTER DELETE ON documents WHEN OLD.group_id IS NOT NULL BEGIN
+    UPDATE user_groups SET changed_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = OLD.group_id;
+END;
+CREATE TRIGGER IF NOT EXISTS shared_journal AFTER UPDATE ON journals
+        WHEN NEW.group_id IS NOT NULL OR OLD.group_id IS NOT NULL BEGIN
+    UPDATE user_groups SET changed_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id IN (NEW.group_id, OLD.group_id);
+END;
 CREATE INDEX IF NOT EXISTS links_user ON links(user_id, parent_id);
 CREATE INDEX IF NOT EXISTS documents_user ON documents(user_id, kind, deleted_at);
 CREATE INDEX IF NOT EXISTS document_tags_tag ON document_tags(tag_id);
@@ -526,6 +604,14 @@ def migrate(conn):
         conn.execute("ALTER TABLE documents ADD COLUMN waypoint INTEGER NOT NULL DEFAULT 0")
     if "archived_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(note_data)")}:
         conn.execute("ALTER TABLE note_data ADD COLUMN archived_at TEXT")
+    if "group_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(documents)")}:
+        conn.execute("ALTER TABLE documents ADD COLUMN group_id INTEGER REFERENCES user_groups(id) ON DELETE SET NULL")
+    if "group_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(journals)")}:
+        conn.execute("ALTER TABLE journals ADD COLUMN group_id INTEGER REFERENCES user_groups(id) ON DELETE SET NULL")
+    if "changed_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(user_groups)")}:
+        conn.execute("ALTER TABLE user_groups ADD COLUMN changed_at TEXT NOT NULL DEFAULT ''")
+    if not legacy and "assigned_to" not in {r["name"] for r in conn.execute("PRAGMA table_info(task_data)")}:
+        conn.execute("ALTER TABLE task_data ADD COLUMN assigned_to INTEGER REFERENCES users(id) ON DELETE SET NULL")
     project_cols = {r["name"] for r in conn.execute("PRAGMA table_info(project_data)")}
     if "start_date" not in project_cols:
         conn.execute("ALTER TABLE project_data ADD COLUMN start_date TEXT")
@@ -654,8 +740,10 @@ def to_documents(conn):
 
         conn.execute("INSERT INTO documents (id, user_id, kind, title, body, area_id, created_at, updated_at, deleted_at) "
                      "SELECT id, user_id, 'task', title, notes, area_id, created_at, updated_at, deleted_at FROM tasks")
+        had = columns("tasks")  # (columns that came after: their defaults)
         conn.execute(f"INSERT INTO task_data (id, {', '.join(own('task'))}) SELECT id, "
-                     + ", ".join(f"project_id + {p}" if c == "project_id" else c for c in own("task")) + " FROM tasks")
+                     + ", ".join(f"project_id + {p}" if c == "project_id" else c if c in had else "NULL" for c in own("task"))
+                     + " FROM tasks")
         if has("projects"):  # (a project that's gone: no project, as its foreign key would have made it)
             conn.execute(f"UPDATE task_data SET project_id = NULL WHERE project_id - {p} NOT IN (SELECT id FROM projects)")
         if has("projects"):

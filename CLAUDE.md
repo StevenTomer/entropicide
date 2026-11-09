@@ -89,6 +89,17 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
   first step holds back everything in it; `waits_on` / `check_no_loops` refuse
   waits that could never end. Server (`list_tasks`) and browser (`waitingOn`, `projectActive`,
   `laterSteps`, `sequentialBlocked`) must agree on what's blocked.
+- **Groups and sharing:** `user_groups`, `group_members` (role owner/editor/viewer) and
+  `group_invites`; a document (or journal) with `group_id` is its group's members' too. Queries
+  for what a user sees use `MINE` (two user-id parameters) or `visible()`; `owned()` on tasks,
+  projects, notes and journals means "may see", and for any non-GET "may change" (viewers get
+  403); `documents` (purge) stays the maker's alone. What's in a project or journal is shared as
+  that is (`follow_container`, `set_group`; `unshare_group` when a group ends). Star, area, order,
+  pin and category of someone else's shared document are per person (`document_person`,
+  `keep_personal`, overlaid in `with_shared`, which also sends `by`). Tasks have `assigned_to`
+  (others' assigned tasks stay out of my lists; reminders go to the assignee). Triggers keep
+  `user_groups.changed_at`; the browser polls `/api/changes` (app.js `checkShared`). Inventories
+  are next (IDEAS.md).
 - Attachments are blobs in the database (deduplicated by sha256), so the DB file is the
   whole backup. Each is on one document; a picture placed in a text is `<img data-file="id">`,
   and the browser adds the `src` (`showBody`).

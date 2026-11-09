@@ -209,6 +209,8 @@ function noteMeta(n, { date = true } = {}) {
   const area = n.area_id && areaById(n.area_id);
   const stamp = NV.sort === "created" || NV.sort === "oldest" ? n.created_at : n.updated_at;
   return [
+    n.group_id ? `<span class="shared" title="Shared with ${h(groupById(n.group_id)?.name || "a group")}">👥${
+      n.by != null && n.by !== S.data.user.id ? ` by ${h(personName(n.by))}` : ""}</span>` : "",
     n.archived_at ? '<span class="note-archived" title="Archived: out of the way, but still found by search">Archived</span>' : "",
     n.waypoint ? '<span class="waypoint" title="A waypoint, on timelines">⚑</span>' : "",
     cat ? `<span class="note-cat" data-color="${h(cat.color)}">${h(cat.name)}</span>` : "",
@@ -425,8 +427,9 @@ function renderJournal(el, terms, words) {
       <div class="notes-opts">
         <select class="journal-order" aria-label="Order">${options([["newest", "Newest first"], ["oldest", "Oldest first"]], NV.order)}</select>
         <button type="button" class="link open-timeline" data-timeline="journal:${j.id}" title="Its waypoints (⚑) in time">Timeline</button>
+        ${journalShareField(j)}
         <button type="button" class="link rename-journal">Rename</button>
-        <button type="button" class="link danger delete-journal">Delete journal</button>
+        ${j.user_id == null || j.user_id === S.data.user.id ? '<button type="button" class="link danger delete-journal">Delete journal</button>' : ""}
       </div>` : ""}
   </div>` + (S.search.trim() ? SEARCH_TIP : "");
   if (!j) {
@@ -589,6 +592,12 @@ function openNote(n) {
   const body = $(".ne-body", dlg);
   renderNoteFiles();
   renderNoteDates();
+  // A viewer of a shared note only reads it.
+  dlg.classList.toggle("read-only", !canChange(n));
+  if (!canChange(n)) {
+    body.contentEditable = "false";
+    for (const c of dlg.querySelectorAll(".ne-head select, .ne-head input, .ne-title, .ne-tools button, .ne-tools select, .ne-pin, .ne-waypoint")) c.disabled = true;
+  }
   if (!dlg.open) {
     dlg.showModal();
     history.pushState({ note: true }, "");  // so Back closes the note, not the app
@@ -596,6 +605,29 @@ function openNote(n) {
   dlg.scrollTop = 0;
   if (!n.id) (n.journal_id ? body : $(".ne-title", dlg)).focus();
   else $(".ne-close", dlg).focus();
+}
+
+// Who a journal's shared with (and all its entries): a choice for whoever made it.
+function journalShareField(j) {
+  if (!myGroups().length && !j.group_id) return "";
+  if (j.user_id != null && j.user_id !== S.data.user.id) {
+    return `<span class="muted small">👥 ${h(groupById(j.group_id)?.name || "Shared")} · ${h(personName(j.user_id))}'s</span>`;
+  }
+  return `<select class="journal-share" aria-label="Shared with" title="Who else sees it, and writes in it">${options(
+    [["", "Only me"], ...myGroups().filter((g) => g.role !== "viewer" || g.id === j.group_id).map((g) => [g.id, `👥 ${g.name}`])], j.group_id ?? "")}</select>`;
+}
+
+// Who a note's shared with: a choice, if it's mine and not in a journal (an entry is shared as
+// its journal is); else just who.
+function noteShareField(n) {
+  if (!myGroups().length && !n.group_id) return "";
+  const gr = groupById(n.group_id);
+  if (n.journal_id || (n.by != null && n.by !== S.data.user.id)) {
+    return n.group_id ? `<span class="muted small ne-shared">👥 ${h(gr?.name || "Shared")}${
+      n.by != null && n.by !== S.data.user.id ? ` · by ${h(personName(n.by))}` : ""}</span>` : "";
+  }
+  return `<select class="ne-share" aria-label="Shared with" title="Who else sees it">${options(
+    [["", "Only me"], ...myGroups().filter((g) => g.role !== "viewer" || g.id === n.group_id).map((g) => [g.id, `👥 ${g.name}`])], n.group_id ?? "")}</select>`;
 }
 
 function editorHtml(n) {
@@ -612,6 +644,7 @@ function editorHtml(n) {
         <input type="date" class="ne-date" value="${h(n.entry_date || today())}" aria-label="The entry's day">
         <input type="time" class="ne-time" value="${h(n.entry_time || "")}" aria-label="The entry's time">
       </span>
+      ${noteShareField(n)}
       <span class="ne-space"></span>
       <button type="button" class="icon ne-waypoint${n.waypoint ? " on" : ""}" aria-pressed="${!!n.waypoint}"
         title="${n.waypoint ? "A waypoint, on timelines: click to take it off" : "Make it a waypoint, shown on timelines"}" aria-label="Waypoint">⚑</button>
@@ -697,9 +730,16 @@ function saveNote({ force } = {}) {
       if (!force && !fresh.title?.trim() && !fresh.body) { ned.dirty = new Set([...ned.dirty, ...Object.keys(changes)]); return; }
       saved = await api("POST", "/notes", fresh);
     } else if (Object.keys(changes).length) {
-      saved = await api("PATCH", `/notes/${n.id}`, changes);
+      // A shared note's text says which version it began from, so someone else's change in the
+      // meantime isn't lost (app.py update_note keeps both).
+      const base = n.group_id && ("title" in changes || "body" in changes) ? { base: n.updated_at } : {};
+      saved = await api("PATCH", `/notes/${n.id}`, { ...changes, ...base });
     }
     if (!saved) return;
+    if (saved.clash) {
+      toast("Someone else changed this note while you were writing. Yours is saved, and theirs is kept as a note of its own, “… (the other version)”.");
+      refresh();
+    }
     // Take what the server says, except what's been changed again since (still to be sent).
     for (const [k, v] of Object.entries(saved)) if (!ned.dirty.has(k)) n[k] = v;
     upsertNote(n);
@@ -810,6 +850,9 @@ function bindNoteDialog(dlg) {
     } else if (t.classList.contains("ne-area")) {
       n.area_id = t.value ? Number(t.value) : null;
       noteFieldChanged("area_id");
+    } else if (t.classList.contains("ne-share")) {
+      n.group_id = t.value ? Number(t.value) : null;
+      noteFieldChanged("group_id");
     }
   });
   dlg.addEventListener("click", async (e) => {
@@ -1055,6 +1098,13 @@ function bindNotes() {
     else if (t.classList.contains("notes-has")) setNV("has", t.value, "notesHas");
     else if (t.classList.contains("notes-sort")) setNV("sort", t.value, "notesSort");
     else if (t.classList.contains("journal-order")) setNV("order", t.value, "journalOrder");
+    else if (t.classList.contains("journal-share")) {
+      const j = currentJournal();
+      api("PATCH", `/journals/${j.id}`, { group_id: t.value ? Number(t.value) : null }).then(async () => {
+        await refresh();
+        toast(t.value ? "Shared: everyone in the group sees it and can write in it." : "It's yours alone again.");
+      }).catch(() => render());
+    }
   });
   // Notes linked to the task or project open in the editor.
   $("#detail").addEventListener("click", (e) => {

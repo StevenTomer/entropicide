@@ -303,3 +303,16 @@ def test_items_left_in_trashed_projects_are_untangled(tmp_path):
     db.init_db(path)
     conn = db.connect(path)
     assert conn.execute("SELECT project_id, deleted_at FROM tasks WHERE id = ?", (paint,)).fetchone()[:] == (None, None)
+
+
+def test_areas(app, user_client):
+    client = user_client("ann")
+    r = client.post("/api/areas", json={"name": "  Home  "}, headers=H)
+    assert r.status_code == 201 and r.get_json()["name"] == "Home" and "user_id" not in r.get_json()
+    area = r.get_json()["id"]
+    assert client.post("/api/areas", json={"name": " "}, headers=H).status_code == 400
+    assert client.patch(f"/api/areas/{area}", json={"name": "House"}, headers=H).get_json()["name"] == "House"
+    t = client.post("/api/tasks", json={"title": "Sweep", "area_id": area}, headers=H).get_json()["id"]
+    assert user_client("bob").delete(f"/api/areas/{area}", headers=H).status_code == 404
+    assert client.delete(f"/api/areas/{area}", headers=H).status_code == 204
+    assert rows(app, "SELECT area_id FROM tasks WHERE id = ?", t) == [{"area_id": None}]

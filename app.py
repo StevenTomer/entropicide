@@ -2059,6 +2059,35 @@ def key_device():
     return device
 
 
+# What a key may do besides adding tasks, and what to say to one that can't.
+KEY_CAN = {
+    "can_read": "This key can add tasks but not read them. In Settings → Add from other apps, make a new key "
+                "with “Can also read my lists” ticked.",
+    "can_complete": "This key can't complete tasks. In Settings → Add from other apps, make a new key with "
+                    "“Can also complete tasks” ticked.",
+}
+
+
+def require_key(may=None, log=None):
+    """For routes another app (or the phone) calls with a key instead of signing in: 401
+    without one that works, 403 if it isn't allowed may (a KEY_CAN); else g.device is it and
+    g.user its user. log: the app_log kind to note a refusal under."""
+    def wrap(fn):
+        @wraps(fn)
+        def checked(*args, **kwargs):
+            g.device = key_device()
+            if g.device is None:
+                if log:
+                    app_log(log, **request_info(), result="Refused: no key, or one that was disconnected")
+                return jsonify(error=f"Not connected any more. In {APP_NAME}, open Settings → Add from the phone "
+                                     "(or Add from other apps) and connect it again."), 401
+            if may and not g.device[may]:
+                return jsonify(error=KEY_CAN[may]), 403
+            return fn(*args, **kwargs)
+        return checked
+    return wrap
+
+
 def add_request():
     """What /api/add was sent: JSON, a form, or plain text (just the task)."""
     if request.is_json:
@@ -2079,6 +2108,7 @@ def add_request():
 
 @app.post("/api/add")
 @app.post("/api/app/add")  # (the Android app's address for it)
+@require_key(log="app-add")
 def app_add():
     """Add a task with a key from Settings (the Android app's, or one made for another app):
     Authorization: Bearer KEY, and "text" read like quick add (#tags, !lists, dates, @people;
@@ -2087,11 +2117,7 @@ def app_add():
     time). Answers 201 with the task's id, title and a one-line summary to show or say."""
     info = request_info()
     conn = db.get_db()
-    device = key_device()
-    if device is None:
-        app_log("app-add", **info, result="Refused: no key, or one that was disconnected")
-        return jsonify(error=f"Not connected any more. In {APP_NAME}, open Settings → Add from the phone "
-                             "(or Add from other apps) and connect it again."), 401
+    device = g.device
     data = add_request()
     text = str(data.get("text", "")).strip()
     if not text:
@@ -2121,19 +2147,14 @@ READ_LISTS = {"focus": "Focus", "queue": "Queue", "next": "Queue", "inbox": "Inb
 
 
 @app.get("/api/read/<name>")
+@require_key("can_read")
 def read_list(name):
     """One of the user's lists, for another app with a key that may read (Settings → Add from
     other apps): the tasks as the sidebar list shows them (Focus and the Queue skip blocked
     tasks and inactive projects, highest priority first), and "summary", a sentence to show
     or say. ?area=Name keeps to one area; ?limit=N (default 50) caps the tasks sent and
     ?say=N (default 5) how many the summary names. See docs/api.md."""
-    device = key_device()
-    if device is None:
-        return jsonify(error=f"Not connected any more. In {APP_NAME}, open Settings → Add from other apps "
-                             "and make a new key."), 401
-    if not device["can_read"]:
-        return jsonify(error="This key can add tasks but not read them. In Settings → Add from other "
-                             "apps, make a new key with “Can also read my lists” ticked."), 403
+    device = g.device
     if name.lower() not in READ_LISTS:
         return jsonify(error="No such list. Choose from: " + ", ".join(sorted(set(READ_LISTS) - {"next"}))), 404
     name = name.lower()
@@ -2181,6 +2202,7 @@ def words(text):
 
 
 @app.post("/api/complete")
+@require_key("can_complete")
 def complete_by_key():
     """Complete a task for another app with a key that may (Settings → Add from other apps):
     {"text": what was said} finds the open task it means, {"id": N} names one. "check": true
@@ -2188,13 +2210,7 @@ def complete_by_key():
     completed task back. Answers {"task": {id, title}, "summary": a sentence to say}, or 404
     (nothing like it) or 409 (several: "matches", to ask which). See docs/api.md."""
     info = request_info()
-    device = key_device()
-    if device is None:
-        return jsonify(error=f"Not connected any more. In {APP_NAME}, open Settings → Add from other apps "
-                             "and make a new key."), 401
-    if not device["can_complete"]:
-        return jsonify(error="This key can't complete tasks. In Settings → Add from other apps, make a new "
-                             "key with “Can also complete tasks” ticked."), 403
+    device = g.device
     data = add_request()
     uid = g.user["id"]
     conn = db.get_db()
@@ -2578,7 +2594,7 @@ def update_note(note_id):
 def category_fields(data, table):
     out = {}
     if "name" in data:
-        name = str(data["name"] or "").strip()[:100]
+        name = str(data["name"] or "").strip()[:200 if table == "areas" else 100]
         if not name:
             raise ValueError("Give it a name.")
         out["name"] = name
@@ -2590,7 +2606,9 @@ def category_fields(data, table):
 
 
 def named_list_routes(table, path):
-    """Add, rename (and recolour) and delete for note categories and journals."""
+    """Add, rename (and recolour) and delete for areas, note categories and journals. (Areas'
+    icons have routes of their own.)"""
+    shown = lambda row: {k: row[k] for k in row.keys() if k not in ("user_id", "icon_svg")}  # noqa: E731
     def create():
         try:
             fields = category_fields(body(), table)
@@ -2603,7 +2621,7 @@ def named_list_routes(table, path):
         cur = conn.execute(f"INSERT INTO {table} ({', '.join(fields)}) VALUES ({', '.join('?' * len(fields))})",
                            tuple(fields.values()))
         conn.commit()
-        return jsonify(dict(conn.execute(f"SELECT * FROM {table} WHERE id = ?", (cur.lastrowid,)).fetchone())), 201
+        return jsonify(shown(conn.execute(f"SELECT * FROM {table} WHERE id = ?", (cur.lastrowid,)).fetchone())), 201
 
     def update(item_id):
         owned(table, item_id)
@@ -2616,7 +2634,7 @@ def named_list_routes(table, path):
             conn.execute(f"UPDATE {table} SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
                          (*fields.values(), item_id))
             conn.commit()
-        return jsonify(dict(owned(table, item_id)))
+        return jsonify(shown(owned(table, item_id)))
 
     def delete(item_id):
         owned(table, item_id)
@@ -2635,6 +2653,7 @@ def named_list_routes(table, path):
         app.add_url_rule(rule, f"{table}_{fn.__name__}", login_required(fn), methods=methods)
 
 
+named_list_routes("areas", "areas")
 named_list_routes("note_categories", "note-categories")
 named_list_routes("journals", "journals")
 
@@ -2972,32 +2991,6 @@ def update_project(project_id):
     return jsonify(project_dict(owned("projects", project_id)))
 
 
-@app.post("/api/areas")
-@login_required
-def create_area():
-    name = str(body().get("name", "")).strip()
-    if not name:
-        return bad("name is required")
-    conn = db.get_db()
-    cur = conn.execute("INSERT INTO areas (user_id, name, position) VALUES (?, ?, ?)",
-                       (g.user["id"], name[:200], next_position("areas")))
-    conn.commit()
-    return jsonify(id=cur.lastrowid, name=name[:200]), 201
-
-
-@app.patch("/api/areas/<int:area_id>")
-@login_required
-def rename_area(area_id):
-    owned("areas", area_id)
-    name = str(body().get("name", "")).strip()
-    if not name:
-        return bad("name is required")
-    conn = db.get_db()
-    conn.execute("UPDATE areas SET name = ? WHERE id = ?", (name[:200], area_id))
-    conn.commit()
-    return jsonify(id=area_id, name=name[:200])
-
-
 # Areas and links can have an SVG icon: uploaded, or downloaded from a URL, then cleaned.
 
 def set_icon(table, row_id):
@@ -3073,16 +3066,6 @@ def remove_link_icon(link_id):
 @login_required
 def link_icon(link_id):
     return serve_icon("links", link_id)
-
-
-@app.delete("/api/areas/<int:area_id>")
-@login_required
-def delete_area(area_id):
-    owned("areas", area_id)
-    conn = db.get_db()
-    conn.execute("DELETE FROM areas WHERE id = ?", (area_id,))
-    conn.commit()
-    return "", 204
 
 
 @app.patch("/api/tags/<int:tag_id>")

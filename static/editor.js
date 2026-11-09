@@ -169,6 +169,7 @@ function editorTools({ font = null } = {}) {
       <button type="button" data-cmd="quote" title="Quote" aria-label="Quote">❝</button>
       <button type="button" data-cmd="link" title="Link to a web page" aria-label="Link">🔗</button>
       <button type="button" data-cmd="picture" title="Add a picture where the cursor is" aria-label="Add a picture">🖼</button>
+      <button type="button" data-cmd="draw" title="Draw: a sketch or a diagram, where the cursor is" aria-label="Draw">✎</button>
       <button type="button" data-cmd="attach" title="Attach a file" aria-label="Attach a file">📎</button>
       <button type="button" data-cmd="removeFormat" title="Clear the formatting of the words selected" aria-label="Clear formatting">T̸</button>
       <button type="button" data-cmd="source" class="ne-source-cmd" title="Edit it as HTML (and back)" aria-label="Edit as HTML">&lt;/&gt;</button>
@@ -183,6 +184,7 @@ function editorImageBar(kind) {
         type="button" data-size="l" title="As wide as the text">L</button>
       <button type="button" data-move="-1" title="Move up" aria-label="Move up">↑</button><button type="button" data-move="1"
         title="Move down" aria-label="Move down">↓</button>
+      <button type="button" class="pic-draw" title="Carry on drawing it" hidden>Edit drawing</button>
       <button type="button" class="pic-crop" title="Crop or turn it">Crop</button><button type="button" data-turn="90"
         title="Turn it a quarter to the right" aria-label="Turn right">⟳</button>
       <button type="button" class="pic-behind" title="Put it behind the text, like paper with a picture on it">Behind text</button>
@@ -246,6 +248,7 @@ function bindEditor(root, host) {
       if (b.dataset.move) return moveImage(img, Number(b.dataset.move));
       if (b.dataset.turn) return editPicture(img, (pictureTurn(img) + 90) % 360, turnCrop(pictureCrop(img), 90));
       if (b.classList.contains("pic-crop")) return openPictureEditor(img);
+      if (b.classList.contains("pic-draw")) return editDrawing(img);
       if (b.classList.contains("pic-behind")) {
         if (img.dataset.behind !== "1") {
           img.dataset.behind = "1";
@@ -511,6 +514,7 @@ function blockOf(node) {
 
 function runCommand(cmd) {
   if (cmd === "picture") return $(".ne-pic-input", ed.root).click();
+  if (cmd === "draw") return openDrawMenu($('.ne-tools [data-cmd="draw"]', ed.root));
   if (cmd === "attach") return $(".ne-file-input", ed.root).click();
   if (cmd === "source") return setSource(ed, !ed.source);
   restoreRange();
@@ -692,6 +696,10 @@ function placeImageBar() {
   const r = img.getBoundingClientRect();
   for (const b of bar.querySelectorAll("[data-size]")) b.classList.toggle("on", (img.dataset.size || "l") === b.dataset.size);
   $(".pic-behind", bar).classList.toggle("on", img.dataset.behind === "1");
+  // A drawing is drawn on again rather than cropped or turned (it isn't a photo).
+  const drawing = !!drawingKind(noteFile(img.dataset.file));
+  $(".pic-draw", bar).hidden = !drawing;
+  for (const x of bar.querySelectorAll(".pic-crop, [data-turn]")) x.hidden = drawing;
   $(".pic-opacity", bar).value = img.dataset.opacity || 100;
   bar.style.left = `${Math.max(8, Math.min(r.left + 6, innerWidth - bar.offsetWidth - 8))}px`;
   bar.style.top = `${Math.max(8, Math.min(r.top + 6, innerHeight - bar.offsetHeight - 8))}px`;

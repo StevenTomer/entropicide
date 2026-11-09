@@ -58,6 +58,10 @@ Settings → Troubleshooting.
   a task now keeps it the same item, so links to it, and what waited on it, simply stay.
 - Moving a task into a project that waits on it, or a project into one it waits on, is refused (it
   could never finish).
+- **Drawing:** ✎ in the editor's toolbar draws a picture into a note, task or project: a
+  **Sketch** (pen and ink, in six colours and three sizes, with an eraser and undo; it follows a
+  stylus's pressure) or a **Diagram** (boxes, arrows, shapes and words, with Excalidraw built in).
+  They're placed like any picture, and *Edit drawing* opens them again to carry on.
 - **Weekly review:** *Review* in the sidebar walks you through GTD's weekly review: empty the
   Inbox and loose notes, look over what's overdue, waited for and coming up, then each project due
   for a look (stalled ones flagged), and Someday and Later. Projects come up every week by default

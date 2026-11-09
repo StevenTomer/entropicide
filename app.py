@@ -1905,9 +1905,10 @@ def use_template(template_id):
 ATTACHMENT_MAX = 25 * 1024 * 1024
 USER_FILES_MAX = 1024 * 1024 * 1024
 # Shown in the browser; anything else is downloaded, so a file can't run as part of the site.
-IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
-INLINE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf",
-                "text/plain"}
+# (SVGs, drawings among them, are shown sandboxed: get_attachment's Content-Security-Policy
+# keeps any script in one from running.)
+IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"}
+INLINE_TYPES = IMAGE_TYPES | {"application/pdf", "text/plain"}
 
 
 def storage_used(uid):

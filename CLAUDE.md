@@ -28,7 +28,10 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
   state is `S`. `static/quickadd.js`: quick-add parser, loaded before app.js. `static/editor.js`:
   the formatted-text editor (toolbar, checklists, pictures, the HTML box and Vim) used by both
   task/project details and the note dialog, and `cleanNoteHtml`. `static/notes.js`: the Notes and
-  Journal pages and the note dialog. Both load after app.js and use its globals.
+  Journal pages and the note dialog. `static/draw.js`: drawings (✎), Sketch (perfect-freehand) and
+  Diagram (Excalidraw, a prebuilt bundle in `static/vendor/excalidraw/`, loaded only when used; its
+  README says how to rebuild it), saved as SVG files placed as pictures. These load after app.js
+  and use its globals.
 - `richtext.py`: the HTML any text may hold (editor.js `cleanNoteHtml` mirrors it); the
   server's copy is the one that counts. `from_markdown` converted the old typed notes once.
 - `templates/help.html`: the in-app Help page; every user-visible feature belongs there.

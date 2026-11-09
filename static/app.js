@@ -3192,7 +3192,7 @@ function openTask(id) {
 // ---- attachments ----------------------------------------------------------
 
 const fileUrl = (f) => `${BASE}/api/attachments/${f.id}/${encodeURIComponent(f.name)}`;
-const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"];
 
 function fmtSize(n) {
   return n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB`

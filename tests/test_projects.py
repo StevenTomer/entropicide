@@ -80,6 +80,22 @@ def test_project_attachments(app, user_client):
     assert rows(app, "SELECT COUNT(*) AS n FROM blobs") == [{"n": 0}]
 
 
+def test_drawings_are_shown_sandboxed(user_client):
+    """Drawings are SVG files: shown as pictures, but never able to run anything."""
+    client = user_client("ann")
+    _, project, _ = helpers(client)
+    pid = project(name="Shed")["id"]
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script><path d="M0 0L9 9"/></svg>'
+    r = client.post(f"/api/projects/{pid}/attachments", data={"file": (io.BytesIO(svg), "Sketch.sketch.svg")},
+                    headers=H, content_type="multipart/form-data")
+    f = r.get_json()["attachments"][0]
+    assert f["mime"] == "image/svg+xml"
+    got = client.get(f"/api/attachments/{f['id']}")
+    assert got.mimetype == "image/svg+xml" and "attachment" not in got.headers.get("Content-Disposition", "")
+    assert got.headers["Content-Security-Policy"].startswith("sandbox; default-src 'none'")
+    assert got.headers["X-Content-Type-Options"] == "nosniff"
+
+
 def test_convert_task_to_project(app, user_client):
     client = user_client("ann")
     add, project, patch = helpers(client)

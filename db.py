@@ -39,7 +39,7 @@ KINDS = {
     "task": {
         "view": "tasks", "table": "task_data",
         "document": {"title": "title", "notes": "body", "area_id": "area_id", "created_at": "created_at",
-                     "updated_at": "updated_at", "deleted_at": "deleted_at"},
+                     "updated_at": "updated_at", "deleted_at": "deleted_at", "waypoint": "waypoint"},
         "columns": [
             ("project_id", "INTEGER REFERENCES project_data(id) ON DELETE SET NULL"),
             # inbox | next | soon | waiting | scheduled | someday | later
@@ -81,7 +81,7 @@ KINDS = {
     "project": {
         "view": "projects", "table": "project_data",
         "document": {"name": "title", "notes": "body", "area_id": "area_id", "created_at": "created_at",
-                     "updated_at": "updated_at", "deleted_at": "deleted_at"},
+                     "updated_at": "updated_at", "deleted_at": "deleted_at", "waypoint": "waypoint"},
         "columns": [
             # the project it's a part of (a subproject), if any
             ("parent_id", "INTEGER REFERENCES project_data(id) ON DELETE SET NULL"),
@@ -105,7 +105,8 @@ KINDS = {
     "note": {
         "view": "notes", "table": "note_data",
         "document": {"title": "title", "body": "body", "font": "font", "area_id": "area_id",
-                     "created_at": "created_at", "updated_at": "updated_at", "deleted_at": "deleted_at"},
+                     "created_at": "created_at", "updated_at": "updated_at", "deleted_at": "deleted_at",
+                     "waypoint": "waypoint"},
         "columns": [
             ("category_id", "INTEGER REFERENCES note_categories(id) ON DELETE SET NULL"),
             ("journal_id", "INTEGER REFERENCES journals(id) ON DELETE SET NULL"),
@@ -113,6 +114,8 @@ KINDS = {
             # local time) the time, if it has one. Any number of entries can be on a day.
             ("entry_date", "TEXT"),
             ("entry_time", "TEXT"),
+            # When it was archived: out of the way (not on the Notes page) but still found by search.
+            ("archived_at", "TEXT"),
             ("pinned", "INTEGER NOT NULL DEFAULT 0"),
         ],
     },
@@ -121,7 +124,7 @@ VIEW_KINDS = {k["view"]: kind for kind, k in KINDS.items()}
 
 # What a new document takes for a documents column its insert leaves out (fmt: the value given).
 DOCUMENT_DEFAULTS = {"title": "coalesce({}, '')", "body": "coalesce({}, '')", "font": "coalesce({}, '')",
-                     "area_id": "{}", "deleted_at": "{}", "created_at": "coalesce({}, created_at)",
+                     "area_id": "{}", "deleted_at": "{}", "waypoint": "coalesce({}, 0)", "created_at": "coalesce({}, created_at)",
                      "updated_at": "coalesce({}, NEW.created_at, updated_at)"}
 
 
@@ -238,6 +241,8 @@ CREATE TABLE IF NOT EXISTS documents (
     body       TEXT NOT NULL DEFAULT '',
     -- the typeface (richtext.FONTS, '' for the app's own)
     font       TEXT NOT NULL DEFAULT '',
+    -- a waypoint: shown on timelines (of the project it's in, of all tasks, of its journal)
+    waypoint   INTEGER NOT NULL DEFAULT 0,
     area_id    INTEGER REFERENCES areas(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -512,6 +517,10 @@ def migrate(conn):
         # Entries get a time: when they were written, in the user's time, if that was on their day.
         conn.execute("ALTER TABLE note_data ADD COLUMN entry_time TEXT")
         entry_times(conn)
+    if "waypoint" not in {r["name"] for r in conn.execute("PRAGMA table_info(documents)")}:
+        conn.execute("ALTER TABLE documents ADD COLUMN waypoint INTEGER NOT NULL DEFAULT 0")
+    if "archived_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(note_data)")}:
+        conn.execute("ALTER TABLE note_data ADD COLUMN archived_at TEXT")
     if not legacy and "step" not in {r["name"] for r in conn.execute("PRAGMA table_info(project_data)")}:
         # Subprojects take a place among their parent's tasks (after them, to begin with).
         conn.execute("ALTER TABLE project_data ADD COLUMN step REAL")

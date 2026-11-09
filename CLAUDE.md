@@ -50,7 +50,8 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
   Changing kind keeps the id: `become()` in app.py swaps the `*_data` row. Trash and delete
   through `trashed()` / `purge()`, which take a project's contents along. What every kind has is
   validated in `shared_fields` and sent by `with_shared`; copies of a task go through `copy_task`
-  (`TASK_COPY` lists what a copy takes).
+  (`TASK_COPY` lists what a copy takes). `documents.waypoint` (⚑) puts one on timelines (`/api/timeline`,
+  app.js `renderTimeline`); a note's `archived_at` keeps it off the Notes page but searchable.
 - **Text is HTML everywhere**: a task's `notes`, a project's `notes` and a note's `body` are
   cleaned HTML (checklists are `<ul data-check><li data-done="1">`). Anything plain that comes
   in (`/api/add`, sharing, Google) goes through `richtext.from_text`; anything going out as

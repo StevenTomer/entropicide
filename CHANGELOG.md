@@ -58,6 +58,16 @@ Settings → Troubleshooting.
   a task now keeps it the same item, so links to it, and what waited on it, simply stay.
 - Moving a task into a project that waits on it, or a project into one it waits on, is refused (it
   could never finish).
+- **Timelines:** mark tasks, projects, notes and journal entries as **waypoints** (⚑) and see them
+  on a line through today: what's done behind, what's coming ahead. *Timeline* in the sidebar for
+  all your tasks and projects, one for each project and each journal, or everything dated.
+  Waypoints also line up in a strip across the Notes and Journal pages, to jump to.
+- **Notes as a list, by category,** as well as cards; long pages draw as you scroll, so many
+  notes (and pictures) stay quick.
+- **Archive notes:** out of the way, off the Notes page, but still found by search (and listed under
+  *Show → Archived*).
+- **A right-click menu for notes:** category, tags, pin, waypoint, archive, make it a task or
+  project, trash.
 - **Text sizes:** a size list in the editor (Small, Normal, Large, Larger, Huge), for the words
   selected or what you type next, in tasks, projects and notes alike.
 - **Search tasks like notes:** all the words, anywhere (title, text, tags, project, files,

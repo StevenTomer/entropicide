@@ -266,7 +266,7 @@ const OFFLINE_NEW = {
   projects: () => ({ name: "", notes: "", sequential: false, state: "active", focus: false, due_date: null,
     completed_at: null, priority: 0, blocked_by: [], parent_id: null, step: null }),
   notes: () => ({ title: "", body: "", font: "", category_id: null, journal_id: null, entry_date: null, entry_time: null,
-    pinned: false }),
+    pinned: false, archived_at: null }),
 };
 
 // Changes op as the server would (near enough) on S.data, and returns what it would reply.
@@ -284,7 +284,7 @@ function applyOffline(op) {
     // A new task, project or note: what the server would make, until it's sent.
     const list = S.data[kind], stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
     const x = { id: op.temp, area_id: null, created_at: stamp, updated_at: stamp, deleted_at: null, tags: [],
-      attachments: [], related: [], ...OFFLINE_NEW[kind](),
+      attachments: [], related: [], waypoint: false, ...OFFLINE_NEW[kind](),
       ...(kind !== "notes" && { position: Math.max(0, ...list.map((y) => y.position)) + 1 }) };
     if (!list.some((y) => y.id === x.id)) list.push(x);
     return changeOffline(kind, x.id, body);
@@ -733,7 +733,7 @@ function setAreas(ids) {
 
 function navItem(view, label, count, extraClass = "") {
   const active = S.view === view ? " active" : "";
-  return `<a href="#" class="nav-item${active} ${extraClass}" data-view="${h(view)}"${["recurring", "all", "calendar", "links", "notes", "journal"].includes(view) ? "" : ` data-drop="${h(view)}"`}>
+  return `<a href="#" class="nav-item${active} ${extraClass}" data-view="${h(view)}"${["recurring", "all", "calendar", "links", "notes", "journal", "timeline"].includes(view) ? "" : ` data-drop="${h(view)}"`}>
     <span class="nav-label">${label}</span>${count ? `<span class="count">${count}</span>` : ""}</a>`;
 }
 
@@ -756,6 +756,7 @@ function renderNav() {
          <span class="nav-label">Projects</span>${projects ? `<span class="count">${projects}</span>` : ""}</a>
        <button class="icon add-project" title="New project" aria-label="New project">+</button>
      </div>` +
+    navItem("timeline", "Timeline", 0, S.view.startsWith("timeline:") ? "active" : "") +
     navItem("notes", "Notes", 0) +
     navItem("journal", "Journal", 0) +
     navItem("links", "Links", 0) +
@@ -775,6 +776,11 @@ function viewTitle() {
   if (S.view === "notes" || S.view === "journal") return notesViewTitle();
   if (S.view === "trash") return "Trash";
   if (S.view.startsWith("project:")) return projectById(Number(S.view.slice(8)))?.name ?? "Project";
+  if (S.view === "timeline") return "Timeline";
+  if (S.view.startsWith("timeline:")) {
+    const [, kind, id] = S.view.split(":");
+    return `${(kind === "project" ? projectById(Number(id))?.name : journalById(Number(id))?.name) ?? ""} · timeline`;
+  }
   return STATE_LABEL[S.view] ?? "";
 }
 
@@ -802,6 +808,7 @@ function taskRow(t, { showState }) {
   }
   if (t.spent) meta.push(`<span title="Time spent (focus timer)">⏱ ${fmtSpent(t.spent)}</span>`);
   if (reminderPending(t)) meta.push(`<span class="remind-at" title="Reminder">⏰ ${fmtRemind(t)}</span>`);
+  if (t.waypoint) meta.push('<span class="waypoint" title="A waypoint, on timelines">⚑</span>');
   if (t.related?.length) meta.push(`<span class="related" title="Related: ${h(t.related.map((r) => r.title).join(", "))}">🔗 ${t.related.length}</span>`);
   if (t.attachments?.length) meta.push(`<span title="${h(t.attachments.map((f) => f.name).join(", "))}">📎 ${t.attachments.length}</span>`);
   if (t.minutes) meta.push(`<span>${t.minutes}m</span>`);
@@ -927,6 +934,7 @@ function projectRow(p, depth = null, { draggable = false } = {}) {
         ${p.due_date ? `<span class="due">Due ${fmtDate(p.due_date)}</span>` : ""}
         ${waits.length ? `<span class="blocked" title="Waiting on: ${h(waits.map((b) => b.title).join(", "))}">🔒 after ${
           h(waits[0].title)}${waits.length > 1 ? ` +${waits.length - 1}` : ""}</span>` : ""}
+        ${p.waypoint ? '<span class="waypoint" title="A waypoint, on timelines">⚑</span>' : ""}
         ${p.related?.length ? `<span class="related" title="Related: ${h(p.related.map((r) => r.title).join(", "))}">🔗 ${p.related.length}</span>` : ""}
         ${p.attachments?.length ? `<span title="${h(p.attachments.map((f) => f.name).join(", "))}">📎 ${p.attachments.length}</span>` : ""}
         ${(p.tags || []).map((tag) => `<span class="tag">${h(tag)}</span>`).join("")}
@@ -951,7 +959,7 @@ function renderList() {
   document.title = viewTitle() + " · Entropicide";
   const el = $("#list");
   const readOnly = S.view === "logbook" || S.view === "trash";
-  $("#quick-add").hidden = readOnly || ["projects", "links", "notes", "journal"].includes(S.view);
+  $("#quick-add").hidden = readOnly || ["projects", "links", "notes", "journal", "timeline"].includes(S.view) || S.view.startsWith("timeline:");
   if (S.view === "notes" || S.view === "journal") {
     $("#main").append($("#detail"));  // (as for links)
     renderNotes(el);
@@ -961,6 +969,13 @@ function renderList() {
   if (S.view === "links") {
     $("#main").append($("#detail"));  // out of the way of the links page, which redraws the list
     renderLinks(el);
+    renderSelectBar();
+    return;
+  }
+  if (S.view === "timeline" || S.view.startsWith("timeline:")) {
+    $("#main").append($("#detail"));  // (as for notes: the timeline redraws the list)
+    $("#tag-bar").innerHTML = "";
+    renderTimeline(el);
     renderSelectBar();
     return;
   }
@@ -995,6 +1010,7 @@ function renderList() {
       ${up.length ? `<p class="muted small part-of">Part of ${up.map((q) => `<button type="button" class="link open-subproject" data-project="${q.id}">${h(q.name)}</button>`).join(" › ")}</p>` : ""}
       ${p.notes ? `<div class="project-notes notes note-body">${showBody(p.notes)}</div>` : ""}
       <button class="link edit-project">Edit project</button>
+      <button class="link open-timeline" data-timeline="project:${p.id}" title="Its waypoints (⚑) in time">Timeline</button>
       ${p.state !== "done"
         ? '<button class="link complete-project">Mark project complete</button>'
         : '<button class="link reopen-project">Reopen project</button>'}
@@ -1601,6 +1617,7 @@ function renderDetail() {
         <label class="check"><input type="checkbox" data-field="sequential" ${p.sequential ? "checked" : ""}>
           Sequential (only the first action shows in Queue)</label>
         <label class="check"><input type="checkbox" data-field="focus" ${p.focus ? "checked" : ""}> Focus</label>
+        <label class="check" title="Shown on timelines"><input type="checkbox" data-field="waypoint" ${p.waypoint ? "checked" : ""}> ⚑ Waypoint</label>
       </section>
       <section class="d-group" aria-label="Blocked by and related">
         ${blockersField(p, "project")}
@@ -1629,7 +1646,9 @@ function renderDetail() {
     t.spent ? `${fmtSpent(t.spent)} spent` : ""].filter(Boolean);
   el.innerHTML = `
     <div class="detail-head"><span>${t.completed_at ? "Completed" : t.deleted_at ? "In trash" : "Task"}</span>
-      <span><button class="icon d-star ${t.focus ? "on" : ""}" title="${t.focus ? "In Focus: click to take it out" : "Put it in Focus"} (S)"
+      <span><button class="icon d-waypoint ${t.waypoint ? "on" : ""}" title="${t.waypoint ? "A waypoint, on timelines: click to take it off" : "Make it a waypoint, shown on timelines"}"
+        aria-pressed="${!!t.waypoint}">⚑ Waypoint</button>
+      <button class="icon d-star ${t.focus ? "on" : ""}" title="${t.focus ? "In Focus: click to take it out" : "Put it in Focus"} (S)"
         aria-pressed="${!!t.focus}">★ Focus</button>
       <button class="icon close" aria-label="Close">✕</button></span></div>
     <input class="d-title" data-field="title" value="${h(t.title)}" aria-label="Title">
@@ -1746,9 +1765,80 @@ function focusNotes() {
   getSelection().addRange(r);
 }
 
+// ---- timelines ---------------------------------------------------------------
+// A line through today: what's done (or written) behind, what's coming (due, else starting)
+// ahead. It shows waypoints (⚑), or everything dated. Views: "timeline" (all tasks and
+// projects), "timeline:project:<id>" (what's in a project) and "timeline:journal:<id>".
+
+const timeline = { query: null, data: null, loading: false, all: load("timelineAll", "") === "1" };
+
+function timelineQuery() {
+  const [, kind, id] = S.view.split(":");
+  return (kind ? `?${kind}=${id}` : "?") + (timeline.all ? "&all=1" : "");
+}
+
+function renderTimeline(el) {
+  const query = timelineQuery();
+  if (timeline.query !== query || !timeline.data) {
+    el.innerHTML = '<p class="empty">Loading…</p>';
+    if (!timeline.loading || timeline.query !== query) {
+      timeline.query = query;
+      timeline.loading = true;
+      api("GET", "/timeline" + query).then((d) => { timeline.data = d; })
+        .catch(() => { timeline.data = { items: [], today: today() }; })
+        .finally(() => { timeline.loading = false; if (S.view.startsWith("timeline")) { renderList(); scrollToToday(); } });
+    }
+    return;
+  }
+  const [, kind, id] = S.view.split(":");
+  const { items, today: now } = timeline.data;
+  let html = `<div class="notes-bar">
+      ${kind ? `<button type="button" class="link back-from-timeline" data-back="${kind === "project" ? `project:${id}` : "journal"}">‹ Back to the ${kind}</button>` : ""}
+      <div class="notes-opts"><select class="timeline-all" aria-label="Show">${options([["", "Waypoints (⚑)"], ["1", "Everything dated"]], timeline.all ? "1" : "")}</select></div>
+    </div>`;
+  if (!items.length) {
+    el.innerHTML = html + `<p class="empty">${timeline.all ? "Nothing dated here yet." : `No waypoints here yet. Mark the
+      milestones you want to see (right-click → <em>Waypoint</em>, or ⚑ in the details) and they line up here: what's done behind
+      today, what's coming ahead. Or show everything dated.`}</p>`;
+    return;
+  }
+  let month = null, todayShown = false;
+  html += '<div class="timeline">';
+  for (const x of items) {
+    if (!todayShown && x.date > now) { html += todayMark(now); todayShown = true; }
+    const m = new Date(x.date + "T12:00:00").toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    if (m !== month) html += `<h2 class="group tl-month">${h(month = m)}</h2>`;
+    const icon = x.kind === "project" ? "▤" : x.kind === "note" ? "📝" : x.done ? "✓" : "○";
+    const when = { done: "done", due: "due", start: "starts", entry: "", written: "written" }[x.when];
+    html += `<button type="button" class="tl-item${x.done ? " past" : " ahead"}${x.waypoint ? "" : " faint"}" data-open="${x.kind}:${x.id}">
+      <span class="tl-date">${h(fmtDate(x.date))}${x.time ? ` <span class="muted">${h(fmtTime(x.time))}</span>` : ""}</span>
+      <span class="tl-dot" aria-hidden="true">${icon}</span>
+      <span class="tl-title">${x.waypoint ? "⚑ " : ""}${mdInline(x.title || "Untitled")}</span>
+      ${when ? `<span class="tl-when">${when}</span>` : ""}</button>`;
+  }
+  if (!todayShown) html += todayMark(now);
+  el.innerHTML = html + "</div>";
+}
+
+const todayMark = (now) => `<div class="tl-today" id="tl-today"><span>Today · ${h(new Date(now + "T12:00:00")
+  .toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }))}</span></div>`;
+
+function scrollToToday() {
+  document.getElementById("tl-today")?.scrollIntoView({ block: "center" });
+}
+
+// Opens what a timeline item is: a task (or, done, says so), a project or a note.
+function openTimelineItem(kind, id) {
+  if (kind === "project") { if (projectById(id)) { setView(`project:${id}`); select("project", id); } else toast("That project isn't there any more."); }
+  else if (kind === "note") openNoteById(id);
+  else if (taskById(id)) openTask(id);
+  else toast("That task is done: it's in the Logbook.");
+}
+
 // ---- actions -------------------------------------------------------------
 
 function setView(view) {
+  if (view.startsWith("timeline")) timeline.data = null;  // (loaded afresh)
   S.view = view;
   S.selected = null;  // (a different list: the open task's details close)
   S.picked.clear();
@@ -3320,6 +3410,10 @@ function bindDetail() {
       $("#detail").dataset.key = "";
       await patchTask(sel.id, { focus: !taskById(sel.id).focus });
     }
+    else if (b.classList.contains("d-waypoint")) {
+      $("#detail").dataset.key = "";
+      await patchTask(sel.id, { waypoint: !taskById(sel.id).waypoint });
+    }
     else if (b.dataset.until) snoozeTask(sel.id, b.dataset.until);
     else if (b.matches(".ref-add, .ref-del")) {
       const field = b.closest("[data-refs]").dataset.refs, id = Number(b.dataset.ref || b.closest("[data-ref]").dataset.ref);
@@ -3965,7 +4059,7 @@ function bindSuggest() {
 
 const DEFER_UNITS = { m: ["minute", 60e3], h: ["hour", 3600e3], d: ["day"], w: ["week"], mo: ["month"] };
 // ids: the tasks the menu acts on; project: or the project's id, for a project's menu.
-const menu = { ids: [], project: null, items: [], x: 0, y: 0, openedAt: 0 };
+const menu = { ids: [], project: null, note: null, items: [], x: 0, y: 0, openedAt: 0 };
 
 function parseDefer(opt) {
   const m = /^(\d+)(mo|m|h|d|w)$/.exec(opt);
@@ -4212,6 +4306,8 @@ function menuItems(ts) {
     ...(one ? head : []),
     ...(one ? [{ label: "Focus timer", run: () => openTimer(one.id) }] : []),
     { label: star ? "Star" : "Unstar", run: () => changeTasks(ts, () => ({ focus: star })) },
+    { label: "Waypoint", toggle: true, checked: ts.every((t) => t.waypoint), title: "Show it on timelines",
+      run: () => { const on = !ts.every((t) => t.waypoint); changeTasks(ts, () => ({ waypoint: on })); } },
     { label: "Complete", run: () => dropOnNav(ts, "logbook") },
     { label: "Duplicate", run: () => duplicateTasks(ts) },
     ...(one && !one.series_id ? [{ label: "Convert to project…", run: () => openConvert(one) },
@@ -4246,6 +4342,7 @@ function markMenuTarget() {
   document.querySelectorAll(".menu-target").forEach((r) => r.classList.remove("menu-target"));
   for (const id of menu.ids) document.querySelector(`.row.task[data-task="${id}"]`)?.classList.add("menu-target");
   if (menu.project) document.querySelector(`.row.project[data-project="${menu.project}"]`)?.classList.add("menu-target");
+  if (menu.note) document.querySelector(`[data-note="${menu.note}"]:is(.note-card, .note-row, .journal-entry)`)?.classList.add("menu-target");
 }
 
 // ---- a project's menu (right-click, or press and hold, a project's row) ----
@@ -4295,6 +4392,7 @@ function projectMenuItems(p) {
         label: q.name, run: () => changeProject(p, { parent_id: q.id }, `“${p.name}” is part of “${q.name}” now.`) })),
     ] },
     { label: p.focus ? "Unstar" : "Star", run: () => changeProject(p, { focus: !p.focus }) },
+    { label: "Waypoint", toggle: true, checked: !!p.waypoint, run: () => changeProject(p, { waypoint: !p.waypoint }) },
     { label: "Sequential", toggle: true, checked: p.sequential, run: () => changeProject(p, { sequential: !p.sequential }) },
     ...(projectEmpty(p) ? [{ sep: true }, { label: "Make it a task", run: () => convertTo(p.id, "task") },
       { label: "Make it a note", run: () => convertTo(p.id, "note") }] : []),
@@ -4347,10 +4445,10 @@ function showItems(items, focusAt) {
 }
 
 function closeMenu() {
-  if (!menu.ids.length && !menu.project) return;
+  if (!menu.ids.length && !menu.project && !menu.note) return;
   $("#ctx").hidden = true;
   menu.ids = [];
-  menu.project = null;
+  menu.project = menu.note = null;
   markMenuTarget();
 }
 
@@ -4392,22 +4490,27 @@ function bindMenu() {
   const list = $("#list");
   // A project's row (not one in the trash) has its own menu.
   const projectRow = (e) => e.target.closest(".row.project:not(.trashed)");
+  // And a note (a card, a row of the list, a journal entry), but not in the editor's text.
+  const noteItem = (e) => e.target.closest(".note-card, .note-row, .journal-entry");
   list.addEventListener("contextmenu", (e) => {
     const row = e.target.closest(".row.task");
     if (row && openMenu(menuIdsFor(Number(row.dataset.task)), e.clientX, e.clientY)) e.preventDefault();
     const p = projectRow(e);
     if (p && openProjectMenu(Number(p.dataset.project), e.clientX, e.clientY)) e.preventDefault();
+    const n = noteItem(e);
+    if (n && openNoteMenu(Number(n.dataset.note), e.clientX, e.clientY)) e.preventDefault();
   });
   // Press-and-hold on touch screens (iOS has no contextmenu event).
   let press = null;
   const cancel = () => { if (press) clearTimeout(press.timer); press = null; };
   list.addEventListener("touchstart", (e) => {
-    const row = e.target.closest(".row.task") || projectRow(e);
+    const row = e.target.closest(".row.task") || projectRow(e) || noteItem(e);
     if (!row || e.touches.length > 1 || e.target.closest(".prio-ctl")) return cancel();
     const { clientX: x, clientY: y } = e.touches[0];
     press = { x, y, fired: false };
     press.timer = setTimeout(() => {
-      press.fired = row.dataset.project ? openProjectMenu(Number(row.dataset.project), x, y)
+      press.fired = row.dataset.note ? openNoteMenu(Number(row.dataset.note), x, y)
+        : row.dataset.project ? openProjectMenu(Number(row.dataset.project), x, y)
         : openMenu(menuIdsFor(Number(row.dataset.task)), x, y);
       if (press.fired) navigator.vibrate?.(10);
     }, 500);
@@ -4520,6 +4623,9 @@ function bind() {
       return select("project", Number(b.closest("[data-project]").dataset.project));
     }
     if (b?.classList.contains("open-subproject")) return setView(`project:${b.dataset.project}`);
+    if (b?.dataset.timeline) return setView(`timeline:${b.dataset.timeline}`);
+    if (b?.classList.contains("back-from-timeline")) return setView(b.dataset.back);
+    if (b?.dataset.open) { const [kind, id] = b.dataset.open.split(":"); return openTimelineItem(kind, Number(id)); }
     if (b?.classList.contains("complete-project") || b?.classList.contains("reopen-project")) {
       const id = Number(b.closest("[data-project]").dataset.project);
       const done = b.classList.contains("complete-project");
@@ -4566,6 +4672,15 @@ function bind() {
       }
       if (S.view !== "trash") setView(`project:${id}`);
     }
+  });
+
+  // The timeline's "Show": waypoints, or everything dated.
+  $("#list").addEventListener("change", (e) => {
+    if (!e.target.matches(".timeline-all")) return;
+    timeline.all = e.target.value === "1";
+    save("timelineAll", e.target.value);
+    timeline.data = null;
+    renderList();
   });
 
   // Drag and drop: reorder within the list, or drop onto the sidebar.

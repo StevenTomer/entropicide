@@ -45,6 +45,11 @@ In brief:
   and linked tasks, with `"phrases"`, `-word`, `#tag`, `cat:`, `journal:`, `area:`, `has:`,
   `is:pinned`, `before:` / `after:` / `on:`. Saved as you type, and offline too. A task can
   become a note. Stored as cleaned HTML (`richtext.py`).
+- **Timelines:** tasks, projects, notes and entries marked as waypoints (⚑) on a line through
+  today (done behind, coming ahead): for everything, a project, or a journal; or everything dated.
+  Waypoints also make a strip across the Notes and Journal pages to jump to.
+- **Notes** also show as a list by category, draw a batch at a time as you scroll, can be archived
+  (still searchable) and have a right-click menu.
 - **Journals:** a note ticked as a journal entry belongs to a journal, at a point in time (a day
   and, if you like, a time; any number in a day). The Journal page reads them in order, under
   their months. As many journals as you like.

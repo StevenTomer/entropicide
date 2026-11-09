@@ -316,3 +316,28 @@ def test_areas(app, user_client):
     assert user_client("bob").delete(f"/api/areas/{area}", headers=H).status_code == 404
     assert client.delete(f"/api/areas/{area}", headers=H).status_code == 204
     assert rows(app, "SELECT area_id FROM tasks WHERE id = ?", t) == [{"area_id": None}]
+
+
+def test_timelines(app, user_client):
+    client = user_client("ann", settings='{"timezone": "UTC"}')
+    add = lambda **t: client.post("/api/tasks", json=t, headers=H).get_json()["id"]  # noqa: E731
+    house = client.post("/api/projects", json={"name": "House", "waypoint": True, "due_date": "2027-03-01"},
+                        headers=H).get_json()["id"]
+    roof = add(title="Fix the roof", due_date="2026-12-01", waypoint=True, project_id=house)
+    add(title="Buy nails", due_date="2026-11-20", project_id=house)  # (not a waypoint)
+    paint = add(title="Paint", start_date="2026-11-25", waypoint=True)
+    client.patch(f"/api/tasks/{paint}", json={"completed": True}, headers=H)
+    line = lambda q="": client.get("/api/timeline" + q).get_json()["items"]  # noqa: E731
+    assert [(x["title"], x["when"]) for x in line()][-2:] == [("Fix the roof", "due"), ("House", "due")]
+    assert [x["title"] for x in line() if x["when"] == "done"] == ["Paint"]
+    assert [x["title"] for x in line(f"?project={house}")] == ["Fix the roof", "House"]
+    assert [x["title"] for x in line(f"?project={house}&all=1")] == ["Buy nails", "Fix the roof", "House"]
+    # Journals: their entries, at their moments; archived notes are still notes.
+    j = client.post("/api/journals", json={"name": "Diary"}, headers=H).get_json()["id"]
+    client.post("/api/notes", json={"journal_id": j, "entry_date": "2026-11-02", "entry_time": "08:00",
+                                    "title": "Moved in", "waypoint": True}, headers=H)
+    client.post("/api/notes", json={"journal_id": j, "entry_date": "2026-11-03", "title": "Tuesday"}, headers=H)
+    assert [(x["title"], x["date"], x["time"]) for x in line(f"?journal={j}")] == [("Moved in", "2026-11-02", "08:00")]
+    n = client.post("/api/notes", json={"title": "Idea", "waypoint": True}, headers=H).get_json()
+    assert client.patch(f"/api/notes/{n['id']}", json={"archived": True}, headers=H).get_json()["archived_at"]
+    assert [x["title"] for x in line("?notes=1")] == ["Idea"] and n["waypoint"] is True

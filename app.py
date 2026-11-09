@@ -748,6 +748,7 @@ def with_shared(rows, kind, shape):
     for row in rows:
         d = shape(row)
         d.pop("user_id", None)
+        d["waypoint"] = bool(d.get("waypoint"))
         d |= {"tags": tags.get(d["id"], []), "attachments": files.get(d["id"], []), "related": links.get(d["id"], [])}
         if blockers is not None:
             d["blocked_by"] = blockers.get(d["id"], [])
@@ -766,6 +767,71 @@ def tasks_json(rows):
 
 def project_dict(row):
     return projects_json([row])[0]
+
+
+# --- timelines --------------------------------------------------------------------
+# A timeline is a line through today: what's done (or written) behind it, what's coming (due,
+# else starting) ahead. It shows waypoints (the ⚑ flag), or with ?all=1 everything dated.
+
+@app.get("/api/timeline")
+@login_required
+def timeline():
+    """Waypoints on a line in time, as [{id, kind, title, date, time, when, done, waypoint,
+    project_id}] in order: of all tasks and projects (default), ?project=<id> (what's in it, at
+    any depth, and it), ?journal=<id> (its entries) or ?notes=1 (notes, not entries). ?all=1:
+    everything dated, not just waypoints."""
+    conn, uid = db.get_db(), g.user["id"]
+    tz = ZoneInfo(user_tz(g.user))
+    local = lambda stamp: datetime.fromisoformat(stamp.replace(" ", "T") + "+00:00").astimezone(tz)  # noqa: E731
+    flagged = "" if request.args.get("all") else " AND waypoint = 1"
+    items = []
+
+    def add(row, kind, date, time_, when, done):
+        items.append({"id": row["id"], "kind": kind, "title": row["title"] if kind != "project" else row["name"],
+                      "date": date, "time": time_, "when": when, "done": done, "waypoint": bool(row["waypoint"]),
+                      "project_id": row["project_id"] if kind == "task" else row["parent_id"] if kind == "project" else None})
+
+    if request.args.get("journal") or request.args.get("notes"):
+        if request.args.get("journal"):
+            owned("journals", request.args.get("journal", type=int))
+            rows = conn.execute(f"SELECT * FROM notes WHERE user_id = ? AND journal_id = ? AND deleted_at IS NULL{flagged}",
+                                (uid, request.args.get("journal", type=int))).fetchall()
+        else:
+            rows = conn.execute(f"SELECT * FROM notes WHERE user_id = ? AND journal_id IS NULL AND deleted_at IS NULL{flagged}",
+                                (uid,)).fetchall()
+        for n in rows:
+            if n["entry_date"]:
+                add(n, "note", n["entry_date"], n["entry_time"], "entry", True)
+            else:
+                at = local(n["created_at"])
+                add(n, "note", at.date().isoformat(), at.strftime("%H:%M"), "written", True)
+    else:
+        inside = None
+        if request.args.get("project"):
+            pid = owned("projects", request.args.get("project", type=int))["id"]
+            inside = project_contents(pid) | {pid}
+        keep = lambda r: inside is None or r["id"] in inside  # noqa: E731
+        for t in conn.execute(f"SELECT * FROM tasks WHERE user_id = ? AND deleted_at IS NULL AND missed = 0{flagged}",
+                              (uid,)).fetchall():
+            if not keep(t):
+                continue
+            if t["completed_at"]:
+                at = local(t["completed_at"])
+                add(t, "task", at.date().isoformat(), at.strftime("%H:%M"), "done", True)
+            elif t["due_date"]:
+                add(t, "task", t["due_date"], None, "due", False)
+            elif t["start_date"]:
+                add(t, "task", t["start_date"], t["start_time"], "start", False)
+        for p in conn.execute(f"SELECT * FROM projects WHERE user_id = ? AND deleted_at IS NULL{flagged}", (uid,)).fetchall():
+            if not keep(p):
+                continue
+            if p["completed_at"] and p["state"] == "done":
+                at = local(p["completed_at"])
+                add(p, "project", at.date().isoformat(), at.strftime("%H:%M"), "done", True)
+            elif p["due_date"]:
+                add(p, "project", p["due_date"], None, "due", False)
+    items.sort(key=lambda x: (x["date"], x["time"] or "", x["id"]))
+    return jsonify(items=items[-2000:], today=datetime.now(tz).date().isoformat())
 
 
 def document_json(doc_id):
@@ -857,6 +923,8 @@ def shared_fields(kind, key, value, out):
         out[key] = check_ref("areas", value)
     elif key == "deleted":
         out["deleted_at"] = utcnow() if value else None
+    elif key == "waypoint":
+        out[key] = 1 if value else 0
     elif kind == "note":
         return False
     elif key == "focus":
@@ -2532,6 +2600,8 @@ def note_fields(data):
             out[key] = value or None
         elif key == "pinned":
             out[key] = 1 if value else 0
+        elif key == "archived":
+            out["archived_at"] = utcnow() if value else None
     return out
 
 

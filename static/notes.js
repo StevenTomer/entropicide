@@ -19,7 +19,8 @@ const NOTE_HAS = [["", "Any note"], ["pinned", "Pinned"], ["picture", "With pict
 // The pages' choices, kept on this device.
 const NV = {
   category: load("notesCategory", ""),  // "" every category, "none", or a category id
-  show: load("notesShow", "notes"),      // notes | all (with journal entries) | entries
+  show: load("notesShow", "notes"),      // notes | all (with journal entries) | entries | archived
+  layout: load("notesLayout", "cards"),  // cards | list (by category)
   has: load("notesHas", ""),
   sort: load("notesSort", "edited"),
   journal: Number(load("journal", "")) || null,
@@ -90,7 +91,10 @@ function noteScore(n, terms) {
     else if (t.field === "journal") { hit = !!n.journal_id && journal.includes(v); s = 1; }
     else if (t.field === "area") { hit = area.includes(v); s = 1; }
     else if (t.field === "title") { hit = title.includes(v); s = 6; }
-    else if (t.field === "is") hit = { pinned: n.pinned, journal: !!n.journal_id, entry: !!n.journal_id, note: !n.journal_id }[v] ?? false;
+    else if (t.field === "is") {
+      hit = { pinned: n.pinned, journal: !!n.journal_id, entry: !!n.journal_id, note: !n.journal_id, archived: !!n.archived_at,
+        waypoint: !!n.waypoint }[v] ?? false;
+    }
     else if (t.field === "has") hit = noteHas(n, v);
     else if (t.field === "before") hit = noteDay(n) < searchDay(v);
     else if (t.field === "after") hit = noteDay(n) > searchDay(v);
@@ -151,6 +155,10 @@ function shownNotes(terms) {
   const q = S.search.trim();
   const regex = q.length > 1 && q.startsWith("/") && searchTest();
   let list = S.data.notes.filter((n) => inArea(n.area_id) && [...S.tagFilter].every((t) => n.tags.includes(t)));
+  // Archived notes are out of the way, but a search still finds them (and Show: Archived lists them).
+  const archivedOnly = !journalPage && NV.show === "archived";
+  if (archivedOnly) list = list.filter((n) => n.archived_at);
+  else if (!terms.length && !regex) list = list.filter((n) => !n.archived_at);
   if (journalPage) {
     const j = currentJournal();
     list = list.filter((n) => n.journal_id && n.journal_id === j?.id);
@@ -158,7 +166,7 @@ function shownNotes(terms) {
     // Asking for journal entries in the search finds them whatever "Show" says.
     const asks = terms.some((t) => !t.neg && (t.field === "journal" || (t.field === "is" && ["journal", "entry"].includes(t.text))));
     if (NV.show === "notes" && !asks) list = list.filter((n) => !n.journal_id);
-    else if (NV.show === "entries") list = list.filter((n) => n.journal_id);
+    else if (NV.show === "entries") list = list.filter((n) => n.journal_id);  // (archived: both)
     if (NV.category === "none") list = list.filter((n) => !n.category_id);
     else if (NV.category) list = list.filter((n) => n.category_id === Number(NV.category));
     if (NV.has) list = list.filter((n) => noteHas(n, NV.has));
@@ -201,6 +209,8 @@ function noteMeta(n, { date = true } = {}) {
   const area = n.area_id && areaById(n.area_id);
   const stamp = NV.sort === "created" || NV.sort === "oldest" ? n.created_at : n.updated_at;
   return [
+    n.archived_at ? '<span class="note-archived" title="Archived: out of the way, but still found by search">Archived</span>' : "",
+    n.waypoint ? '<span class="waypoint" title="A waypoint, on timelines">⚑</span>' : "",
     cat ? `<span class="note-cat" data-color="${h(cat.color)}">${h(cat.name)}</span>` : "",
     j ? `<span class="note-cat">📓 ${h(j.name)}</span>` : "",
     area && S.data.areas.length > 1 ? `<span>${h(area.name)}</span>` : "",
@@ -241,7 +251,8 @@ function renderNotes(el) {
   const terms = parseNoteSearch(S.search.trim().startsWith("/") ? "" : S.search);
   const words = searchWords(terms);
   if (S.view === "journal") return renderJournal(el, terms, words);
-  renderNoteTags(S.data.notes.filter((n) => NV.show === "all" || (NV.show === "entries") === !!n.journal_id));
+  renderNoteTags(S.data.notes.filter((n) => NV.show === "archived" ? n.archived_at
+    : !n.archived_at && (NV.show === "all" || (NV.show === "entries") === !!n.journal_id)));
   const shown = shownNotes(terms).map(([n]) => n);
   const cats = S.data.note_categories;
   let html = `<div class="notes-bar">
@@ -254,26 +265,152 @@ function renderNotes(el) {
         <button type="button" class="link edit-cats">${cats.length ? "Edit categories" : "+ Category"}</button>
       </div>
       <div class="notes-opts">
+        <select class="notes-layout" aria-label="Layout">${options([["cards", "Cards"], ["list", "List, by category"]], NV.layout)}</select>
         <select class="notes-show" aria-label="Show">${options([["notes", "Notes"], ["all", "Notes and journal entries"],
-          ["entries", "Journal entries"]], NV.show)}</select>
+          ["entries", "Journal entries"], ["archived", "Archived"]], NV.show)}</select>
         <select class="notes-has" aria-label="Only">${options(NOTE_HAS, NV.has)}</select>
         <select class="notes-sort" aria-label="Sort by">${options(NOTE_SORTS.map(([v, l]) => [v, "Sort: " + l]), NV.sort)}</select>
       </div>
-    </div>` + (S.search.trim() ? SEARCH_TIP : "");
+    </div>` + (S.search.trim() ? SEARCH_TIP : "") + timeStrip(shown);
   if (!S.data.notes.some((n) => !n.journal_id) && !S.search && NV.show === "notes") {
-    html += `<p class="empty">Keep ideas, lists, recipes, plans… anything worth writing down, with pictures and files.
+    el.innerHTML = html + `<p class="empty">Keep ideas, lists, recipes, plans… anything worth writing down, with pictures and files.
       Give them categories (each in its own colour) and tags, pin the important ones, and link them to tasks.
       Press <kbd>N</kbd> or <em>+ New note</em> to start one.</p>`;
-  } else if (!shown.length) {
-    html += '<p class="empty">Nothing matches.</p>';
-  } else {
-    const pinned = words.length ? [] : shown.filter((n) => n.pinned);
-    const rest = pinned.length ? shown.filter((n) => !n.pinned) : shown;
-    if (pinned.length) html += `<h2 class="group">Pinned</h2><div class="note-grid">${pinned.map((n) => noteCard(n, words)).join("")}</div>` +
-      (rest.length ? '<h2 class="group">Others</h2>' : "");
-    html += `<div class="note-grid">${rest.map((n) => noteCard(n, words)).join("")}</div>`;
+    return;
   }
-  el.innerHTML = html;
+  if (!shown.length) {
+    el.innerHTML = html + `<p class="empty">${NV.show === "archived" && !S.search ? "Nothing archived. Archive a note (right-click it, or in the note) to put it away here; search still finds it." : "Nothing matches."}</p>`;
+    return;
+  }
+  if (NV.layout === "list") {
+    // Grouped by category (in their order, then none), pinned first in each; the sort within.
+    const order = new Map(cats.map((c, i) => [c.id, i]));
+    const at = (n) => order.get(n.category_id) ?? cats.length;
+    const sorted = [...shown].sort((a, b) => at(a) - at(b) || (words.length ? 0 : b.pinned - a.pinned));
+    el.innerHTML = html + '<div class="note-list"></div>';
+    return drawPaged($(".note-list", el), sorted, (n, prev) =>
+      (!prev || prev.category_id !== n.category_id ? noteGroupHead(n) : "") + noteRow(n, words));
+  }
+  const pinned = words.length ? [] : shown.filter((n) => n.pinned);
+  const rest = pinned.length ? shown.filter((n) => !n.pinned) : shown;
+  if (pinned.length) html += `<h2 class="group">Pinned</h2><div class="note-grid">${pinned.map((n) => noteCard(n, words)).join("")}</div>` +
+    (rest.length ? '<h2 class="group">Others</h2>' : "");
+  el.innerHTML = html + '<div class="note-grid paged"></div>';
+  drawPaged($(".note-grid.paged", el), rest, (n) => noteCard(n, words));
+}
+
+// ---- long lists, a batch at a time ----
+// A page of notes (or entries) draws its first NOTE_BATCH, and the next as the end comes into
+// view, so a big collection (pictures especially) doesn't all load at once.
+
+const NOTE_BATCH = 40;
+const paged = { holder: null, list: [], draw: null, at: 0, observer: null };
+
+function drawPaged(holder, list, draw) {
+  paged.observer?.disconnect();
+  Object.assign(paged, { holder, list, draw, at: 0 });
+  moreNotes();
+}
+
+// Draws the next batch (or up to index upTo).
+function moreNotes(upTo = 0) {
+  const p = paged;
+  if (!p.holder?.isConnected || p.at >= p.list.length) return;
+  const end = Math.min(p.list.length, Math.max(p.at + NOTE_BATCH, upTo));
+  let html = "";
+  for (let i = p.at; i < end; i++) html += p.draw(p.list[i], p.list[i - 1]);
+  p.holder.querySelector(".more-notes")?.remove();
+  p.holder.insertAdjacentHTML("beforeend", html + (end < p.list.length ? '<div class="more-notes" aria-hidden="true"></div>' : ""));
+  p.at = end;
+  const sentinel = p.holder.querySelector(".more-notes");
+  if (!sentinel) return;
+  p.observer ||= new IntersectionObserver((seen) => { if (seen.some((x) => x.isIntersecting)) moreNotes(); }, { rootMargin: "800px" });
+  p.observer.disconnect();
+  p.observer.observe(sentinel);
+}
+
+// Brings a note on the page into view (drawing up to it), and shows which it is.
+function revealNote(id) {
+  const at = paged.list.findIndex((n) => n.id === id);
+  if (at >= 0) moreNotes(at + 1);
+  const el = document.querySelector(`#list [data-note="${id}"]`);
+  if (!el) return openNoteById(id);
+  el.scrollIntoView({ block: "center", behavior: "smooth" });
+  el.classList.remove("flash");
+  void el.offsetWidth;  // (to start the flash again)
+  el.classList.add("flash");
+}
+
+// The waypoints among these notes, in time, to jump to.
+function timeStrip(list) {
+  const points = list.filter((n) => n.waypoint).sort((a, b) => noteMoment(a).localeCompare(noteMoment(b)));
+  if (!points.length) return "";
+  return `<nav class="time-strip" aria-label="Waypoints"><span class="ts-label" title="Waypoints (⚑), in time: click one to go to it">⚑</span>
+    ${points.map((n) => `<button type="button" class="ts-point" data-jump="${n.id}" title="${h(noteLabel(n))}">
+      <span class="ts-date">${h(fmtDate(noteDay(n)))}</span> ${h(noteLabel(n).slice(0, 40))}</button>`).join("")}</nav>`;
+}
+
+function noteGroupHead(n) {
+  const c = categoryById(n.category_id);
+  return `<h2 class="group note-group" data-color="${h(c?.color || "")}">${h(c?.name || "No category")}</h2>`;
+}
+
+// A note as a row of the list: its title (or first words), a line of its text, and what it has.
+function noteRow(n, words) {
+  const color = categoryById(n.category_id)?.color || "";
+  const text = noteText(n).replace(/\s+/g, " ");
+  const line = words.length ? snippet(noteText(n), words, 160) : h(text.slice(0, n.title ? 160 : 0) || "");
+  const label = n.title || text.slice(0, 80) || noteLabel(n);
+  return `<div class="note-row${n.pinned ? " pinned" : ""}" data-note="${n.id}" data-color="${h(color)}" tabindex="0">
+    <div class="nr-main"><span class="note-title">${n.pinned ? "📌 " : ""}${markWords(label, words)}</span>
+      ${line ? `<span class="nr-text muted">${line}</span>` : ""}</div>
+    <div class="note-meta">${noteMeta(n)}</div>
+  </div>`;
+}
+
+// ---- a note's menu (right-click, or press and hold) ----
+
+function openNoteMenu(id, x, y) {
+  const n = noteById(id);
+  if (!n || n.deleted_at) return false;
+  if (menu.note === id && Date.now() - menu.openedAt < 800) return true;  // (as in openMenu)
+  Object.assign(menu, { ids: [], project: null, note: id, x, y, openedAt: Date.now() });
+  showItems(noteMenuItems(n));
+  markMenuTarget();
+  return true;
+}
+
+function noteMenuItems(n) {
+  const cats = S.data.note_categories;
+  const reopen = (items, at) => { const fresh = noteById(n.id); if (fresh) showSub(noteMenuItems(fresh), items(fresh), at); };
+  return [
+    cats.length ? { label: "Category", chips: [
+      { label: "None", current: !n.category_id, run: () => patchNote(n.id, { category_id: null }) },
+      ...cats.map((c) => ({ label: c.name, current: n.category_id === c.id, run: () => patchNote(n.id, { category_id: c.id }) })),
+    ] } : { label: "Category", note: "No categories yet: Edit categories on the Notes page." },
+    { sep: true },
+    { label: "Tag", sub: () => noteTagItems(n, reopen) },
+    { sep: true },
+    { label: "Open", run: () => openNote(n) },
+    { label: n.pinned ? "Unpin" : "Pin", run: () => patchNote(n.id, { pinned: !n.pinned }) },
+    { label: "Waypoint", toggle: true, checked: !!n.waypoint, run: () => patchNote(n.id, { waypoint: !n.waypoint }) },
+    { label: n.archived_at ? "Unarchive" : "Archive", run: () => archiveNote(n.id, !n.archived_at) },
+    { sep: true },
+    { label: "Make it a task", run: () => convertTo(n.id, "task") },
+    { label: "Make it a project", run: () => convertTo(n.id, "project") },
+    { sep: true },
+    { label: "Move to trash", danger: true, run: () => trashNote(n.id) },
+  ];
+}
+
+function noteTagItems(n, reopen) {
+  return tagMenu([n], (fn) => patchNote(n.id, fn(n)), (at) => reopen((fresh) => noteTagItems(fresh, reopen), at));
+}
+
+// Archived: off the Notes page (and its journal's), but still found by search.
+async function archiveNote(id, on) {
+  await patchNote(id, { archived: on });
+  toast(on ? "Archived. Search still finds it." : "Back among your notes.", () => patchNote(id, { archived: !on }));
 }
 
 function renderJournal(el, terms, words) {
@@ -287,6 +424,7 @@ function renderJournal(el, terms, words) {
     ${j ? `<button type="button" class="primary new-note" title="New entry (N)">+ New entry</button>
       <div class="notes-opts">
         <select class="journal-order" aria-label="Order">${options([["newest", "Newest first"], ["oldest", "Oldest first"]], NV.order)}</select>
+        <button type="button" class="link open-timeline" data-timeline="journal:${j.id}" title="Its waypoints (⚑) in time">Timeline</button>
         <button type="button" class="link rename-journal">Rename</button>
         <button type="button" class="link danger delete-journal">Delete journal</button>
       </div>` : ""}
@@ -299,23 +437,26 @@ function renderJournal(el, terms, words) {
     return;
   }
   const shown = shownNotes(terms).map(([n]) => n);
-  if (!shown.length) html += `<p class="empty">${S.search || S.tagFilter.size ? "Nothing matches." :
-    "No entries yet. Press <kbd>N</kbd> or <em>+ New entry</em> to write one."}</p>`;
-  let month = null;
-  for (const n of shown) {
+  html += timeStrip(shown);
+  if (!shown.length) {
+    el.innerHTML = html + `<p class="empty">${S.search || S.tagFilter.size ? "Nothing matches." :
+      "No entries yet. Press <kbd>N</kbd> or <em>+ New entry</em> to write one."}</p>`;
+    return;
+  }
+  const month = (n) => new Date(noteDay(n) + "T12:00:00").toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  el.innerHTML = html + '<div class="journal-entries"></div>';
+  drawPaged($(".journal-entries", el), shown, (n, prev) => {
     const day = noteDay(n);
-    const m = new Date(day + "T12:00:00").toLocaleDateString(undefined, { month: "long", year: "numeric" });
-    if (m !== month) html += `<h2 class="group journal-month">${h(month = m)}</h2>`;
     const color = categoryById(n.category_id)?.color || "";
-    html += `<article class="journal-entry" data-note="${n.id}" data-color="${h(color)}" tabindex="0">
+    return (!prev || month(prev) !== month(n) ? `<h2 class="group journal-month">${h(month(n))}</h2>` : "") +
+      `<article class="journal-entry" data-note="${n.id}" data-color="${h(color)}" tabindex="0">
       <div class="entry-day">${h(dayHeading(day))}${n.entry_time ? `, ${h(fmtTime(n.entry_time))}` : ""}</div>
       ${n.title ? `<h3 class="note-title">${markWords(n.title, words)}</h3>` : ""}
       ${words.length ? `<p class="note-snippet">${snippet(noteText(n), words, 400)}</p>`
         : `<div class="note-body${fontClass(n)}">${showBody(n.body) || '<p class="muted">(empty)</p>'}</div>`}
       <div class="note-meta">${noteMeta(n, { date: false })}</div>
     </article>`;
-  }
-  el.innerHTML = html;
+  });
 }
 
 // Notes linked to a task or project (kind), for its editor.
@@ -360,6 +501,7 @@ function noteChangedOffline(n, changes, stamp) {
     "entry_time", "tags", "related"].includes(k))) n.updated_at = stamp;
   if (changes.journal_id && !n.entry_date) { n.entry_date = today(); n.entry_time ??= timeNow(); }
   if ("journal_id" in changes && !changes.journal_id) n.entry_date = n.entry_time = null;
+  if ("archived" in changes) n.archived_at = changes.archived ? stamp : null;
 }
 
 // ---- the editor (a dialog over the page, saving as you type) ----
@@ -471,6 +613,8 @@ function editorHtml(n) {
         <input type="time" class="ne-time" value="${h(n.entry_time || "")}" aria-label="The entry's time">
       </span>
       <span class="ne-space"></span>
+      <button type="button" class="icon ne-waypoint${n.waypoint ? " on" : ""}" aria-pressed="${!!n.waypoint}"
+        title="${n.waypoint ? "A waypoint, on timelines: click to take it off" : "Make it a waypoint, shown on timelines"}" aria-label="Waypoint">⚑</button>
       <button type="button" class="icon ne-pin${n.pinned ? " on" : ""}" aria-pressed="${n.pinned}" title="${n.pinned ? "Unpin" : "Pin"}"
         aria-label="Pin">📌</button>
       <button type="button" class="icon ne-close" title="Close (Esc)" aria-label="Close">✕</button>
@@ -488,6 +632,7 @@ function editorHtml(n) {
     </div>
     <div class="ne-foot">
       <span class="muted small ne-dates"></span>
+      <button type="button" class="link ne-archive" title="${n.archived_at ? "Back among your notes" : "Out of the way: off the Notes page, but still found by search"}">${n.archived_at ? "Unarchive" : "Archive"}</button>
       <button type="button" class="link ne-convert" data-to="task" title="The same note, as a task: its title, text, tags, files and links go with it">Make it a task</button>
       <button type="button" class="link ne-convert" data-to="project" title="The same note, as a project">Make it a project</button>
       <button type="button" class="link danger ne-delete">Move to trash</button>
@@ -678,6 +823,19 @@ function bindNoteDialog(dlg) {
       return;
     }
     if (b.classList.contains("ne-close") || b.classList.contains("ne-done")) return closeNote();
+    if (b.classList.contains("ne-waypoint")) {
+      n.waypoint = !n.waypoint;
+      b.classList.toggle("on", n.waypoint);
+      b.setAttribute("aria-pressed", n.waypoint);
+      return noteFieldChanged("waypoint");
+    }
+    if (b.classList.contains("ne-archive")) {
+      await saveNote({ force: true });
+      if (!n.id || n.id < 0) return toast("Wait until this note has been saved (when you're back online).");
+      const id = n.id, on = !n.archived_at;
+      closeNote();
+      return archiveNote(id, on);
+    }
     if (b.classList.contains("ne-pin")) {
       n.pinned = !n.pinned;
       b.classList.toggle("on", n.pinned);
@@ -836,6 +994,7 @@ function bindNotes() {
   const list = $("#list");
   list.addEventListener("click", async (e) => {
     const b = e.target.closest("button");
+    if (b?.dataset.jump) return revealNote(Number(b.dataset.jump));  // (a waypoint on the strip)
     // The Trash's notes (shown in any view that lists them).
     const trashed = e.target.closest(".trash-note");
     if (trashed && b) {
@@ -892,6 +1051,7 @@ function bindNotes() {
   list.addEventListener("change", (e) => {
     const t = e.target;
     if (t.classList.contains("notes-show")) setNV("show", t.value, "notesShow");
+    else if (t.classList.contains("notes-layout")) setNV("layout", t.value, "notesLayout");
     else if (t.classList.contains("notes-has")) setNV("has", t.value, "notesHas");
     else if (t.classList.contains("notes-sort")) setNV("sort", t.value, "notesSort");
     else if (t.classList.contains("journal-order")) setNV("order", t.value, "journalOrder");

@@ -128,6 +128,31 @@ KINDS = {
             ("pinned", "INTEGER NOT NULL DEFAULT 0"),
         ],
     },
+    # Something in an inventory: a can of soup (used up, bought again) or a pair of shears
+    # (kept; it only moves, or is lent).
+    "item": {
+        "view": "items", "table": "item_data",
+        "document": {"name": "title", "notes": "body", "area_id": "area_id", "created_at": "created_at",
+                     "updated_at": "updated_at", "deleted_at": "deleted_at", "waypoint": "waypoint",
+                     "group_id": "group_id"},
+        "columns": [
+            ("inventory_id", "INTEGER REFERENCES inventories(id) ON DELETE SET NULL"),
+            ("location_id", "INTEGER REFERENCES locations(id) ON DELETE SET NULL"),
+            # how many there are (used up: what's left; kept: how many we have)
+            ("quantity", "REAL NOT NULL DEFAULT 0"),
+            ("unit", "TEXT NOT NULL DEFAULT ''"),
+            # 1: used up and bought again (counted down, restocked when low); 0: kept
+            ("used_up", "INTEGER NOT NULL DEFAULT 1"),
+            # below this, a task to buy more (back up to restock_to, else to this)
+            ("keep_at_least", "REAL"),
+            ("restock_to", "REAL"),
+            ("buy_task_id", "INTEGER REFERENCES task_data(id) ON DELETE SET NULL"),
+            # lent to whom (a name), since when, and the Waiting task to get it back
+            ("lent_to", "TEXT"),
+            ("lent_on", "TEXT"),
+            ("lend_task_id", "INTEGER REFERENCES task_data(id) ON DELETE SET NULL"),
+        ],
+    },
 }
 VIEW_KINDS = {k["view"]: kind for kind, k in KINDS.items()}
 
@@ -259,6 +284,38 @@ CREATE TABLE IF NOT EXISTS group_invites (
     UNIQUE (group_id, user_id)
 );
 
+-- Inventories: what's in the pantry, the food storage, the house. Shared with a group as a
+-- journal is (its items with it). stock: things used up and bought again; home: things kept.
+-- shopping_id: the project its "Buy …" tasks go in (made when first needed).
+CREATE TABLE IF NOT EXISTS inventories (
+    id          INTEGER PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    group_id    INTEGER REFERENCES user_groups(id) ON DELETE SET NULL,
+    name        TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'stock' CHECK (kind IN ('stock', 'home')),
+    shopping_id INTEGER,
+    position    REAL NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Where things are in an inventory, nested: Basement › Shelf 2 › Blue bin.
+CREATE TABLE IF NOT EXISTS locations (
+    id           INTEGER PRIMARY KEY,
+    inventory_id INTEGER NOT NULL REFERENCES inventories(id) ON DELETE CASCADE,
+    parent_id    INTEGER REFERENCES locations(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    position     REAL NOT NULL DEFAULT 0
+);
+
+-- Barcodes (UPC, EAN, …) of an inventory's items: an item can have several (brands, sizes);
+-- a code means one item in its inventory.
+CREATE TABLE IF NOT EXISTS item_codes (
+    inventory_id INTEGER NOT NULL REFERENCES inventories(id) ON DELETE CASCADE,
+    code         TEXT NOT NULL,
+    item_id      INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    PRIMARY KEY (inventory_id, code)
+);
+
 CREATE TABLE IF NOT EXISTS areas (
     id       INTEGER PRIMARY KEY,
     user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -295,7 +352,7 @@ CREATE TABLE IF NOT EXISTS links (
 CREATE TABLE IF NOT EXISTS documents (
     id         INTEGER PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    kind       TEXT NOT NULL CHECK (kind IN ('task', 'project', 'note')),
+    kind       TEXT NOT NULL CHECK (kind IN ('task', 'project', 'note', 'item')),
     title      TEXT NOT NULL DEFAULT '',
     -- a task's or project's notes (as typed), or a note's formatted text (HTML, richtext.py)
     body       TEXT NOT NULL DEFAULT '',
@@ -507,6 +564,11 @@ END;
 CREATE TRIGGER IF NOT EXISTS shared_delete AFTER DELETE ON documents WHEN OLD.group_id IS NOT NULL BEGIN
     UPDATE user_groups SET changed_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = OLD.group_id;
 END;
+CREATE TRIGGER IF NOT EXISTS shared_inventory AFTER UPDATE ON inventories
+        WHEN NEW.group_id IS NOT NULL OR OLD.group_id IS NOT NULL BEGIN
+    UPDATE user_groups SET changed_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id IN (NEW.group_id, OLD.group_id);
+END;
+CREATE INDEX IF NOT EXISTS item_codes_item ON item_codes(item_id);
 CREATE TRIGGER IF NOT EXISTS shared_journal AFTER UPDATE ON journals
         WHEN NEW.group_id IS NOT NULL OR OLD.group_id IS NOT NULL BEGIN
     UPDATE user_groups SET changed_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id IN (NEW.group_id, OLD.group_id);
@@ -881,6 +943,34 @@ def unify_states(conn):
     conn.commit()
 
 
+def allow_items(conn):
+    """Once: documents could only be tasks, projects and notes (a CHECK, which SQLite can't
+    change in place), so the table is made again allowing items, and everything copied over.
+    Before the views are made (they're dropped here, and made again after)."""
+    sql = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'documents'").fetchone()[0]
+    if "'item'" in sql:
+        return
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")  # (nothing may cascade from the old table going)
+    try:
+        for kind in KINDS.values():
+            conn.execute(f"DROP VIEW IF EXISTS {kind['view']}")
+        conn.execute(sql.replace("CREATE TABLE documents", "CREATE TABLE documents_new", 1)
+                     .replace("'note')", "'note', 'item')", 1))
+        conn.execute("INSERT INTO documents_new SELECT * FROM documents")
+        conn.execute("DROP TABLE documents")
+        conn.execute("ALTER TABLE documents_new RENAME TO documents")
+        problems = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if problems:
+            raise RuntimeError(f"Allowing items left {len(problems)} broken references, e.g. {tuple(problems[0])}.")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
 def connect(path):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
@@ -906,6 +996,7 @@ def init_db(path):
     conn = connect(path)
     conn.executescript(SCHEMA)
     migrate(conn)
+    allow_items(conn)
     conn.executescript(VIEWS)
     conn.executescript(INDEXES)
     format_text(conn)

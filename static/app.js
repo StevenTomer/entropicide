@@ -213,7 +213,7 @@ function send(method, path, body) {
 // to the tasks on screen, and again after a reload (the service worker keeps the last
 // /api/data). Tasks, projects and notes created offline get negative ids until they're sent.
 
-const OFFLINE_PATH = /^\/(tasks(\/bulk|\/-?\d+)?|projects(\/-?\d+)?|notes(\/-?\d+)?|reorder\/tasks)$/;
+const OFFLINE_PATH = /^\/(tasks(\/bulk|\/-?\d+)?|projects(\/-?\d+)?|notes(\/-?\d+)?|reorder\/tasks|items\/count|items\/\d+)$/;
 // Version 2: tasks, projects and notes share one set of ids (projects and notes were given new
 // ones then, so older changes to them, or naming them, can't be sent).
 const OUTBOX_VERSION = 2;
@@ -281,6 +281,7 @@ function applyOffline(op) {
     return null;
   }
   if (path === "/tasks/bulk") return body.tasks.map(({ id, ...c }) => changeOffline("tasks", id, c));
+  if (path === "/items/count") return countOffline(body);
   if (method === "POST" && OFFLINE_NEW[kind]) {
     // A new task, project or note: what the server would make, until it's sent.
     const list = S.data[kind], stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
@@ -301,7 +302,7 @@ function applyOffline(op) {
 const offlineGone = new Map();  // tasks/projects completed or trashed offline, for Undo
 
 function changeOffline(kind, id, changes) {
-  const list = { tasks: S.data.tasks, projects: S.data.projects, notes: S.data.notes }[kind];
+  const list = { tasks: S.data.tasks, projects: S.data.projects, notes: S.data.notes, items: S.data.items }[kind];
   const key = kind + id;
   const extra = kind === "notes" ? S.extraNotes : S.extra;
   const x = list.find((y) => y.id === id) || extra.find((y) => y.id === id) || offlineGone.get(key);
@@ -336,6 +337,19 @@ function changeOffline(kind, id, changes) {
   if (gone && i >= 0) { list.splice(i, 1); offlineGone.set(key, x); }
   else if (!gone && i < 0 && !extra.includes(x)) { list.push(x); offlineGone.delete(key); }
   return x;
+}
+
+// Counting in an inventory offline (a basement with no signal): what's known is counted here,
+// and sent when there's a connection. Something new needs one, to be made.
+function countOffline(body) {
+  const items = S.data.items || [];
+  const it = body.item_id ? items.find((i) => i.id === body.item_id)
+    : items.find((i) => i.inventory_id === body.inventory_id && i.codes.includes(body.code));
+  if (!it) throw new Error("New things need a connection: scan it again when you're back online.");
+  if (!it.used_up && body.delta < 0) return { kept: true, item: it };
+  const before = it.quantity;
+  it.quantity = Math.max(before + body.delta, 0);
+  return { item: { ...it }, before, after: it.quantity };
 }
 
 // Puts the waiting changes back on freshly loaded data.
@@ -862,6 +876,7 @@ async function refresh() {
     S.extra = tr.tasks;
     S.extraProjects = tr.projects;
     S.extraNotes = tr.notes || [];
+    S.extraItems = tr.items || [];
   }
   render();
 }
@@ -938,7 +953,7 @@ function setAreas(ids) {
 
 function navItem(view, label, count, extraClass = "") {
   const active = S.view === view ? " active" : "";
-  return `<a href="#" class="nav-item${active} ${extraClass}" data-view="${h(view)}"${["recurring", "all", "calendar", "links", "notes", "journal", "timeline", "review", "shared"].includes(view) ? "" : ` data-drop="${h(view)}"`}>
+  return `<a href="#" class="nav-item${active} ${extraClass}" data-view="${h(view)}"${["recurring", "all", "calendar", "links", "notes", "journal", "timeline", "review", "shared", "inventory"].includes(view) ? "" : ` data-drop="${h(view)}"`}>
     <span class="nav-label">${label}</span>${count ? `<span class="count">${count}</span>` : ""}</a>`;
 }
 
@@ -966,6 +981,7 @@ function renderNav() {
     navItem("timeline", "Timeline", 0, S.view.startsWith("timeline:") ? "active" : "") +
     navItem("notes", "Notes", 0) +
     navItem("journal", "Journal", 0) +
+    navItem("inventory", "Inventory", (S.data.items || []).filter(isLow).length) +
     navItem("links", "Links", 0) +
     navItem("logbook", "Logbook", 0) +
     navItem("trash", "Trash", 0);
@@ -986,6 +1002,7 @@ function viewTitle() {
   if (S.view === "timeline") return "Timeline";
   if (S.view === "review") return "Weekly review";
   if (S.view === "shared") return "Shared";
+  if (S.view === "inventory") return currentInventory()?.name || "Inventory";
   if (S.view.startsWith("timeline:")) {
     const [, kind, id] = S.view.split(":");
     return `${(kind === "project" ? projectById(Number(id))?.name : journalById(Number(id))?.name) ?? ""} · timeline`;
@@ -1172,10 +1189,17 @@ function renderList() {
   document.title = viewTitle() + " · Entropicide";
   const el = $("#list");
   const readOnly = S.view === "logbook" || S.view === "trash";
-  $("#quick-add").hidden = readOnly || ["projects", "links", "notes", "journal", "timeline", "review", "shared"].includes(S.view) || S.view.startsWith("timeline:");
+  $("#quick-add").hidden = readOnly || ["projects", "links", "notes", "journal", "timeline", "review", "shared", "inventory"].includes(S.view) || S.view.startsWith("timeline:");
   if (S.view === "notes" || S.view === "journal") {
     $("#main").append($("#detail"));  // (as for links)
     renderNotes(el);
+    renderSelectBar();
+    return;
+  }
+  if (S.view === "inventory") {
+    $("#main").append($("#detail"));  // (as for notes)
+    $("#tag-bar").innerHTML = "";
+    renderInventory(el);
     renderSelectBar();
     return;
   }
@@ -1245,6 +1269,9 @@ function renderList() {
           <button class="link restore-project">Restore</button></div>`).join("");
     }
     html += trashedNotes();
+    html += (S.extraItems || []).length ? '<h2 class="group">Inventory</h2>' + S.extraItems.map((it) =>
+      `<div class="trash-note" data-trash-item="${it.id}"><span class="title">📦 ${h(it.name)}</span>
+        <button class="link restore-item">Restore</button><button class="link danger purge-item">Delete forever</button></div>`).join("") : "";
     if (S.extra.length || S.extraProjects.length || S.extraNotes.length) {
       html += '<p><button class="link danger empty-trash">Empty trash</button></p>';
     }
@@ -1290,7 +1317,7 @@ function renderList() {
   } else {
     html += list.map((t) => taskRow(t, { showState })).join("");
   }
-  if (!list.length && !subs && S.view !== "calendar" && !(S.view === "trash" && (S.extraProjects.length || S.extraNotes.length))) {
+  if (!list.length && !subs && S.view !== "calendar" && !(S.view === "trash" && (S.extraProjects.length || S.extraNotes.length || S.extraItems?.length))) {
     html += `<p class="empty">${S.search || S.tagFilter.size ? "Nothing matches." :
       { focus: "Star tasks to put them here.",
         recurring: "Set a task's Repeat to see its next copy here." }[S.view] ?? "Nothing here."}</p>`;
@@ -2227,6 +2254,7 @@ function setView(view) {
   S.extra = [];
   S.extraProjects = [];
   S.extraNotes = [];
+  S.extraItems = [];
   document.body.classList.remove("nav-open");
   if (view === "logbook" || view === "trash") refresh(); else render();
 }
@@ -2239,6 +2267,7 @@ function select(kind, id) {
 }
 
 async function completeTask(id, done) {
+  if (done) await boughtFor(id);  // (a "Buy …" task from an inventory: how many came)
   await patchTask(id, { completed: done });
   if (done) toast("Completed.", () => patchTask(id, { completed: false }));
 }
@@ -3925,6 +3954,12 @@ async function openSettings() {
     </section>
 
     <section>
+      <h3>Inventory</h3>
+      <label class="check"><input type="checkbox" class="look-up-codes" ${me.settings.look_up_codes ? "checked" : ""}>
+        Look up the names of new barcodes at Open Food Facts (a free product database on the internet; only the barcode is sent)</label>
+    </section>
+
+    <section>
       <h3>Lists</h3>
       <p class="muted small">For this device only. Tasks in the lists (Inbox, Queue, Soon …) come under their project.</p>
       <label class="check"><input type="checkbox" class="projects-in-lists" ${projectsInLists() ? "checked" : ""}>
@@ -4276,6 +4311,10 @@ function bindSettings() {
   });
   dlg.addEventListener("change", async (e) => {
     const t = e.target;
+    if (t.classList.contains("look-up-codes")) {
+      S.data.user.settings = await api("PATCH", "/me/settings", { look_up_codes: t.checked });
+      return;
+    }
     if (t.classList.contains("projects-in-lists")) {
       save("projectsInLists", t.checked ? "1" : "0");
       renderList();
@@ -5554,6 +5593,7 @@ function focusQuickAdd() {
 
 async function afterLoad() {
   if (timer) { if (timer.runFrom) keepAwake(); renderTimer(); }
+  openFromLabel();  // (a QR label's #location:<id>: inventory.js)
   // Opened from a notification (?task=) or the Share menu (?shared=); or, with the app
   // already open, a notification tapped (a message from the service worker).
   const params = new URLSearchParams(location.search);

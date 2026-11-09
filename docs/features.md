@@ -49,6 +49,10 @@ In brief:
   and linked tasks, with `"phrases"`, `-word`, `#tag`, `cat:`, `journal:`, `area:`, `has:`,
   `is:pinned`, `before:` / `after:` / `on:`. Saved as you type, and offline too. A task can
   become a note. Stored as cleaned HTML (`richtext.py`).
+- **Inventory:** food storage, supplies and household things, shareable with a group. Count in
+  and out by scanning barcodes (camera, or a USB/Bluetooth scanner) or by name; a minimum puts
+  “Buy …” on the inventory's shopping list; nested places with printable QR labels; lending, with a
+  Waiting task to get it back; photos, receipts and manuals.
 - **Groups and sharing:** people with accounts on the same server, in groups (a family, a club),
   invited by username, each an owner, editor or viewer. Share a project (with everything in it), a
   journal (every entry), or a single task or note; give a shared task to someone or leave it for

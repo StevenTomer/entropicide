@@ -15,6 +15,7 @@ import threading
 import tempfile
 import time
 import urllib.parse
+import urllib.request
 import zipfile
 from datetime import date, datetime, timedelta
 from functools import wraps
@@ -92,7 +93,10 @@ DEFAULT_SETTINGS = {"defer_options": ["1h", "2h", "6h", "24h", "3d", "1w"], "tim
                     "share_to": "inbox",
                     # The weekly review: a reminder on a day (0 Monday … 6 Sunday; "" none) at a
                     # time, the day it was last sent, and the day the last review was done.
-                    "review_day": "", "review_time": "16:00", "review_reminded": "", "last_review": ""}
+                    "review_day": "", "review_time": "16:00", "review_reminded": "", "last_review": "",
+                    # Inventory: look up the names of new barcodes at Open Food Facts (only the
+                    # barcode is sent; off unless chosen)
+                    "look_up_codes": False}
 # Reminders before a due date: the days a task can choose, and the time of day they come.
 REMIND_BEFORE_DAYS = (1, 2, 3, 7, 14, 30, 60, 90)
 REMIND_BEFORE_TIME = "09:00"
@@ -495,7 +499,7 @@ def bad(message):
 # owned() means "may see", and for a change (any method but GET) "may change" too (viewers may
 # only look). Deleting one for good (purge_document) checks the documents table, so it stays
 # its maker's alone.
-SHARED_VIEWS = ("tasks", "projects", "notes", "journals")
+SHARED_VIEWS = ("tasks", "projects", "notes", "journals", "items", "inventories")
 # What a user can see: theirs, and their groups' (for queries on those views and journals; the
 # user's id goes in twice).
 MINE = "(user_id = ? OR group_id IN (SELECT group_id FROM group_members WHERE user_id = ?))"
@@ -872,7 +876,7 @@ TASK_COPY = ("project_id", "area_id", "title", "notes", "state", "focus", "due_d
 
 # What's a person's own about someone else's shared document (kept in document_person).
 PERSONAL = {"task": ("focus", "area_id", "position"), "project": ("focus", "area_id", "position"),
-            "note": ("pinned", "category_id")}
+            "note": ("pinned", "category_id"), "item": ()}
 
 
 def keep_personal(row, kind, fields):
@@ -893,7 +897,7 @@ def container_of(doc_id):
     journal; or None."""
     kind = kind_of(doc_id)
     col = {"task": ("tasks", "project_id", "projects"), "project": ("projects", "parent_id", "projects"),
-           "note": ("notes", "journal_id", "journals")}[kind]
+           "note": ("notes", "journal_id", "journals"), "item": ("items", "inventory_id", "inventories")}[kind]
     row = db.get_db().execute(f"SELECT {col[1]} FROM {col[0]} WHERE id = ?", (doc_id,)).fetchone()
     return (col[2], row[0]) if row and row[0] else None
 
@@ -987,6 +991,7 @@ def unshare_group(group_id):
         conn.execute("UPDATE task_data SET assigned_to = NULL WHERE id = ?", (doc_id,))
         conn.execute("DELETE FROM document_person WHERE document_id = ?", (doc_id,))
     conn.execute("UPDATE journals SET group_id = NULL WHERE group_id = ?", (group_id,))
+    conn.execute("UPDATE inventories SET group_id = NULL WHERE group_id = ?", (group_id,))
 
 
 def people_of(uid):
@@ -1025,7 +1030,7 @@ def with_shared(rows, kind, shape):
     what it's related (linked) to, and for tasks and projects what it's blocked by."""
     ids = [r["id"] for r in rows]
     tags, files, links = tags_for(ids), attachments_for(ids), links_for(ids)
-    blockers = blockers_for(ids) if kind != "note" else None
+    blockers = blockers_for(ids) if kind in ("task", "project") else None
     me = g.user["id"] if has_request_context() and g.get("user") else None
     theirs = [r["id"] for r in rows if me and r["user_id"] != me]
     mine = {r["document_id"]: r for r in db.get_db().execute(
@@ -1133,6 +1138,8 @@ def document_json(doc_id):
         return project_dict(owned("projects", doc_id))
     if kind == "note":
         return note_dict(doc_id)
+    if kind == "item":
+        return items_json([owned("items", doc_id)])[0]
     return tasks_json([owned("tasks", doc_id)])[0]
 
 
@@ -1250,7 +1257,8 @@ def shared_fields(kind, key, value, out):
     """Validates into out the fields every kind has alike (as its view names them): its title
     (a note's may be empty), formatted text, area and the trash; and for tasks and projects,
     Focus, priority and the due date. False if key isn't one of them."""
-    title, text = {"task": ("title", "notes"), "project": ("name", "notes"), "note": ("title", "body")}[kind]
+    title, text = {"task": ("title", "notes"), "project": ("name", "notes"), "note": ("title", "body"),
+                   "item": ("name", "notes")}[kind]
     if key == title:
         value = str(value or "").strip()[:500]
         if not value and kind != "note":
@@ -1264,7 +1272,7 @@ def shared_fields(kind, key, value, out):
         out["deleted_at"] = utcnow() if value else None
     elif key == "waypoint":
         out[key] = 1 if value else 0
-    elif kind == "note":
+    elif kind in ("note", "item"):
         return False
     elif key == "focus":
         out[key] = 1 if value else 0
@@ -1664,7 +1672,345 @@ def all_data():
             "WHERE m.user_id = ? ORDER BY g.name COLLATE NOCASE", (uid,))],
         people=people_of(uid),
         shared_stamp=shared_stamp(uid),
+        **inventory_data(uid),
     )
+
+
+# --- inventories ----------------------------------------------------------------
+# An inventory (Pantry, Food storage, House) holds items: documents of kind "item", each used
+# up and bought again (counted down; below its minimum, a "Buy …" task in the inventory's
+# shopping project) or kept (it only moves, or is lent). Locations nest; barcodes find items.
+# The counter (POST /api/items/count) is what scanning, typing a code and − / + all use.
+
+def inventory_data(uid):
+    """For /api/data: the inventories g.user sees, their locations, and what's in them."""
+    conn = db.get_db()
+    invs = [dict(r) for r in conn.execute(f"SELECT * FROM inventories WHERE {MINE} ORDER BY position, id", (uid, uid))]
+    ids = [i["id"] for i in invs] or [0]
+    marks = marks_for(ids)
+    return {"inventories": invs,
+            "locations": [dict(r) for r in conn.execute(
+                f"SELECT * FROM locations WHERE inventory_id IN ({marks}) ORDER BY position, id", ids)],
+            "items": items_json(conn.execute(
+                f"SELECT * FROM items WHERE inventory_id IN ({marks}) AND deleted_at IS NULL ORDER BY name COLLATE NOCASE, id",
+                ids).fetchall())}
+
+
+def items_json(rows):
+    ids = [r["id"] for r in rows]
+    codes = {}
+    if ids:
+        for r in db.get_db().execute(f"SELECT item_id, code FROM item_codes WHERE item_id IN ({marks_for(ids)}) ORDER BY code", ids):
+            codes.setdefault(r["item_id"], []).append(r["code"])
+    return with_shared(rows, "item", lambda r: dict(r) | {"used_up": bool(r["used_up"]), "codes": codes.get(r["id"], [])})
+
+
+def item_fields(data):
+    out = {}
+    for key, value in data.items():
+        if shared_fields("item", key, value, out):
+            continue
+        if key in ("quantity", "keep_at_least", "restock_to"):
+            if value in (None, "") and key != "quantity":
+                out[key] = None
+                continue
+            value = float(value or 0)
+            if not 0 <= value <= 1e9:
+                raise ValueError("A count can't be less than nothing.")
+            out[key] = value
+        elif key == "unit":
+            out[key] = str(value or "").strip()[:40]
+        elif key == "used_up":
+            out[key] = 1 if value else 0
+        elif key == "location_id":
+            out[key] = None if value in (None, "") else int(value)
+        elif key == "inventory_id":
+            out[key] = check_ref("inventories", value)
+    return out
+
+
+def check_location(inventory_id, location_id):
+    if location_id is None:
+        return
+    row = db.get_db().execute("SELECT inventory_id FROM locations WHERE id = ?", (location_id,)).fetchone()
+    if not row or row[0] != inventory_id:
+        raise ValueError("That place isn't in this inventory.")
+
+
+def set_codes(item_id, inventory_id, codes):
+    """An item's barcodes (each meaning only it, in its inventory). Not committed."""
+    conn = db.get_db()
+    clean = list(dict.fromkeys(c for c in (re.sub(r"\s+", "", str(x))[:64] for x in codes) if c))
+    for code in clean:
+        other = conn.execute("SELECT item_id FROM item_codes WHERE inventory_id = ? AND code = ? AND item_id != ?",
+                             (inventory_id, code, item_id)).fetchone()
+        if other:
+            name = conn.execute("SELECT name FROM items WHERE id = ?", (other[0],)).fetchone()
+            raise ValueError(f"That barcode is {name[0] if name else 'something else'}'s already.")
+    conn.execute("DELETE FROM item_codes WHERE item_id = ?", (item_id,))
+    conn.executemany("INSERT INTO item_codes (inventory_id, code, item_id) VALUES (?, ?, ?)",
+                     [(inventory_id, c, item_id) for c in clean])
+
+
+def fmt_count(n):
+    return str(int(n)) if float(n).is_integer() else f"{n:g}"
+
+
+def shopping_project(inv):
+    """The project an inventory's "Buy …" tasks go in, made (and shared as it is) when first needed."""
+    conn = db.get_db()
+    if inv["shopping_id"]:
+        p = conn.execute("SELECT id, deleted_at, state FROM projects WHERE id = ?", (inv["shopping_id"],)).fetchone()
+        if p and not p["deleted_at"] and p["state"] != "done":
+            return p["id"]
+    pid = db.insert(conn, "projects", {"user_id": inv["user_id"], "name": f"Shopping: {inv['name']}", "state": "next",
+                                       "position": next_position("projects")})
+    if inv["group_id"]:
+        conn.execute("UPDATE documents SET group_id = ? WHERE id = ?", (inv["group_id"], pid))
+    conn.execute("UPDATE inventories SET shopping_id = ? WHERE id = ?", (pid, inv["id"]))
+    return pid
+
+
+def restock_check(item_id):
+    """Below its minimum, an item used up has one "Buy …" task (saying how many, to get back
+    up); back up to it, the task's done. Not committed."""
+    conn = db.get_db()
+    it = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    task = it["buy_task_id"] and conn.execute(
+        "SELECT * FROM tasks WHERE id = ? AND completed_at IS NULL AND deleted_at IS NULL", (it["buy_task_id"],)).fetchone()
+    low = it["used_up"] and it["keep_at_least"] is not None and it["quantity"] < it["keep_at_least"] and not it["deleted_at"]
+    if not low:
+        if task:
+            conn.execute("UPDATE tasks SET completed_at = ? WHERE id = ?", (utcnow(), task["id"]))
+        return
+    need = max((it["restock_to"] or it["keep_at_least"]) - it["quantity"], 1)
+    title = f"Buy {it['name']} ({fmt_count(need)}{' ' + it['unit'] if it['unit'] else ''})"
+    if task:
+        if task["title"] != title:
+            conn.execute("UPDATE tasks SET title = ? WHERE id = ?", (title, task["id"]))
+        return
+    inv = conn.execute("SELECT * FROM inventories WHERE id = ?", (it["inventory_id"],)).fetchone()
+    if not inv:
+        return
+    project = shopping_project(inv)
+    tid = db.insert(conn, "tasks", {"user_id": inv["user_id"], "title": title, "state": "next", "project_id": project,
+                                    "position": next_position("tasks")})
+    conn.execute("UPDATE documents SET group_id = (SELECT group_id FROM documents WHERE id = ?) WHERE id = ?", (project, tid))
+    conn.execute("UPDATE items SET buy_task_id = ? WHERE id = ?", (tid, item_id))
+
+
+def lend(item_id, to):
+    """Lends a kept item to someone (a name), with a Waiting task to get it back; None: it's
+    back, and so is the task done. Not committed."""
+    conn = db.get_db()
+    it = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    to = str(to or "").strip()[:200] or None
+    if it["lend_task_id"]:
+        conn.execute("UPDATE tasks SET completed_at = ? WHERE id = ? AND completed_at IS NULL", (utcnow(), it["lend_task_id"]))
+    if not to:
+        conn.execute("UPDATE items SET lent_to = NULL, lent_on = NULL, lend_task_id = NULL WHERE id = ?", (item_id,))
+        return
+    tid = db.insert(conn, "tasks", {"user_id": g.user["id"], "title": f"Get {it['name']} back from {to}", "state": "waiting",
+                                    "waiting_for": to, "position": next_position("tasks")})
+    conn.execute("UPDATE items SET lent_to = ?, lent_on = ?, lend_task_id = ? WHERE id = ?", (to, client_today(), tid, item_id))
+
+
+def write_item(data, item=None):
+    """Makes an item (item None) or changes one, from API-style data; returns its id. Not committed."""
+    fields = item_fields(data)
+    conn = db.get_db()
+    inv_id = fields.get("inventory_id", item and item["inventory_id"])
+    if not inv_id:
+        raise ValueError("Which inventory is it in?")
+    inv = owned("inventories", inv_id)
+    if "location_id" in fields:
+        check_location(inv_id, fields["location_id"])
+    if item is None:
+        if not fields.get("name"):
+            raise ValueError("Give it a name.")
+        fields.setdefault("used_up", 1 if inv["kind"] == "stock" else 0)
+        fields.setdefault("quantity", 0 if fields["used_up"] else 1)
+        fields["user_id"] = g.user["id"]
+        item_id = db.insert(conn, "items", fields)
+        follow_container(item_id)
+    else:
+        item_id = item["id"]
+        if any(k in fields for k in ("name", "notes")):
+            fields["updated_at"] = utcnow()
+        if fields:
+            conn.execute(f"UPDATE items SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?", (*fields.values(), item_id))
+        if "inventory_id" in fields and fields["inventory_id"] != item["inventory_id"]:
+            conn.execute("UPDATE items SET location_id = NULL WHERE id = ?", (item_id,))
+            conn.execute("UPDATE item_codes SET inventory_id = ? WHERE item_id = ?", (inv_id, item_id))
+            follow_container(item_id)
+    if isinstance(data.get("codes"), list):
+        set_codes(item_id, inv_id, data["codes"])
+    if isinstance(data.get("tags"), list):
+        set_tags(item_id, data["tags"])
+    if "lent_to" in data:
+        lend(item_id, data["lent_to"])
+    set_related("item", item_id, given_ids(data, "related"))
+    restock_check(item_id)
+    return item_id
+
+
+@app.post("/api/items")
+@login_required
+def create_item():
+    try:
+        item_id = write_item(body())
+    except (ValueError, TypeError) as e:
+        db.get_db().rollback()
+        return bad(str(e))
+    db.get_db().commit()
+    return jsonify(items_json([owned("items", item_id)])[0]), 201
+
+
+@app.patch("/api/items/<int:item_id>")
+@login_required
+def update_item(item_id):
+    item = owned("items", item_id)
+    try:
+        write_item(body(), item)
+    except (ValueError, TypeError) as e:
+        db.get_db().rollback()
+        return bad(str(e))
+    db.get_db().commit()
+    return jsonify(items_json([can_see("items", item_id)])[0])
+
+
+@app.post("/api/items/count")
+@login_required
+def count_item():
+    """Adds (delta > 0) or uses (delta < 0) some of an item, found by item_id, by barcode
+    (code) or by name, in inventory_id: what scanning, typing and − / + do. A code no item has
+    makes one when a name comes with it, else answers {"unknown": code}. Using a kept item
+    changes nothing ({"kept": true}). Otherwise {"item", "before", "after"}."""
+    data, conn = body(), db.get_db()
+    try:
+        delta = float(data.get("delta", 1))
+        inv = owned("inventories", int(data.get("inventory_id") or 0))
+    except (TypeError, ValueError):
+        return bad("Say which inventory, and how many.")
+    code = re.sub(r"\s+", "", str(data.get("code") or ""))[:64]
+    item = None
+    if data.get("item_id"):
+        item = owned("items", int(data["item_id"]))
+    elif code:
+        row = conn.execute("SELECT item_id FROM item_codes WHERE inventory_id = ? AND code = ?", (inv["id"], code)).fetchone()
+        item = row and owned("items", row[0])
+    elif data.get("name"):
+        rows = conn.execute("SELECT * FROM items WHERE inventory_id = ? AND deleted_at IS NULL AND name = ? COLLATE NOCASE",
+                            (inv["id"], str(data["name"]).strip())).fetchall()
+        item = rows[0] if len(rows) == 1 else None
+    try:
+        if item is None:
+            if not str(data.get("name") or "").strip():
+                return jsonify(unknown=code or None)
+            # A new one: what was counted is what there is.
+            item_id = write_item({"name": data["name"], "inventory_id": inv["id"], "location_id": data.get("location_id"),
+                                  "unit": data.get("unit", ""), "codes": [code] if code else [],
+                                  **({"used_up": data["used_up"]} if "used_up" in data else {}),
+                                  "quantity": max(delta, 0)})
+            conn.commit()
+            return jsonify(item=items_json([can_see("items", item_id)])[0], before=0, after=max(delta, 0), made=True), 201
+        if not may_change(item):
+            abort(403)
+        if not item["used_up"] and delta < 0:
+            return jsonify(kept=True, item=items_json([item])[0])
+        before = item["quantity"]
+        after = max(before + delta, 0)
+        conn.execute("UPDATE items SET quantity = ?, updated_at = ? WHERE id = ?", (after, utcnow(), item["id"]))
+        if code and data.get("item_id"):  # (counted by id with a new code: it's this one's now)
+            known = [r[0] for r in conn.execute("SELECT code FROM item_codes WHERE item_id = ?", (item["id"],))]
+            set_codes(item["id"], inv["id"], [*known, code])
+        restock_check(item["id"])
+    except (ValueError, TypeError) as e:
+        conn.rollback()
+        return bad(str(e))
+    conn.commit()
+    return jsonify(item=items_json([can_see("items", item["id"])])[0], before=before, after=after)
+
+
+@app.get("/api/codes/<code>")
+@login_required
+def look_up_code(code):
+    """A product's name from Open Food Facts, if the user has turned that on (Settings →
+    Inventory); only the barcode is sent. {"name": …} or {"name": null}."""
+    if not user_settings(g.user).get("look_up_codes") or not re.fullmatch(r"\d{6,14}", code):
+        return jsonify(name=None)
+    try:
+        req = urllib.request.Request(f"https://world.openfoodfacts.org/api/v2/product/{code}.json?fields=product_name,brands,quantity",
+                                     headers={"User-Agent": "Entropicide (self-hosted task manager)"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            product = json.load(r).get("product") or {}
+    except (OSError, ValueError):
+        return jsonify(name=None)
+    name = " ".join(x for x in (product.get("brands", "").split(",")[0].strip(), product.get("product_name", "").strip(),
+                                product.get("quantity", "").strip()) if x)
+    return jsonify(name=name[:200] or None)
+
+
+# Locations: where things are in an inventory, nested.
+
+def location(location_id):
+    row = db.get_db().execute("SELECT * FROM locations WHERE id = ?", (location_id,)).fetchone()
+    if not row:
+        abort(404)
+    owned("inventories", row["inventory_id"])  # (seeing it, and changing it, as its inventory)
+    return row
+
+
+@app.post("/api/locations")
+@login_required
+def create_location():
+    data, conn = body(), db.get_db()
+    inv = owned("inventories", int(data.get("inventory_id") or 0))
+    name = str(data.get("name") or "").strip()[:200]
+    if not name:
+        return bad("Give the place a name.")
+    parent = data.get("parent_id") or None
+    if parent and location(int(parent))["inventory_id"] != inv["id"]:
+        return bad("That place isn't in this inventory.")
+    pos = conn.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM locations WHERE inventory_id = ?", (inv["id"],)).fetchone()[0]
+    lid = conn.execute("INSERT INTO locations (inventory_id, parent_id, name, position) VALUES (?, ?, ?, ?)",
+                       (inv["id"], parent, name, pos)).lastrowid
+    conn.commit()
+    return jsonify(dict(location(lid))), 201
+
+
+@app.patch("/api/locations/<int:location_id>")
+@login_required
+def update_location(location_id):
+    row, data, conn = location(location_id), body(), db.get_db()
+    if "name" in data:
+        name = str(data["name"] or "").strip()[:200]
+        if not name:
+            return bad("Give the place a name.")
+        conn.execute("UPDATE locations SET name = ? WHERE id = ?", (name, location_id))
+    if "parent_id" in data:
+        parent = data["parent_id"] or None
+        seen, at = {location_id}, parent
+        while at:  # (not inside itself, at any depth)
+            if at in seen or location(at)["inventory_id"] != row["inventory_id"]:
+                conn.rollback()
+                return bad("A place can't be inside itself.")
+            seen.add(at)
+            at = location(at)["parent_id"]
+        conn.execute("UPDATE locations SET parent_id = ? WHERE id = ?", (parent, location_id))
+    conn.commit()
+    return jsonify(dict(location(location_id)))
+
+
+@app.delete("/api/locations/<int:location_id>")
+@login_required
+def delete_location(location_id):
+    """A place goes, with the places in it; what was in them stays, with no place."""
+    location(location_id)
+    conn = db.get_db()
+    conn.execute("DELETE FROM locations WHERE id = ?", (location_id,))
+    conn.commit()
+    return "", 204
 
 
 @app.get("/api/changes")
@@ -1900,6 +2246,8 @@ def apply_task_update(task, data, today):
     if "completed" in data:
         if data["completed"] and not task["completed_at"]:
             fields["completed_at"] = utcnow()
+            # Getting something lent back: it's back.
+            conn.execute("UPDATE items SET lent_to = NULL, lent_on = NULL, lend_task_id = NULL WHERE lend_task_id = ?", (task_id,))
         elif not data["completed"]:
             fields["completed_at"] = None
             if task["missed"]:
@@ -2272,6 +2620,14 @@ def add_project_attachments(project_id):
     """Files on a project, which go with all of its tasks."""
     owned("projects", project_id)
     return attach(project_id, "project")
+
+
+@app.post("/api/items/<int:item_id>/attachments")
+@login_required
+def add_item_attachments(item_id):
+    """Photos (or a receipt, a manual) of something in an inventory."""
+    owned("items", item_id)
+    return attach(item_id, "item")
 
 
 @app.post("/api/notes/<int:note_id>/attachments")
@@ -3157,7 +3513,9 @@ def trash():
         (p["deleted_at"], *(project_contents(p["id"]) or [0]))).fetchone()[0]
     notes = conn.execute(f"SELECT * FROM notes WHERE {MINE} AND deleted_at IS NOT NULL "
                          "ORDER BY deleted_at DESC", (g.user["id"], g.user["id"])).fetchall()
-    return jsonify(tasks=tasks_json(rows), notes=notes_json(notes),
+    items = conn.execute(f"SELECT * FROM items WHERE {MINE} AND deleted_at IS NOT NULL ORDER BY deleted_at DESC",
+                         (g.user["id"], g.user["id"])).fetchall()
+    return jsonify(tasks=tasks_json(rows), notes=notes_json(notes), items=items_json(items),
                    projects=[p | {"inside": with_it(p)} for p in projects_json(projects)])
 
 
@@ -3294,13 +3652,17 @@ def category_fields(data, table):
         if data["color"] not in NOTE_COLORS:
             raise ValueError("Unknown colour.")
         out["color"] = data["color"]
+    if table == "inventories" and "kind" in data:
+        if data["kind"] not in ("stock", "home"):
+            raise ValueError("An inventory is of things used up (stock) or kept (home).")
+        out["kind"] = data["kind"]
     return out
 
 
 def named_list_routes(table, path):
     """Add, rename (and recolour) and delete for areas, note categories and journals. (Areas'
     icons have routes of their own.)"""
-    shown = lambda row: {k: row[k] for k in row.keys() if k not in ("icon_svg",) and (k != "user_id" or table == "journals")}  # noqa: E731
+    shown = lambda row: {k: row[k] for k in row.keys() if k not in ("icon_svg",) and (k != "user_id" or table in CONTAINS)}  # noqa: E731
     def create():
         try:
             fields = category_fields(body(), table)
@@ -3319,8 +3681,8 @@ def named_list_routes(table, path):
         row = owned(table, item_id)
         try:
             fields = category_fields(body(), table)
-            if table == "journals" and "group_id" in body():
-                share_journal(row, body()["group_id"])
+            if table in CONTAINS and "group_id" in body():
+                share_container(table, row, body()["group_id"])
         except ValueError as e:
             db.get_db().rollback()
             return bad(str(e))
@@ -3340,6 +3702,9 @@ def named_list_routes(table, path):
         if table == "journals":
             conn.execute("UPDATE notes SET deleted_at = ? WHERE journal_id = ? AND deleted_at IS NULL",
                          (utcnow(), item_id))
+        if table == "inventories":  # (its things go, for good: they're only something in it)
+            for (doc,) in conn.execute("SELECT id FROM items WHERE inventory_id = ?", (item_id,)).fetchall():
+                purge(doc)
         conn.execute(f"DELETE FROM {table} WHERE id = ?", (item_id,))
         conn.commit()
         return "", 204
@@ -3349,22 +3714,31 @@ def named_list_routes(table, path):
         app.add_url_rule(rule, f"{table}_{fn.__name__}", login_required(fn), methods=methods)
 
 
-def share_journal(journal, group_id):
-    """Shares a journal (and every entry in it) with a group, or (None) stops: whoever made it."""
-    if journal["user_id"] != g.user["id"]:
-        raise ValueError("Only whoever made the journal can share it, or stop sharing it.")
+CONTAINS = {"journals": ("notes", "journal_id"), "inventories": ("items", "inventory_id")}
+
+
+def share_container(table, row, group_id):
+    """Shares a journal or inventory (and everything in it) with a group, or (None) stops:
+    whoever made it."""
+    if row["user_id"] != g.user["id"]:
+        raise ValueError("Only whoever made it can share it, or stop sharing it.")
     group_id = int(group_id) if group_id not in (None, "") else None
     if group_id and my_role(group_id) not in ("owner", "editor"):
         raise ValueError("You can only share with a group you can change things in.")
     conn = db.get_db()
-    conn.execute("UPDATE journals SET group_id = ? WHERE id = ?", (group_id, journal["id"]))
-    for (entry,) in conn.execute("SELECT id FROM notes WHERE journal_id = ?", (journal["id"],)).fetchall():
-        set_group(entry, group_id)
+    conn.execute(f"UPDATE {table} SET group_id = ? WHERE id = ?", (group_id, row["id"]))
+    view, column = CONTAINS[table]
+    for (doc,) in conn.execute(f"SELECT id FROM {view} WHERE {column} = ?", (row["id"],)).fetchall():
+        set_group(doc, group_id)
+    if table == "inventories" and row["shopping_id"]:  # (its shopping list goes with it)
+        if conn.execute("SELECT 1 FROM projects WHERE id = ?", (row["shopping_id"],)).fetchone():
+            set_group(row["shopping_id"], group_id)
 
 
 named_list_routes("areas", "areas")
 named_list_routes("note_categories", "note-categories")
 named_list_routes("journals", "journals")
+named_list_routes("inventories", "inventories")
 
 
 def note_from_task(t, journal_id=None):
@@ -3856,6 +4230,8 @@ def update_settings():
         if not TIME_RE.match(str(data["review_time"] or "")):
             return bad("The review time must be HH:MM.")
         settings["review_time"] = data["review_time"]
+    if "look_up_codes" in data:
+        settings["look_up_codes"] = bool(data["look_up_codes"])
     if "last_review" in data:
         settings["last_review"] = clean_date(data["last_review"]) or ""
     if "share_to" in data:

@@ -89,6 +89,13 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
   first step holds back everything in it; `waits_on` / `check_no_loops` refuse
   waits that could never end. Server (`list_tasks`) and browser (`waitingOn`, `projectActive`,
   `laterSteps`, `sequentialBlocked`) must agree on what's blocked.
+- **Inventory** (`static/inventory.js`): `inventories` (shared like journals: `CONTAINS`,
+  `share_container`), `locations` (nested), `item_codes` (barcodes, unique per inventory), and items
+  as a fourth document kind (`items` view, `item_data`; `db.allow_items` rebuilt `documents` once
+  to allow the kind). `POST /api/items/count` is the one counting call (scan, typing, − / +);
+  `restock_check` keeps one "Buy …" task per low item in the inventory's shopping project; `lend`
+  keeps a Waiting task. Barcode reading: the browser's `BarcodeDetector`, else
+  `static/vendor/barcode` (its wasm served from here); labels: `static/vendor/qrcode`.
 - **Groups and sharing:** `user_groups`, `group_members` (role owner/editor/viewer) and
   `group_invites`; a document (or journal) with `group_id` is its group's members' too. Queries
   for what a user sees use `MINE` (two user-id parameters) or `visible()`; `owned()` on tasks,

@@ -62,6 +62,11 @@ Settings → Troubleshooting.
   **Sketch** (pen and ink, in six colours and three sizes, with an eraser and undo; it follows a
   stylus's pressure) or a **Diagram** (boxes, arrows, shapes and words, with Excalidraw built in).
   They're placed like any picture, and *Edit drawing* opens them again to carry on.
+- **Inventory:** keep track of food storage, supplies and things around the house, alone or
+  shared with a group. Count things in and out by scanning their barcodes (type 12, scan: 12
+  cans added), with the camera or a barcode scanner; a new barcode asks once what it is. Things
+  used up get a minimum, and below it “Buy …” goes on the inventory's shopping list; things kept
+  have a place (nested places, with printable QR labels that open them) and can be lent.
 - **Groups:** Settings → Groups makes a group (a family, a club) of people with an account here,
   invited by username, each an owner, editor or viewer.
 - **Sharing:** share a project (and everything in it), a journal (and every entry), or a single

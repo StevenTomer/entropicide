@@ -1040,6 +1040,15 @@ function bindNotes() {
     if (b?.dataset.jump) return revealNote(Number(b.dataset.jump));  // (a waypoint on the strip)
     // The Trash's notes (shown in any view that lists them).
     const trashed = e.target.closest(".trash-note");
+    if (trashed && b && trashed.dataset.trashItem) {  // (and the Trash's inventory things)
+      const id = Number(trashed.dataset.trashItem);
+      if (b.classList.contains("restore-item")) await api("PATCH", `/items/${id}`, { deleted: false });
+      else if (b.classList.contains("purge-item")) {
+        if (!confirm("Delete this forever? It can't be undone.")) return;
+        await api("DELETE", `/documents/${id}`);
+      }
+      return refresh();
+    }
     if (trashed && b) {
       const id = Number(trashed.dataset.note);
       if (b.classList.contains("restore-note")) await api("PATCH", `/notes/${id}`, { deleted: false });

@@ -625,11 +625,9 @@ div.inline { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; 
   background: var(--side); border: 1px solid var(--line); font-size: 0.8125rem; max-width: 100%; }
 .dep-chip.done { color: var(--muted); text-decoration: line-through; }
 .dep-chip .icon { padding: 0 0.375rem; font-size: 0.75rem; }
-.dep-results { display: flex; flex-direction: column; align-items: flex-start; gap: 0.125rem; margin-top: 0.25rem; font-size: 0.875rem; }
-.dep-results .link { text-align: left; }
-.related-results { display: flex; flex-direction: column; align-items: flex-start; gap: 0.125rem; margin-top: 0.25rem; font-size: 0.875rem; }
-.related-results .link { text-align: left; }
-.dep-chip .open-related { color: inherit; text-align: left; }
+.ref-results { display: flex; flex-direction: column; align-items: flex-start; gap: 0.125rem; margin-top: 0.25rem; font-size: 0.875rem; }
+.ref-results .link { text-align: left; }
+.dep-chip .ref-open { color: inherit; text-align: left; }
 .meta .related { color: var(--muted); }
 
 /* People (Google Contacts) */
@@ -923,7 +921,6 @@ span.fold { cursor: default; }
 .ne-more label { font-size: 0.8125rem; color: var(--muted); }
 .ne-more input, .ne-more select { color: var(--text); }
 .ne-links { grid-column: 1 / -1; }
-.ne-link-results { display: flex; flex-direction: column; align-items: flex-start; gap: 0.125rem; margin-top: 0.25rem; }
 .ne-foot { display: flex; gap: 0.75rem; align-items: center; margin-top: 0.75rem; }
 .ne-dates { flex: 1; }
 

@@ -353,8 +353,7 @@ function upsertNote(n) {
 }
 
 async function patchNote(id, changes) {
-  const n = await api("PATCH", `/notes/${id}`, changes);
-  if (n) upsertNote(n);
+  const n = await patchItem("note", id, changes, { quiet: true });
   if (ned.n?.id === id && n) for (const k of ["pinned", "updated_at", "deleted_at"]) ned.n[k] = n[k];
   renderList();
   return n;
@@ -507,17 +506,7 @@ function editorHtml(n) {
   </div>`;
 }
 
-function noteLinksField(n) {
-  const saved = new Map(n.related.filter((r) => typeof r === "object").map((r) => [r.id, r]));
-  const chips = refs(n, "related").map((ref) => {
-    const r = refInfo(ref, saved.get(ref));
-    return `<span class="dep-chip${r.open ? "" : " done"}" data-ref="${ref}">${
-      r.open ? `<button type="button" class="link ne-open-link">${h(r.title)}</button>` : h(r.title)}
-      <button type="button" class="icon ne-del-link" aria-label="Remove">✕</button></span>`;
-  }).join("");
-  return `<div class="deps"><label>Linked to <input class="ne-link-search" placeholder="Link a task or project…" autocomplete="off"></label>
-    <div class="dep-chips">${chips}</div><div class="ne-link-results"></div></div>`;
-}
+const noteLinksField = (n) => refsField(n, "linked");
 
 function renderNoteDates() {
   const n = ned.n, el = $("#note-dialog .ne-dates");
@@ -648,9 +637,9 @@ function bindNoteDialog(dlg) {
     const t = e.target;
     if (t.classList.contains("ne-title")) noteFieldChanged("title");
     else if (t.classList.contains("ne-tags")) noteFieldChanged("tags");
-    else if (t.classList.contains("ne-link-search")) {
+    else if (t.classList.contains("ref-search")) {
       const n = ned.n;
-      $(".ne-link-results", dlg).innerHTML = refResults(refMatches(n, "note", t.value, new Set(refs(n, "related"))), "ne-add-link");
+      $(".ref-results", dlg).innerHTML = refResults(refMatches(n, "note", t.value, new Set(refs(n, "related"))), "ref-add");
     }
   });
   dlg.addEventListener("change", async (e) => {
@@ -720,18 +709,18 @@ function bindNoteDialog(dlg) {
       n.attachments = owner.attachments;
       return renderNoteFiles();
     }
-    if (b.classList.contains("ne-add-link") || b.classList.contains("ne-del-link")) {
+    if (b.matches(".ref-add, .ref-del")) {
       const id = Number(b.dataset.ref || b.closest("[data-ref]").dataset.ref);
-      if (b.classList.contains("ne-add-link")) {
+      if (b.classList.contains("ref-add")) {
         const p = projectById(id);
         n.related = [...n.related, { id, kind: p ? "project" : "task", title: p ? p.name : taskById(id)?.title }];
       } else n.related = n.related.filter((r) => (r.id ?? r) !== id);
       noteFieldChanged("related");
       $(".ne-links", dlg).innerHTML = noteLinksField(n);
-      if (b.classList.contains("ne-add-link")) $(".ne-link-search", dlg).focus();
+      if (b.classList.contains("ref-add")) $(".ref-search", dlg).focus();
       return;
     }
-    if (b.classList.contains("ne-open-link")) {
+    if (b.classList.contains("ref-open")) {
       const ref = b.closest("[data-ref]").dataset.ref;
       closeNote();
       return setTimeout(() => openRef(ref), 50);

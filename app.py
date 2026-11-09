@@ -501,11 +501,10 @@ def next_position(table, where="", params=()):
     return row[0]
 
 
-def task_dict(row, tags, series):
+def task_dict(row, series):
     d = dict(row)
     d["focus"] = bool(d["focus"])
     d["missed"] = bool(d["missed"])
-    d["tags"] = tags.get(row["id"], [])
     d["people"] = json.loads(d["people"])
     s = series.get(row["series_id"])
     d["repeat"] = s["repeat"] if s else None
@@ -513,7 +512,6 @@ def task_dict(row, tags, series):
     d["carry_files"] = bool(s["carry_files"]) if s else False
     d["repeat_from"] = ("done" if s["from_done"] else "calendar") if s else None
     d["series_latest"] = s["latest"] if s else None
-    del d["user_id"]
     return d
 
 
@@ -704,9 +702,9 @@ def copy_links(from_id, to_id):
         "WHERE other != ?", (to_id, to_id, from_id, from_id, to_id))
 
 
-def copy_shared(from_id, to_id, deps=True):
-    """Give document to_id the same tags, links, files (stored once) and, with deps, the same
-    Blocked by as from_id."""
+def copy_shared(from_id, to_id, deps=True, files=True):
+    """Give document to_id the same tags and links as from_id; with deps, the same Blocked by;
+    with files, the same files (stored once)."""
     conn = db.get_db()
     conn.execute("INSERT OR IGNORE INTO document_tags SELECT ?, tag_id FROM document_tags WHERE document_id = ?",
                  (to_id, from_id))
@@ -714,7 +712,22 @@ def copy_shared(from_id, to_id, deps=True):
     if deps:
         conn.execute("INSERT OR IGNORE INTO document_deps SELECT ?, blocker_id FROM document_deps "
                      "WHERE document_id = ? AND blocker_id != ?", (to_id, from_id, to_id))
-    copy_files(from_id, to_id)
+    if files:
+        copy_files(from_id, to_id)
+
+
+# What a copy of a task takes from it (Duplicate, and each new copy of a repeating task); the
+# rest (when it was done, reminders sent, time spent, its calendar event) starts afresh.
+TASK_COPY = ("project_id", "area_id", "title", "notes", "state", "focus", "due_date", "start_date", "start_time",
+             "waiting_for", "energy", "minutes", "priority", "remind_before", "people", "position")
+
+
+def copy_task(t, changes, deps=True, files=True):
+    """A new task like t (row from tasks): its details as in TASK_COPY, with changes, and its
+    tags and links (and with deps its Blocked by, with files its files). Returns its id."""
+    new = db.insert(db.get_db(), "tasks", {"user_id": t["user_id"], **{c: t[c] for c in TASK_COPY}} | changes)
+    copy_shared(t["id"], new, deps=deps, files=files)
+    return new
 
 
 def copy_files(from_id, to_id):
@@ -724,24 +737,31 @@ def copy_files(from_id, to_id):
         (to_id, from_id))
 
 
-def tasks_json(rows):
+def with_shared(rows, kind, shape):
+    """Tasks, projects or notes (rows from kind's view) as the API sends them: shape(row) (a
+    dict, with what the kind has of its own), and what every document has: its tags, files and
+    what it's related (linked) to, and for tasks and projects what it's blocked by."""
     ids = [r["id"] for r in rows]
-    files = attachments_for(ids)
-    blockers = blockers_for(ids)
-    links = links_for(ids)
-    for_task = lambda d: d | {"attachments": files.get(d["id"], []),  # noqa: E731
-                              "blocked_by": blockers.get(d["id"], []), "related": links.get(d["id"], [])}
-    return [for_task(d) for d in _tasks_json(rows)]
+    tags, files, links = tags_for(ids), attachments_for(ids), links_for(ids)
+    blockers = blockers_for(ids) if kind != "note" else None
+    out = []
+    for row in rows:
+        d = shape(row)
+        d.pop("user_id", None)
+        d |= {"tags": tags.get(d["id"], []), "attachments": files.get(d["id"], []), "related": links.get(d["id"], [])}
+        if blockers is not None:
+            d["blocked_by"] = blockers.get(d["id"], [])
+        out.append(d)
+    return out
 
 
-def _tasks_json(rows):
-    tags = tags_for([r["id"] for r in rows])
+def tasks_json(rows):
     ids = list({r["series_id"] for r in rows if r["series_id"]})
     series = {}
     if ids:
         series = {s["id"]: s for s in db.get_db().execute(
             f"SELECT * FROM series WHERE id IN ({marks_for(ids)})", ids)}
-    return [task_dict(r, tags, series) for r in rows]
+    return with_shared(rows, "task", lambda r: task_dict(r, series))
 
 
 def project_dict(row):
@@ -761,18 +781,7 @@ def document_json(doc_id):
 def projects_json(rows):
     """Projects as the API sends them: with their tags, files, what they're blocked by and
     what they're related to."""
-    ids = [r["id"] for r in rows]
-    tags, files, blockers, links = tags_for(ids), attachments_for(ids), blockers_for(ids), links_for(ids)
-    out = []
-    for row in rows:
-        d = dict(row)
-        d["focus"] = bool(d["focus"])
-        d["sequential"] = bool(d["sequential"])
-        del d["user_id"]
-        d |= {"tags": tags.get(d["id"], []), "attachments": files.get(d["id"], []),
-              "blocked_by": blockers.get(d["id"], []), "related": links.get(d["id"], [])}
-        out.append(d)
-    return out
+    return with_shared(rows, "project", lambda r: dict(r) | {"focus": bool(r["focus"]), "sequential": bool(r["sequential"])})
 
 
 def clean_date(value):
@@ -832,26 +841,51 @@ def check_ref(table, value):
 PERSON_RE = re.compile(r"people/\w{1,100}")
 
 
+def shared_fields(kind, key, value, out):
+    """Validates into out the fields every kind has alike (as its view names them): its title
+    (a note's may be empty), formatted text, area and the trash; and for tasks and projects,
+    Focus, priority and the due date. False if key isn't one of them."""
+    title, text = {"task": ("title", "notes"), "project": ("name", "notes"), "note": ("title", "body")}[kind]
+    if key == title:
+        value = str(value or "").strip()[:500]
+        if not value and kind != "note":
+            raise ValueError(f"{title} is required")
+        out[key] = value
+    elif key == text:
+        out[key] = richtext.clean(value)
+    elif key == "area_id":
+        out[key] = check_ref("areas", value)
+    elif key == "deleted":
+        out["deleted_at"] = utcnow() if value else None
+    elif kind == "note":
+        return False
+    elif key == "focus":
+        out[key] = 1 if value else 0
+    elif key == "priority":
+        value = int(value or 0)
+        if not -PRIORITY_MAX <= value <= PRIORITY_MAX:
+            raise ValueError(f"priority must be between -{PRIORITY_MAX} and {PRIORITY_MAX}")
+        out[key] = value
+    elif key == "due_date":
+        out[key] = clean_date(value)
+    else:
+        return False
+    return True
+
+
 def task_fields(data):
     """Validate the editable task fields present in data."""
     out = {}
     for key, value in data.items():
-        if key == "title":
-            value = str(value).strip()
-            if not value:
-                raise ValueError("title is required")
-            out[key] = value[:500]
-        elif key == "notes":
-            out[key] = richtext.clean(value)  # formatted text, like a note's
-        elif key == "waiting_for":
+        if shared_fields("task", key, value, out):
+            continue
+        if key == "waiting_for":
             out[key] = str(value or "")[:20000]
         elif key == "state":
             if value not in TASK_STATES:
                 raise ValueError("bad state")
             out[key] = value
-        elif key == "focus":
-            out[key] = 1 if value else 0
-        elif key in ("due_date", "start_date"):
+        elif key == "start_date":
             out[key] = clean_date(value)
         elif key == "remind_before":
             if value not in (None, "") and int(value) not in REMIND_BEFORE_DAYS:
@@ -867,15 +901,8 @@ def task_fields(data):
             out[key] = value or None
         elif key == "minutes":
             out[key] = int(value) if value not in (None, "") else None
-        elif key == "priority":
-            value = int(value or 0)
-            if not -PRIORITY_MAX <= value <= PRIORITY_MAX:
-                raise ValueError(f"priority must be between -{PRIORITY_MAX} and {PRIORITY_MAX}")
-            out[key] = value
         elif key == "project_id":
             out[key] = check_ref("projects", value)
-        elif key == "area_id":
-            out[key] = check_ref("areas", value)
         elif key == "position":
             out[key] = float(value)
         elif key == "spent":
@@ -1069,22 +1096,12 @@ def reminder_follows(task, fields):
 def copy_occurrence(s, template, index, start, due, today):
     """A series' next copy, made from its newest one (so edits carry forward), with fresh
     checklists; returns its id."""
-    conn = db.get_db()
     remind = carried_reminder(template, start, due)
-    new = db.insert(conn, "tasks", {
-        "user_id": s["user_id"], "project_id": template["project_id"], "area_id": template["area_id"],
-        "title": template["title"], "notes": richtext.uncheck(template["notes"]),
-        "state": "scheduled" if start and start > today else "next", "focus": template["focus"],
-        "due_date": due, "start_date": start, "waiting_for": template["waiting_for"], "energy": template["energy"],
-        "minutes": template["minutes"], "priority": template["priority"], "remind_before": template["remind_before"],
-        "people": template["people"], "series_id": s["id"], "series_index": index, "position": template["position"],
-        "remind_at": remind, "remind_plan": remind})
-    conn.execute("INSERT INTO document_tags SELECT ?, tag_id FROM document_tags WHERE document_id = ?",
-                 (new, template["id"]))
-    copy_links(template["id"], new)
-    if s["carry_files"]:
-        copy_files(template["id"], new)  # the same files (stored once) on the new copy too
-    return new
+    # (Its files too only if the series carries them; what it waited on, the first copy did.)
+    return copy_task(template, {
+        "notes": richtext.uncheck(template["notes"]), "state": "scheduled" if start and start > today else "next",
+        "due_date": due, "start_date": start, "start_time": None, "series_id": s["id"], "series_index": index,
+        "remind_at": remind, "remind_plan": remind}, deps=False, files=bool(s["carry_files"]))
 
 
 def next_after_done(s, task, today):
@@ -1291,14 +1308,10 @@ def duplicate_task(task_id):
     conn = db.get_db()
     nxt = conn.execute("SELECT MIN(position) FROM tasks WHERE user_id = ? AND position > ?",
                        (g.user["id"], t["position"])).fetchone()[0]
-    cols = ["project_id", "area_id", "title", "notes", "state", "focus", "due_date", "start_date",
-            "start_time", "waiting_for", "energy", "minutes", "priority", "people"]
-    new = db.insert(conn, "tasks", {"user_id": g.user["id"], **{c: t[c] for c in cols},
-                                    "position": (t["position"] + nxt) / 2 if nxt is not None else t["position"] + 1})
-    if t["completed_at"]:  # a copy of a done task starts again, open
-        conn.execute("UPDATE tasks SET state = CASE WHEN state = 'scheduled' THEN 'next' ELSE state END "
-                     "WHERE id = ?", (new,))
-    copy_shared(task_id, new)
+    new = copy_task(t, {
+        "position": (t["position"] + nxt) / 2 if nxt is not None else t["position"] + 1, "remind_before": None,
+        # a copy of a done task starts again, open
+        "state": "next" if t["completed_at"] and t["state"] == "scheduled" else t["state"]})
     s = t["series_id"] and conn.execute("SELECT * FROM series WHERE id = ?", (t["series_id"],)).fetchone()
     if s and not t["completed_at"]:
         start_series(owned("tasks", new), s["repeat"], s["on_miss"], client_today())
@@ -1460,8 +1473,6 @@ def apply_task_update(task, data, today):
             if task["missed"]:
                 # Reopening a replaced copy makes it a one-off; the series has moved on.
                 fields.update(missed=0, series_id=None, series_index=None)
-    if "deleted" in data:
-        fields["deleted_at"] = utcnow() if data["deleted"] else None
     if fields:
         sets = ", ".join(f"{k} = ?" for k in fields)
         conn.execute(f"UPDATE tasks SET {sets}, updated_at = datetime('now') WHERE id = ?",
@@ -2479,17 +2490,7 @@ NOTE_EDITS = ("title", "body", "font", "category_id", "area_id", "journal_id", "
 def notes_json(rows):
     """Notes as the API sends them: with their tags, files, and the tasks and projects they're
     linked to (related, shaped like a task's)."""
-    ids = [r["id"] for r in rows]
-    tags, files, links = tags_for(ids), attachments_for(ids), links_for(ids)
-    out = []
-    for row in rows:
-        d = dict(row)
-        del d["user_id"]
-        d["pinned"] = bool(d["pinned"])
-        d |= {"tags": tags.get(d["id"], []), "attachments": files.get(d["id"], []),
-              "related": links.get(d["id"], [])}
-        out.append(d)
-    return out
+    return with_shared(rows, "note", lambda r: dict(r) | {"pinned": bool(r["pinned"])})
 
 
 def note_dict(note_id):
@@ -2500,26 +2501,20 @@ def note_fields(data):
     """Validate the editable note fields present in data."""
     out = {}
     for key, value in data.items():
-        if key == "title":
-            out[key] = str(value or "").strip()[:500]
-        elif key == "body":
-            out[key] = richtext.clean(value)
-        elif key == "font":
+        if shared_fields("note", key, value, out):
+            continue
+        if key == "font":
             if value not in ("", None, *richtext.FONTS):
                 raise ValueError("Unknown font.")
             out[key] = value or ""
         elif key == "category_id":
             out[key] = check_ref("note_categories", value)
-        elif key == "area_id":
-            out[key] = check_ref("areas", value)
         elif key == "journal_id":
             out[key] = check_ref("journals", value)
         elif key == "entry_date":
             out[key] = clean_date(value)
         elif key == "pinned":
             out[key] = 1 if value else 0
-        elif key == "deleted":
-            out["deleted_at"] = utcnow() if value else None
     return out
 
 
@@ -2859,37 +2854,22 @@ def reorder(kind):
 
 
 def project_fields(data):
+    """Validate the editable project fields present in data."""
     out = {}
     for key, value in data.items():
-        if key == "name":
-            value = str(value).strip()
-            if not value:
-                raise ValueError("name is required")
-            out[key] = value[:500]
-        elif key == "notes":
-            out[key] = richtext.clean(value)
-        elif key in ("sequential", "focus"):
+        if shared_fields("project", key, value, out):
+            continue
+        if key == "sequential":
             out[key] = 1 if value else 0
-        elif key == "priority":
-            value = int(value or 0)
-            if not -PRIORITY_MAX <= value <= PRIORITY_MAX:
-                raise ValueError(f"priority must be between -{PRIORITY_MAX} and {PRIORITY_MAX}")
-            out[key] = value
         elif key == "state":
             if value not in PROJECT_STATES:
                 raise ValueError("bad state")
             out[key] = value
             out["completed_at"] = utcnow() if value == "done" else None
-        elif key == "due_date":
-            out[key] = clean_date(value)
-        elif key == "area_id":
-            out[key] = check_ref("areas", value)
         elif key == "parent_id":
             out[key] = check_ref("projects", value)
         elif key == "step":
             out[key] = None if value in (None, "") else float(value)
-        elif key == "deleted":
-            out["deleted_at"] = utcnow() if value else None
     return out
 
 
@@ -3292,24 +3272,17 @@ def export_data():
     stamp = datetime.now().strftime("%Y-%m-%d")
     spool = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024)
     with zipfile.ZipFile(spool, "w", zipfile.ZIP_DEFLATED) as z:
-        taken = set()
-        for t in tasks:
-            for f in t["attachments"]:
-                f["file"] = f"attachments/{t['id']}/" + zip_name(f["name"], taken)
-                data = attachment_data(f["id"])
-                # Already-compressed files (photos, PDFs…) are stored as they are.
-                z.writestr(zipfile.ZipInfo(f["file"], time.localtime()[:6]), data,
-                           zipfile.ZIP_STORED if len(data) > 1024 * 1024 else zipfile.ZIP_DEFLATED)
-            taken.clear()
         notes = notes_json(conn.execute("SELECT * FROM notes WHERE user_id = ? ORDER BY id", (uid,)).fetchall())
-        for owner, items in (("project", projects.values()), ("note", notes)):
-            for p in items:
-                for f in p["attachments"]:
-                    f["file"] = f"attachments/{owner}-{p['id']}/" + zip_name(f["name"], taken)
+        # Each one's files in a folder of its own: attachments/<task id>, project-<id>, note-<id>.
+        for folder, items in (("{}", tasks), ("project-{}", projects.values()), ("note-{}", notes)):
+            for x in items:
+                taken = set()
+                for f in x["attachments"]:
+                    f["file"] = f"attachments/{folder.format(x['id'])}/" + zip_name(f["name"], taken)
                     data = attachment_data(f["id"])
+                    # Already-compressed files (photos, PDFs…) are stored as they are.
                     z.writestr(zipfile.ZipInfo(f["file"], time.localtime()[:6]), data,
                                zipfile.ZIP_STORED if len(data) > 1024 * 1024 else zipfile.ZIP_DEFLATED)
-                taken.clear()
         z.writestr("data.json", json.dumps({
             "exported_at": utcnow(), "app": f"{APP_NAME} ({PUBLIC_URL})",
             "user": {"username": g.user["username"], "display_name": g.user["display_name"],

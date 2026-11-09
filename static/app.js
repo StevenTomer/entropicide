@@ -256,6 +256,18 @@ function queueChange(method, path, body) {
   return applyOffline(op);
 }
 
+// What each kind starts with (besides what every one has; see applyOffline), as app.py makes
+// it, for one made offline. A new field belongs here too.
+const OFFLINE_NEW = {
+  tasks: () => ({ project_id: null, title: "", notes: "", state: "inbox", focus: false, due_date: null, start_date: null,
+    start_time: null, waiting_for: "", energy: null, minutes: null, priority: 0, series_id: null, series_index: null,
+    missed: false, completed_at: null, repeat: null, on_miss: null, series_latest: null, blocked_by: [], people: [],
+    spent: 0, remind_at: null, remind_before: null }),
+  projects: () => ({ name: "", notes: "", sequential: false, state: "active", focus: false, due_date: null,
+    completed_at: null, priority: 0, blocked_by: [], parent_id: null, step: null }),
+  notes: () => ({ title: "", body: "", font: "", category_id: null, journal_id: null, entry_date: null, pinned: false }),
+};
+
 // Changes op as the server would (near enough) on S.data, and returns what it would reply.
 // The real versions replace these when the outbox has been sent and the data reloaded.
 function applyOffline(op) {
@@ -267,31 +279,14 @@ function applyOffline(op) {
     return null;
   }
   if (path === "/tasks/bulk") return body.tasks.map(({ id, ...c }) => changeOffline("tasks", id, c));
-  if (method === "POST" && kind === "tasks") {
-    const t = { id: op.temp, project_id: null, area_id: null, title: "", notes: "", state: "inbox",
-      focus: false, due_date: null, start_date: null, start_time: null, waiting_for: "",
-      energy: null, minutes: null, priority: 0, series_id: null, series_index: null,
-      missed: false, position: Math.max(0, ...S.data.tasks.map((x) => x.position)) + 1,
-      completed_at: null, deleted_at: null, tags: [], repeat: null, on_miss: null,
-      series_latest: null, attachments: [], blocked_by: [], related: [] };
-    if (!taskById(t.id)) S.data.tasks.push(t);
-    return changeOffline("tasks", t.id, body);
-  }
-  if (method === "POST" && kind === "projects") {
-    const p = { id: op.temp, area_id: null, name: "", notes: "", sequential: false, state: "active",
-      focus: false, due_date: null, completed_at: null, deleted_at: null, priority: 0, tags: [],
-      attachments: [], blocked_by: [], related: [], parent_id: null, step: null,
-      position: Math.max(0, ...S.data.projects.map((x) => x.position)) + 1 };
-    if (!projectById(p.id)) S.data.projects.push(p);
-    return changeOffline("projects", p.id, body);
-  }
-  if (method === "POST" && kind === "notes") {
-    const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
-    const n = { id: op.temp, title: "", body: "", font: "", category_id: null, area_id: null, journal_id: null,
-      entry_date: null, pinned: false, created_at: stamp, updated_at: stamp, deleted_at: null, tags: [],
-      attachments: [], related: [] };
-    if (!S.data.notes.some((x) => x.id === n.id)) S.data.notes.push(n);
-    return changeOffline("notes", n.id, body);
+  if (method === "POST" && OFFLINE_NEW[kind]) {
+    // A new task, project or note: what the server would make, until it's sent.
+    const list = S.data[kind], stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
+    const x = { id: op.temp, area_id: null, created_at: stamp, updated_at: stamp, deleted_at: null, tags: [],
+      attachments: [], related: [], ...OFFLINE_NEW[kind](),
+      ...(kind !== "notes" && { position: Math.max(0, ...list.map((y) => y.position)) + 1 }) };
+    if (!list.some((y) => y.id === x.id)) list.push(x);
+    return changeOffline(kind, x.id, body);
   }
   if (method === "DELETE") {
     S.extra = S.extra.filter((t) => t.id !== Number(rest));
@@ -591,28 +586,34 @@ function replaceTask(task) {
   }
 }
 
-async function patchTask(id, changes, { quiet } = {}) {
-  const task = await api("PATCH", `/tasks/${id}`, changes);
-  replaceTask(task);
-  // Completing/deleting/repeating changes which rows exist; reload the lot.
-  if ("completed" in changes || "deleted" in changes) await refresh();
+// Saving a task, project or note: where it's saved, how the reply takes its place, and the
+// changes that alter which rows there are (so everything's reloaded after them).
+const SAVING = {
+  task: { path: "tasks", put: (x) => replaceTask(x), reload: ["completed", "deleted"] },
+  project: { path: "projects", put: (x) => replaceProject(x), reload: ["deleted", "state"] },
+  note: { path: "notes", put: (x) => upsertNote(x), reload: [] },
+};
+
+// Saves changes to a task, project or note (kind) and redraws: everything, reloaded, after a
+// change that adds or removes rows; else the page, or with quiet just the sidebar's counts.
+async function patchItem(kind, id, changes, { quiet } = {}) {
+  const how = SAVING[kind];
+  const x = await api("PATCH", `/${how.path}/${id}`, changes);
+  if (x) how.put(x);
+  if (how.reload.some((k) => k in changes)) await refresh();
   else if (!quiet) render();
   else renderNav();
-  return task;
+  return x;
 }
+
+function patchTask(id, changes, options) { return patchItem("task", id, changes, options); }
 
 function replaceProject(p) {
   const i = S.data.projects.findIndex((x) => x.id === p.id);
   if (i >= 0) S.data.projects[i] = p;
 }
 
-async function patchProject(id, changes, { quiet } = {}) {
-  const p = await api("PATCH", `/projects/${id}`, changes);
-  if (p) replaceProject(p);
-  if ("deleted" in changes || "state" in changes) await refresh();
-  else if (!quiet) render();
-  return p;
-}
+function patchProject(id, changes, options) { return patchItem("project", id, changes, options); }
 
 // ---- rendering -----------------------------------------------------------
 
@@ -2293,34 +2294,40 @@ function refResults(matches, cls) {
     m.where ? ` <span class="muted small">${h(m.where)}</span>` : ""}</button>`).join("");
 }
 
+// A list of linked tasks and projects (field: Blocked by, Related to, or a note's Linked to):
+// a chip for each (an open one clicks through, a done one is struck through, ✕ takes it off)
+// and a box to find more. Clicks: .ref-add, .ref-del and .ref-open, with data-ref the id; the
+// box (.ref-search) fills .ref-results with refResults(…, "ref-add"). extra: HTML under it.
+const REF_FIELDS = {
+  blocked_by: ["Blocked by", "Wait for a task or project…"],
+  related: ["Related to", "Link a task or project…"],
+  linked: ["Linked to", "Link a task or project…"],
+};
+function refsField(x, field, extra = "") {
+  const list = field === "blocked_by" ? "blocked_by" : "related";
+  const saved = new Map((x[list] || []).filter((r) => typeof r === "object").map((r) => [r.id, r]));
+  const chips = refs(x, list).map((ref) => {
+    const s = saved.get(ref), r = refInfo(ref, s);
+    return `<span class="dep-chip${r.open ? "" : " done"}" data-ref="${ref}" title="${s?.trashed ? "In the trash" : r.open ? "Open it" : "Done"}">${
+      r.open ? `<button type="button" class="link ref-open">${h(r.title)}</button>` : h(r.title)}
+      <button type="button" class="icon ref-del" aria-label="Remove">✕</button></span>`;
+  }).join("");
+  const [label, hint] = REF_FIELDS[field];
+  return `<div class="deps" data-refs="${list}"><label>${label} <input class="ref-search" placeholder="${hint}" autocomplete="off"></label>
+    <div class="dep-chips">${chips}</div><div class="ref-results"></div>${extra}</div>`;
+}
+
 function blockersField(x, kind) {
   if (x.completed_at || x.deleted_at) return "";
-  const chips = refs(x, "blocked_by").map((ref) => {
-    const r = refInfo(ref);
-    return `<span class="dep-chip${r.open ? "" : " done"}" data-ref="${ref}">${h(r.title)}
-      <button type="button" class="icon del-dep" aria-label="Remove">✕</button></span>`;
-  }).join("");
   const p = projectById(kind === "task" ? x.project_id : x.parent_id);
   const inherited = p ? waitingOn(p, "project") : [];
-  return `<div class="deps"><label>Blocked by <input class="dep-search" placeholder="Wait for a task or project…" autocomplete="off"></label>
-    <div class="dep-chips">${chips}</div><div class="dep-results"></div>
-    ${inherited.length ? `<p class="muted small">Its project waits for ${h(inherited.map((b) => b.title).join(", "))}, so this does too.</p>` : ""}</div>`;
+  return refsField(x, "blocked_by", inherited.length
+    ? `<p class="muted small">Its project waits for ${h(inherited.map((b) => b.title).join(", "))}, so this does too.</p>` : "");
 }
 
 // "Related to": links both ways to other tasks and projects, to get from one to the other
-// (app.py's document_links). An open one opens on a click; a done one is struck through.
-function relatedField(x, kind) {
-  const saved = new Map((x.related || []).filter((r) => typeof r === "object").map((r) => [r.id, r]));
-  const chips = refs(x, "related").map((ref) => {
-    const s = saved.get(ref);
-    const r = refInfo(ref, s);
-    return `<span class="dep-chip${r.open ? "" : " done"}" data-ref="${ref}" title="${s?.trashed ? "In the trash" : r.open ? "Open it" : "Done"}">${
-      r.open ? `<button type="button" class="link open-related">${h(r.title)}</button>` : h(r.title)}
-      <button type="button" class="icon del-related" aria-label="Remove">✕</button></span>`;
-  }).join("");
-  return `<div class="deps related-tasks"><label>Related to <input class="related-search" placeholder="Link a task or project…" autocomplete="off"></label>
-    <div class="dep-chips">${chips}</div><div class="related-results"></div></div>`;
-}
+// (app.py's document_links).
+const relatedField = (x) => refsField(x, "related");
 
 // Saves the open item's Blocked by or Related to (field) as the given ids.
 async function setRefs(field, list) {
@@ -3098,12 +3105,10 @@ function bindDetail() {
         (e.target.value.trim() ? '<span class="muted small">No contact matches.</span>' : "");
       return;
     }
-    if (e.target.matches(".related-search, .dep-search")) {
-      const x = selItem();
-      const blocking = e.target.matches(".dep-search");
-      const field = blocking ? "blocked_by" : "related";
-      const found = refMatches(x, S.selected.kind, e.target.value, new Set(refs(x, field)), blocking);
-      $(blocking ? ".dep-results" : ".related-results", el).innerHTML = refResults(found, blocking ? "add-dep" : "add-related") ||
+    if (e.target.matches(".ref-search")) {
+      const x = selItem(), box = e.target.closest("[data-refs]"), field = box.dataset.refs;
+      const found = refMatches(x, S.selected.kind, e.target.value, new Set(refs(x, field)), field === "blocked_by");
+      $(".ref-results", box).innerHTML = refResults(found, "ref-add") ||
         (e.target.value.trim() ? '<span class="muted small">No open task or project matches.</span>' : "");
       return;
     }
@@ -3226,24 +3231,19 @@ function bindDetail() {
       await patchTask(sel.id, { focus: !taskById(sel.id).focus });
     }
     else if (b.dataset.until) snoozeTask(sel.id, b.dataset.until);
-    else if (b.classList.contains("add-dep")) setRefs("blocked_by", [...refs(selItem(), "blocked_by"), Number(b.dataset.ref)]);
+    else if (b.matches(".ref-add, .ref-del")) {
+      const field = b.closest("[data-refs]").dataset.refs, id = Number(b.dataset.ref || b.closest("[data-ref]").dataset.ref);
+      const now = refs(selItem(), field);
+      setRefs(field, b.classList.contains("ref-add") ? [...now, id] : now.filter((r) => r !== id));
+    }
+    else if (b.classList.contains("ref-open")) openRef(b.closest("[data-ref]").dataset.ref);
     else if (b.classList.contains("add-person")) setPeople(sel.id, [...(taskById(sel.id).people || []), b.dataset.person]);
     else if (b.classList.contains("del-person")) {
       const gone = b.closest("[data-person]").dataset.person;
       setPeople(sel.id, taskById(sel.id).people.filter((id) => id !== gone));
     }
-    else if (b.classList.contains("add-related")) setRefs("related", [...refs(selItem(), "related"), Number(b.dataset.ref)]);
-    else if (b.classList.contains("del-related")) {
-      const gone = Number(b.closest("[data-ref]").dataset.ref);
-      setRefs("related", refs(selItem(), "related").filter((r) => r !== gone));
-    }
-    else if (b.classList.contains("open-related")) openRef(b.closest("[data-ref]").dataset.ref);
     else if (b.classList.contains("convert-task")) openConvert(taskById(sel.id));
     else if (b.classList.contains("task-to-note")) taskToNote(taskById(sel.id));
-    else if (b.classList.contains("del-dep")) {
-      const gone = Number(b.closest("[data-ref]").dataset.ref);
-      setRefs("blocked_by", refs(selItem(), "blocked_by").filter((r) => r !== gone));
-    }
     else if (b.classList.contains("save-template")) saveAsTemplate(sel.id, false);
     else if (b.classList.contains("reset-spent")) { $("#detail").dataset.key = ""; await patchTask(sel.id, { spent: 0 }); }
     else if (b.classList.contains("start-timer")) openTimer(sel.id);

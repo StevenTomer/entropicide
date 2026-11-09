@@ -48,7 +48,9 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
   fields)`** (an insert straight into a view raises). Tags, files, links and Blocked by are
   shared (`document_tags`, `attachments.document_id`, `document_links`, `document_deps`).
   Changing kind keeps the id: `become()` in app.py swaps the `*_data` row. Trash and delete
-  through `trashed()` / `purge()`, which take a project's contents along.
+  through `trashed()` / `purge()`, which take a project's contents along. What every kind has is
+  validated in `shared_fields` and sent by `with_shared`; copies of a task go through `copy_task`
+  (`TASK_COPY` lists what a copy takes).
 - **Text is HTML everywhere**: a task's `notes`, a project's `notes` and a note's `body` are
   cleaned HTML (checklists are `<ul data-check><li data-done="1">`). Anything plain that comes
   in (`/api/add`, sharing, Google) goes through `richtext.from_text`; anything going out as
@@ -58,7 +60,7 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
   queued and replayed, and `applyOffline` mirrors server behaviour on `S.data`. New task or
   project fields/endpoints must work through it; offline-created items have negative ids.
   `OFFLINE_PATH` lists which API paths are queued; `OUTBOX_VERSION` drops changes queued
-  before an incompatible change of ids.
+  before an incompatible change of ids; a new field's starting value goes in `OFFLINE_NEW`.
 - **CSRF:** non-GET `/api/` requests need `X-Requested-With: entropicide` (tests use `H` from
   `conftest.py`), except `/api/add` and `/api/complete`, which authenticate by key only.
 - **Repeats** are encoded strings validated by `valid_repeat`: `daily|weekdays|weekly|monthly|

@@ -282,10 +282,15 @@ final class QuickAdd {
     private static void scheduleSend(Context c) {
         JobScheduler jobs = c.getSystemService(JobScheduler.class);
         if (jobs.getPendingJob(JOB) != null) return;
-        jobs.schedule(new JobInfo.Builder(JOB, new ComponentName(c, QueueJob.class))
-                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                .setPersisted(true)
-                .build());
+        try {
+            jobs.schedule(new JobInfo.Builder(JOB, new ComponentName(c, QueueJob.class))
+                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                    .setPersisted(true)
+                    .build());
+        } catch (RuntimeException e) {
+            // (Android refusing the job mustn't stop the app, or whatever called this; say why)
+            CrashReport.caught(c, e);
+        }
     }
 
     private static final class Result {
@@ -672,6 +677,8 @@ if (!manifestSrc.includes("</application>")) throw new Error("AndroidManifest.xm
 fs.writeFileSync(manifestFile, manifestSrc
   .replace("<application", `<uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <!-- QueueJob waits for a network; Android 16 won't schedule a job that does without this -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
 
     <application`)
   .replace("</application>", `

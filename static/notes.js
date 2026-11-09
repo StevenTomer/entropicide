@@ -49,24 +49,10 @@ function notesViewTitle() {
 // A note's words without the formatting (for search and previews).
 const noteText = (n) => textOf(n.body);
 
-// ---- search: words (all of them), "a phrase", -word to leave out, and field:value ----
+// ---- searching notes: their fields (app.js's parseSearch reads the box) ----
 
-const fold = (s) => String(s ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
 const SEARCH_FIELDS = new Set(["tag", "cat", "category", "journal", "area", "is", "has", "before", "after", "on", "title"]);
-
-function parseNoteSearch(q) {
-  const terms = [];
-  for (const m of String(q || "").matchAll(/(-)?(?:([a-z]+):)?(?:"([^"]*)"?|(\S+))/gi)) {
-    let [, neg, field, quoted, word] = m;
-    let text = quoted ?? word ?? "";
-    field = field?.toLowerCase();
-    if (field && !SEARCH_FIELDS.has(field)) { text = `${field}:${text}`; field = null; }  // a web address, say
-    if (!field && text.length > 1 && text.startsWith("#")) { field = "tag"; text = text.slice(1); }
-    if (!text) continue;
-    terms.push({ neg: !!neg, field, text: fold(text) });
-  }
-  return terms;
-}
+const parseNoteSearch = (q) => parseSearch(q, SEARCH_FIELDS);
 
 // What a note has: pictures, files (not placed in the text), web links, links to tasks.
 function noteHas(n, what) {
@@ -103,9 +89,9 @@ function noteScore(n, terms) {
     else if (t.field === "title") { hit = title.includes(v); s = 6; }
     else if (t.field === "is") hit = { pinned: n.pinned, journal: !!n.journal_id, entry: !!n.journal_id, note: !n.journal_id }[v] ?? false;
     else if (t.field === "has") hit = noteHas(n, v);
-    else if (t.field === "before") hit = noteDay(n) < v;
-    else if (t.field === "after") hit = noteDay(n) > v;
-    else if (t.field === "on") hit = noteDay(n).startsWith(v);
+    else if (t.field === "before") hit = noteDay(n) < searchDay(v);
+    else if (t.field === "after") hit = noteDay(n) > searchDay(v);
+    else if (t.field === "on") hit = noteDay(n).startsWith(searchDay(v));
     else {
       const inTitle = title.includes(v);
       let count = 0;

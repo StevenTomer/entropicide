@@ -57,6 +57,10 @@ Settings → Troubleshooting.
   a task now keeps it the same item, so links to it, and what waited on it, simply stay.
 - Moving a task into a project that waits on it, or a project into one it waits on, is refused (it
   could never finish).
+- **Search tasks like notes:** all the words, anywhere (title, text, tags, project, files,
+  people), `"a phrase"`, `-word`, `#tag`, `project:`, `area:`, `in:queue`, `is:overdue` /
+  `blocked` / `focus`, `has:checklist` / `file` / `reminder`, and `before:` / `after:` / `on:today`
+  by its due (or start) date. `/regex/` still works. Notes' dates take `today` and `yesterday` too.
 - **Fixed:** a project moved to the trash took only itself, leaving its tasks in the Queue; now
   everything in it goes too (listed under it in the Trash) and comes back with it. Deleting a
   project for good no longer leaves its subprojects behind.

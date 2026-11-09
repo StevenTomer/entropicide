@@ -348,7 +348,7 @@
         <tr><td><code>#recipe</code> or <code>tag:recipe</code></td><td>with this tag</td></tr>
         <tr><td><code>cat:work</code>, <code>journal:travel</code>, <code>area:home</code>, <code>title:plan</code></td><td>in a category, journal, area; in the title</td></tr>
         <tr><td><code>has:picture</code>, <code>has:file</code>, <code>has:link</code>, <code>has:task</code>, <code>is:pinned</code></td><td>with pictures, files, web links, linked tasks; pinned</td></tr>
-        <tr><td><code>after:2026-10-01</code>, <code>before:2026-11-01</code>, <code>on:2026-11</code></td><td>written (or, for journal entries, on) a day, a month or a year</td></tr>
+        <tr><td><code>after:2026-10-01</code>, <code>before:2026-11-01</code>, <code>on:2026-11</code></td><td>written (or, for journal entries, on) a day, a month or a year; <code>today</code>, <code>yesterday</code> work too</td></tr>
       </tbody>
     </table>
     <div class="ex">A recipe card: category Recipes (green), #baking, a photo of the loaf, in Serif. Find it later with
@@ -483,8 +483,20 @@
       <li>The <strong>tag bar</strong> under the add box shows the tags used in the current list; click tags to show only tasks that have
         <em>all</em> of them. Click again to turn one off.
         <div class="ex">Going out? In the Queue, click <code>errand</code> to see everything you can do while out.</div></li>
-      <li><strong>Search</strong> (top right, or press <kbd>/</kbd>) filters the current list by title and notes. Use the <strong>All</strong> list to search everything.
-        Start with a slash for a regular expression: <code>/^call (mum|dad)/</code>, <code>/\d{3}-\d{4}/</code>,
+      <li><strong>Search</strong> (top right, or press <kbd>/</kbd>) filters the current list; use the <strong>All</strong> list to
+        search everything. It works as on the Notes page: tasks with <em>all</em> the words, anywhere (title, text, tags,
+        project, area, files, people), <code>"a phrase"</code>, <code>-word</code> to leave one out, and:
+        <table class="help-table">
+          <tbody>
+            <tr><td><code>#tag</code> or <code>tag:</code>, <code>title:</code>, <code>project:</code>, <code>area:</code></td><td>just there (<code>project:none</code>, <code>area:none</code> for none)</td></tr>
+            <tr><td><code>in:queue</code>, <code>in:someday</code>…</td><td>in that list</td></tr>
+            <tr><td><code>is:focus</code>, <code>blocked</code>, <code>waiting</code>, <code>overdue</code>, <code>due</code>, <code>today</code>, <code>repeating</code>, <code>scheduled</code></td><td>what it is</td></tr>
+            <tr><td><code>has:file</code>, <code>picture</code>, <code>link</code>, <code>checklist</code>, <code>reminder</code>, <code>people</code>, <code>related</code>, <code>note</code></td><td>what it has</td></tr>
+            <tr><td><code>before:</code>, <code>after:</code>, <code>on:</code> a date (<code>2026-11-20</code>, <code>2026-11</code>, <code>today</code>, <code>tomorrow</code>)</td><td>by its due date, else its start date</td></tr>
+          </tbody>
+        </table>
+        <div class="ex"><code>#errand -hardware is:overdue</code> · <code>project:house has:checklist</code> · <code>in:someday "trip"</code></div>
+        Start with a slash for a regular expression instead: <code>/^call (mum|dad)/</code>, <code>/\d{3}-\d{4}/</code>,
         <code>/receipt.*2026/</code>. It ignores case unless you type a capital letter; the box turns red
         (and says why when you point at it) if the pattern isn't valid. It works on the Links page too.</li>
       <li>Rename, merge (rename to an existing tag) and delete tags in <strong>Settings → Tags</strong>.</li>

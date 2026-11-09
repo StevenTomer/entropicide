@@ -558,10 +558,98 @@ function taskTags(t) {
 }
 
 function filtered(list) {
-  const match = searchTest();
+  const q = S.search.trim();
+  const regex = q.length > 1 && q.startsWith("/") && searchTest();
+  const terms = regex ? [] : parseSearch(q, TASK_SEARCH_FIELDS);
+  const blocked = terms.some((t) => t.field === "is" && t.text === "blocked") ? sequentialBlocked() : null;
   return list.filter((t) =>
-    (!match || match(t.title, textOf(t.notes))) &&
+    (regex ? regex(t.title, textOf(t.notes)) : taskMatches(t, terms, blocked)) &&
     [...S.tagFilter].every((tag) => taskTags(t).includes(tag)));
+}
+
+// ---- search: words (all of them), "a phrase", -word to leave out, and field:value ----
+// The same for tasks (here) and notes (notes.js), each with its own fields; /pattern/ is
+// a regular expression instead (searchTest).
+
+const fold = (s) => String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+// The search box as terms: {neg, field (one of fields, or null), text (folded)}. #tag is tag:.
+function parseSearch(q, fields) {
+  const terms = [];
+  for (const m of String(q || "").matchAll(/(-)?(?:([a-z]+):)?(?:"([^"]*)"?|(\S+))/gi)) {
+    let [, neg, field, quoted, word] = m;
+    let text = quoted ?? word ?? "";
+    field = field?.toLowerCase();
+    if (field && !fields.has(field)) { text = `${field}:${text}`; field = null; }  // a web address, say
+    if (!field && text.length > 1 && text.startsWith("#")) { field = "tag"; text = text.slice(1); }
+    if (!text) continue;
+    terms.push({ neg: !!neg, field, text: fold(text) });
+  }
+  return terms;
+}
+
+// A day searched for (before:, after:, on:): YYYY-MM-DD, or a part of one (2026-11), or
+// today, tomorrow or yesterday.
+const searchDay = (v) => ({ today: today(), tomorrow: addDays(today(), 1), yesterday: addDays(today(), -1) })[v] ?? v;
+
+const TASK_SEARCH_FIELDS = new Set(["tag", "title", "area", "project", "in", "is", "has", "before", "after", "on"]);
+const TASK_SEARCH_TIP = `<p class="muted small notes-tip">Find words anywhere (all of them), <code>"a phrase"</code>,
+  <code>-word</code> to leave out, <code>#tag</code>, <code>project:</code>, <code>area:</code>, <code>in:queue</code>,
+  <code>is:focus</code> / <code>blocked</code> / <code>overdue</code> / <code>repeating</code>,
+  <code>has:file</code> / <code>picture</code> / <code>link</code> / <code>checklist</code> / <code>reminder</code>,
+  <code>before:</code> / <code>after:</code> / <code>on:today</code> (its due date, else its start).</p>`;
+
+// What a task is (is:…). blocked: the set of blocked tasks (sequentialBlocked), if asked.
+function taskIs(t, what, blocked) {
+  const day = today();
+  return {
+    focus: t.focus, starred: t.focus, blocked: !!blocked?.has(t.id), waiting: t.state === "waiting",
+    overdue: !!t.due_date && t.due_date < day, due: !!t.due_date && t.due_date <= day, today: t.due_date === day || t.start_date === day,
+    repeating: !!t.series_id, scheduled: !!t.start_date && t.start_date > day, done: !!t.completed_at, open: !t.completed_at,
+  }[what] ?? false;
+}
+
+// What a task has (has:…).
+function taskHas(t, what) {
+  const placed = new Set(placedIds(t.notes));
+  if (["picture", "pictures", "image", "photo"].includes(what)) return pictureIds(t.notes).length > 0 ||
+    t.attachments.some((f) => IMAGE_TYPES.includes(f.mime));
+  if (["file", "files", "attachment"].includes(what)) return t.attachments.some((f) => !placed.has(f.id));
+  if (["link", "links", "url"].includes(what)) return /<a href=/.test(t.notes);
+  if (["notes", "text"].includes(what)) return !!textOf(t.notes);
+  if (["checklist", "check"].includes(what)) return t.notes.includes("<ul data-check>");
+  if (["reminder", "remind"].includes(what)) return !!t.remind_at;
+  if (["people", "person", "contact"].includes(what)) return !!t.people?.length;
+  if (["related", "relation"].includes(what)) return !!t.related?.length;
+  if (["note", "notes-linked"].includes(what)) return S.data.notes.some((n) => refs(n, "related").includes(t.id));
+  return false;
+}
+
+// Whether a task matches all the search terms.
+function taskMatches(t, terms, blocked) {
+  if (!terms.length) return true;
+  const title = fold(t.title), text = fold(textOf(t.notes)), tags = taskTags(t).map(fold);
+  const area = fold(areaById(taskArea(t))?.name), project = fold(projectChain(t.project_id).map((p) => p.name).join(" | "));
+  const others = fold([t.waiting_for, ...t.attachments.map((f) => f.name), ...refs(t, "related").map((r) => refInfo(r).title),
+    ...(t.people || []).map((id) => contactById(id)?.name || "")].join(" "));
+  const days = [t.due_date, t.start_date].filter(Boolean), day = days[0] || "";
+  return terms.every((term) => {
+    const v = term.field && ["before", "after", "on"].includes(term.field) ? searchDay(term.text) : term.text;
+    const hit = {
+      tag: () => tags.some((x) => x === v || x.startsWith(v)),
+      title: () => title.includes(v),
+      area: () => area.includes(v) || (v === "none" && !taskArea(t)),
+      project: () => project.includes(v) || (v === "none" && !t.project_id),
+      in: () => fold(STATE_LABEL[t.state]).startsWith(v) || t.state.startsWith(v),
+      is: () => taskIs(t, v, blocked),
+      has: () => taskHas(t, v),
+      before: () => !!day && day < v,
+      after: () => !!day && day > v,
+      on: () => days.some((d) => d.startsWith(v)),
+    }[term.field]?.() ?? (title.includes(v) || text.includes(v) || tags.some((x) => x.includes(v)) ||
+      area.includes(v) || project.includes(v) || others.includes(v));
+    return term.neg ? !hit : hit;
+  });
 }
 
 async function refresh() {
@@ -966,6 +1054,7 @@ function renderList() {
       { focus: "Star tasks to put them here.",
         recurring: "Set a task's Repeat to see its next copy here." }[S.view] ?? "Nothing here."}</p>`;
   }
+  if (S.search.trim() && !S.search.trim().startsWith("/")) html += TASK_SEARCH_TIP;
   fillList(el, html);
   renderSelectBar();
 }

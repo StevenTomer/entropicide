@@ -341,3 +341,20 @@ def test_timelines(app, user_client):
     n = client.post("/api/notes", json={"title": "Idea", "waypoint": True}, headers=H).get_json()
     assert client.patch(f"/api/notes/{n['id']}", json={"archived": True}, headers=H).get_json()["archived_at"]
     assert [x["title"] for x in line("?notes=1")] == ["Idea"] and n["waypoint"] is True
+
+
+def test_a_projects_completed_tasks_and_subprojects(app, user_client):
+    client = user_client("ann")
+    house = client.post("/api/projects", json={"name": "House"}, headers=H).get_json()["id"]
+    add = lambda t: client.post("/api/tasks", json={"title": t, "state": "next", "project_id": house}, headers=H).get_json()["id"]  # noqa: E731
+    paint, sweep = add("Paint"), add("Sweep")
+    add("Still to do")
+    shed = client.post("/api/projects", json={"name": "Shed", "parent_id": house}, headers=H).get_json()["id"]
+    for t in (paint, sweep):
+        client.patch(f"/api/tasks/{t}", json={"completed": True}, headers=H)
+    client.patch(f"/api/projects/{shed}", json={"state": "done"}, headers=H)
+    p = next(x for x in client.get("/api/data").get_json()["projects"] if x["id"] == house)
+    assert p["done"] == 3
+    done = client.get(f"/api/projects/{house}/completed").get_json()
+    assert sorted(t["title"] for t in done["tasks"]) == ["Paint", "Sweep"] and [x["name"] for x in done["projects"]] == ["Shed"]
+    assert user_client("bob").get(f"/api/projects/{house}/completed").status_code == 404

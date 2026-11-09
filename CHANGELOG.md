@@ -58,6 +58,8 @@ Settings → Troubleshooting.
   a task now keeps it the same item, so links to it, and what waited on it, simply stay.
 - Moving a task into a project that waits on it, or a project into one it waits on, is refused (it
   could never finish).
+- **A project's completed tasks and subprojects** are listed at the bottom of its page, under
+  *Completed* (folded away until opened; it stays open on that device). Untick one to reopen it.
 - **Timelines:** mark tasks, projects, notes and journal entries as **waypoints** (⚑) and see them
   on a line through today: what's done behind, what's coming ahead. *Timeline* in the sidebar for
   all your tasks and projects, one for each project and each journal, or everything dated.

@@ -659,6 +659,8 @@ async function refresh() {
   // (A project that's gone, or a view saved before projects were given new ids.)
   if (S.view.startsWith("project:") && !projectById(Number(S.view.slice(8)))) S.view = "projects";
   if (S.view === "logbook") S.extra = await api("GET", "/logbook");
+  const shownProject = S.view.startsWith("project:") && Number(S.view.slice(8));
+  if (shownProject && doneShown.has(shownProject)) await loadCompleted(shownProject);
   if (S.view === "trash") {
     const tr = await api("GET", "/trash");
     S.extra = tr.tasks;
@@ -907,15 +909,16 @@ async function setAreaIcon(li, body) {
 
 // depth: how far down a tree of subprojects it is (Projects page); null: shown on its own, so
 // it says what it's part of.
-function projectRow(p, depth = null, { draggable = false } = {}) {
+// onPage: shown on its parent's page (so it needn't say what it's part of).
+function projectRow(p, depth = null, { draggable = false, onPage = draggable } = {}) {
   const [inside, subs] = projectInside(p);
   const n = inside.length, folded = foldedProjects.has(p.id), kids = subprojects(p).length;
   const area = p.area_id && areaById(p.area_id);
   const waits = waitingOn(p, "project");
-  const parent = depth === null && !draggable && projectById(p.parent_id);  // (draggable: on its parent's page)
+  const parent = depth === null && !onPage && projectById(p.parent_id);
   const sel = (S.selected?.kind === "project" && S.selected.id === p.id ? " selected" : "") +
     (menu.project === p.id ? " menu-target" : "");
-  return `<div class="row project${sel}${depth ? " sub" : ""}" data-project="${p.id}"${draggable ? ' draggable="true"' : ""}${prioTint(p)}>
+  return `<div class="row project${sel}${depth ? " sub" : ""}${p.state === "done" ? " done" : ""}" data-project="${p.id}"${draggable ? ' draggable="true"' : ""}${prioTint(p)}>
     ${depth ? `<span class="indent" style="width: ${depth * 1.5}rem" aria-hidden="true"></span>` : ""}
     ${draggable ? '<span class="step-mark" title="A subproject: its tasks are a step of this project">▤</span>' : ""}
     ${depth !== null ? (kids ? `<button type="button" class="fold" aria-expanded="${!folded}" title="${folded ? "Show" : "Hide"} its subprojects">${folded ? "▸" : "▾"}</button>`
@@ -1059,10 +1062,13 @@ function renderList() {
       if (rows.length) html += `<h2 class="group">${label}</h2>` + rows.map((t) => taskRow(t, {})).join("");
     }
   } else if (S.view.startsWith("project:") && !S.search && !S.tagFilter.size) {
-    // Its tasks and subprojects, in their one order (drag either to change it).
-    const steps = projectSteps(projectById(Number(S.view.slice(8))), list);
-    subs = steps.length - list.length;
+    // Its tasks and subprojects, in their one order (drag either to change it); what's done
+    // folds away under them.
+    const p = projectById(Number(S.view.slice(8)));
+    const steps = projectSteps(p, list).filter((st) => st.kind === "task" || st.x.state !== "done");
+    subs = steps.length - list.length + (p.done ? 1 : 0);
     html += steps.map((st) => (st.kind === "task" ? taskRow(st.x, { showState }) : projectRow(st.x, null, { draggable: true }))).join("");
+    html += completedSection(p);
   } else {
     html += list.map((t) => taskRow(t, { showState })).join("");
   }
@@ -1839,6 +1845,7 @@ function openTimelineItem(kind, id) {
 
 function setView(view) {
   if (view.startsWith("timeline")) timeline.data = null;  // (loaded afresh)
+  doneFor = null;
   S.view = view;
   S.selected = null;  // (a different list: the open task's details close)
   S.picked.clear();
@@ -1937,6 +1944,36 @@ async function newProject(parent = null) {
   });
   if (!projectById(p.id)) S.data.projects.push(p);
   setView(`project:${p.id}`);
+}
+
+// ---- a project's completed tasks and subprojects ----
+// Under its open ones, folded away (as left, on this device); loaded when shown, into S.extra
+// and S.extraProjects (as the Logbook's are), so they open and reopen like any.
+
+const doneShown = new Set((() => { try { return JSON.parse(load("projectsDoneShown", "[]")); } catch { return []; } })());
+let doneFor = null, doneLoading = null;  // the project whose completed things are loaded (or loading)
+
+function completedSection(p) {
+  if (!p.done) return "";
+  const open = doneShown.has(p.id);
+  let html = `<h2 class="group done-head"><button type="button" class="link toggle-done" data-project="${p.id}" aria-expanded="${open}">
+    ${open ? "▾" : "▸"} Completed · ${p.done}</button></h2>`;
+  if (!open) return html;
+  if (doneFor !== p.id) {
+    if (doneLoading !== p.id) loadCompleted(p.id).then(() => renderList());
+    return html + '<p class="muted small">Loading…</p>';
+  }
+  return html + S.extraProjects.map((q) => projectRow(q, null, { onPage: true })).join("") + S.extra.map((t) => taskRow(t, {})).join("");
+}
+
+async function loadCompleted(id) {
+  doneLoading = id;
+  const done = await api("GET", `/projects/${id}/completed`).catch(() => ({ tasks: [], projects: [] }));
+  doneLoading = null;
+  if (S.view !== `project:${id}`) return;
+  S.extra = done.tasks;
+  S.extraProjects = done.projects;
+  doneFor = id;
 }
 
 // ---- subprojects ----
@@ -4623,6 +4660,12 @@ function bind() {
       return select("project", Number(b.closest("[data-project]").dataset.project));
     }
     if (b?.classList.contains("open-subproject")) return setView(`project:${b.dataset.project}`);
+    if (b?.classList.contains("toggle-done")) {
+      const id = Number(b.dataset.project);
+      if (doneShown.has(id)) doneShown.delete(id); else doneShown.add(id);
+      save("projectsDoneShown", JSON.stringify([...doneShown]));
+      return renderList();
+    }
     if (b?.dataset.timeline) return setView(`timeline:${b.dataset.timeline}`);
     if (b?.classList.contains("back-from-timeline")) return setView(b.dataset.back);
     if (b?.dataset.open) { const [kind, id] = b.dataset.open.split(":"); return openTimelineItem(kind, Number(id)); }

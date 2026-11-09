@@ -904,6 +904,7 @@ font[face="default"] { font-family: inherit; }
 
 /* Subprojects: under their project on the Projects page, indented, folding away */
 .row.project .indent { flex-shrink: 0; }
+.row.project.done .title { text-decoration: line-through; color: var(--muted); }
 /* A subproject among its parent's tasks, where a task's checkbox would be */
 .step-mark { flex-shrink: 0; width: 1rem; margin-top: 0.125rem; text-align: center; color: var(--accent); }
 .row.project .fold { flex-shrink: 0; width: 1.25rem; padding: 0; border: none; background: none; color: var(--muted);

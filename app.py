@@ -846,8 +846,33 @@ def document_json(doc_id):
 
 def projects_json(rows):
     """Projects as the API sends them: with their tags, files, what they're blocked by and
-    what they're related to."""
-    return with_shared(rows, "project", lambda r: dict(r) | {"focus": bool(r["focus"]), "sequential": bool(r["sequential"])})
+    what they're related to, and done: how many of its tasks and subprojects are completed
+    (their list is /api/projects/<id>/completed)."""
+    ids = [r["id"] for r in rows]
+    done = {}
+    if ids:
+        for r in db.get_db().execute(
+                f"SELECT project_id AS id, COUNT(*) AS n FROM tasks WHERE project_id IN ({marks_for(ids)}) "
+                "AND completed_at IS NOT NULL AND deleted_at IS NULL GROUP BY project_id UNION ALL "
+                f"SELECT parent_id, COUNT(*) FROM projects WHERE parent_id IN ({marks_for(ids)}) AND state = 'done' "
+                "AND deleted_at IS NULL GROUP BY parent_id", ids * 2):
+            done[r["id"]] = done.get(r["id"], 0) + r["n"]
+    return with_shared(rows, "project", lambda r: dict(r) | {"focus": bool(r["focus"]), "sequential": bool(r["sequential"]),
+                                                              "done": done.get(r["id"], 0)})
+
+
+@app.get("/api/projects/<int:project_id>/completed")
+@login_required
+def project_completed(project_id):
+    """What's completed in a project (not in its subprojects): its tasks, newest first, and
+    its subprojects."""
+    owned("projects", project_id)
+    conn = db.get_db()
+    tasks = conn.execute("SELECT * FROM tasks WHERE project_id = ? AND completed_at IS NOT NULL AND deleted_at IS NULL "
+                         "ORDER BY completed_at DESC LIMIT 1000", (project_id,)).fetchall()
+    subs = conn.execute("SELECT * FROM projects WHERE parent_id = ? AND state = 'done' AND deleted_at IS NULL "
+                        "ORDER BY completed_at DESC", (project_id,)).fetchall()
+    return jsonify(tasks=tasks_json(tasks), projects=projects_json(subs))
 
 
 def clean_date(value):

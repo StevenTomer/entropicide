@@ -62,6 +62,7 @@ Settings → Troubleshooting.
   **Sketch** (pen and ink, in six colours and three sizes, with an eraser and undo; it follows a
   stylus's pressure) or a **Diagram** (boxes, arrows, shapes and words, with Excalidraw built in).
   They're placed like any picture, and *Edit drawing* opens them again to carry on.
+- **Fixed:** the Vim editor stayed light in dark mode.
 - **Weekly review:** *Review* in the sidebar walks you through GTD's weekly review: empty the
   Inbox and loose notes, look over what's overdue, waited for and coming up, then each project due
   for a look (stalled ones flagged), and Someday and Later. Projects come up every week by default

@@ -414,7 +414,9 @@ function loadVim() {
     const css = document.createElement("link");
     css.rel = "stylesheet";
     css.href = BASE + "/static/vendor/codemirror/codemirror-vim.css";
-    document.head.append(css);
+    // Before the app's own styles, so they (its colours, dark ones in dark mode) win.
+    const ours = document.querySelector('link[rel="stylesheet"][href*="app.css"]');
+    if (ours) ours.before(css); else document.head.append(css);
     const js = document.createElement("script");
     js.src = BASE + "/static/vendor/codemirror/codemirror-vim.js";
     js.onload = () => { defineHtmlMode(); defineVimCommands(); ok(); };

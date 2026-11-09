@@ -707,10 +707,16 @@ div.inline { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; 
 .cm-fat-cursor .CodeMirror-cursor { background: var(--accent); opacity: 0.55; border: none; }
 .cm-fat-cursor-mark { background: var(--accent-soft); }
 .CodeMirror-selected, .CodeMirror-focused .CodeMirror-selected { background: var(--accent-soft); }
-.cm-tag { color: var(--accent); }
-.cm-attribute { color: var(--muted); }
-.cm-string { color: var(--today); }
-.cm-atom { color: var(--muted); }
+/* (".CodeMirror ...": to beat its built-in light theme, .cm-s-default) */
+.CodeMirror .cm-tag { color: var(--accent); }
+.CodeMirror .cm-attribute, .CodeMirror .cm-atom, .CodeMirror .cm-bracket, .CodeMirror .cm-meta,
+.CodeMirror .cm-comment { color: var(--muted); }
+.CodeMirror .cm-string { color: var(--today); }
+.CodeMirror .cm-header, .CodeMirror .cm-link { color: var(--accent); }
+.CodeMirror-gutters { background: var(--panel); border-color: var(--line); }
+.CodeMirror-linenumber, .CodeMirror-guttermarker, .CodeMirror-guttermarker-subtle { color: var(--muted); }
+.CodeMirror-activeline-background { background: var(--accent-soft); }
+.CodeMirror-matchingtag { background: var(--accent-soft); }
 .CodeMirror-dialog { background: var(--panel); color: var(--text); border-color: var(--line); }
 .CodeMirror-dialog input { width: auto; padding: 0; border: none; background: transparent; outline: none; font: inherit; }
 .vim-mode { min-height: 1.2em; margin-top: 0.125rem; font-family: ui-monospace, monospace; }

@@ -91,9 +91,11 @@ KINDS = {
             ("step", "REAL"),
             ("sequential", "INTEGER NOT NULL DEFAULT 0"),
             # active | someday | later | done
-            ("state", "TEXT NOT NULL DEFAULT 'active'"),
+            # The task states (inbox next soon waiting scheduled someday later), or done.
+            ("state", "TEXT NOT NULL DEFAULT 'next'"),
             ("focus", "INTEGER NOT NULL DEFAULT 0"),
             ("due_date", "TEXT"),
+            ("start_date", "TEXT"),  # (not before: Scheduled until then)
             # higher comes first on the Projects page, as for tasks; 0 by default, may be negative
             ("priority", "INTEGER NOT NULL DEFAULT 0"),
             ("position", "REAL NOT NULL DEFAULT 0"),
@@ -525,6 +527,8 @@ def migrate(conn):
     if "archived_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(note_data)")}:
         conn.execute("ALTER TABLE note_data ADD COLUMN archived_at TEXT")
     project_cols = {r["name"] for r in conn.execute("PRAGMA table_info(project_data)")}
+    if "start_date" not in project_cols:
+        conn.execute("ALTER TABLE project_data ADD COLUMN start_date TEXT")
     if "review_every" not in project_cols:
         conn.execute("ALTER TABLE project_data ADD COLUMN review_every INTEGER NOT NULL DEFAULT 7")
         conn.execute("ALTER TABLE project_data ADD COLUMN last_reviewed TEXT")
@@ -755,6 +759,40 @@ def untangle_trash(conn):
     conn.commit()
 
 
+# How far off each state is: moving a project further off takes what's in it along (app.py's
+# carry_state); 0 is now.
+STATE_RANK = {"inbox": 0, "next": 0, "soon": 1, "waiting": 2, "scheduled": 2, "someday": 3, "later": 4}
+
+
+def unify_states(conn):
+    """Once (PRAGMA user_version 4): projects took the task states. Active became Queue (next).
+    A Someday or Later project used to hold back what was in it without moving it; now its
+    tasks and subprojects are moved there with it, so they stay out of the Queue as before."""
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= 4:
+        return
+    conn.execute("UPDATE project_data SET state = 'next' WHERE state = 'active'")
+    projects = {r["id"]: r for r in conn.execute(
+        "SELECT p.id, p.parent_id, p.state FROM project_data p JOIN documents d ON d.id = p.id WHERE d.deleted_at IS NULL")}
+
+    def ceiling(pid, seen=()):  # the furthest-off state among a project and those it's in
+        if pid not in projects or pid in seen:
+            return "next"
+        p, up = projects[pid], ceiling(projects[pid]["parent_id"], (*seen, pid))
+        own = p["state"] if p["state"] != "done" else "next"
+        return max(own, up, key=STATE_RANK.get)
+    for pid, p in projects.items():
+        up = ceiling(p["parent_id"], (pid,))
+        if p["state"] != "done" and STATE_RANK[up] > STATE_RANK.get(p["state"], 0):
+            conn.execute("UPDATE project_data SET state = ? WHERE id = ?", (up, pid))
+    for t in conn.execute("SELECT t.id, t.project_id, t.state FROM task_data t JOIN documents d ON d.id = t.id "
+                          "WHERE t.project_id IS NOT NULL AND t.completed_at IS NULL AND d.deleted_at IS NULL").fetchall():
+        up = ceiling(t["project_id"])
+        if STATE_RANK[up] > STATE_RANK.get(t["state"], 0):
+            conn.execute("UPDATE task_data SET state = ? WHERE id = ?", (up, t["id"]))
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+
+
 def connect(path):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
@@ -784,5 +822,6 @@ def init_db(path):
     conn.executescript(INDEXES)
     format_text(conn)
     untangle_trash(conn)
+    unify_states(conn)
     conn.commit()
     conn.close()

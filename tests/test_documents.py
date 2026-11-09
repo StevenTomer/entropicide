@@ -52,7 +52,9 @@ def test_old_database_moves_to_documents(tmp_path):
     assert q("SELECT id, project_id, notes, series_id, gcal_event_id FROM tasks ORDER BY id") == [
         (3, 11, "", None, None), (5, 10, "<ul data-check><li>sand</li></ul>", None, "ev5"), (9, None, "", 1, None)]
     assert q("SELECT id, name, notes, state, priority, area_id FROM projects ORDER BY id") == [
-        (10, "House", "<p>big</p>", "active", 2, 1), (11, "Garden", "", "someday", 0, None)]
+        (10, "House", "<p>big</p>", "next", 2, 1), (11, "Garden", "", "someday", 0, None)]
+    # Active projects are now in the Queue; a Someday project's tasks went to Someday with it.
+    assert q("SELECT id, state FROM tasks ORDER BY id") == [(3, "someday"), (5, "next"), (9, "next")]
     assert q("SELECT id, title, pinned, body FROM notes") == [
         (12, "Colours", 1, '<p>sage</p><p><img data-file="3" data-size="m"></p>')]
     # Tags, waits, links and files, each on the right document.
@@ -150,7 +152,7 @@ def test_converting_between_every_kind(app, user_client):
     assert (t["id"], t["title"], t["state"], t["tags"]) == (note, "Fix the gate", "inbox", ["home"])
     assert t["notes"] == "<p>Fix the gate</p><p>it squeaks</p>"
     p = convert(note, "project").get_json()
-    assert (p["id"], p["name"], p["state"]) == (note, "Fix the gate", "active")
+    assert (p["id"], p["name"], p["state"]) == (note, "Fix the gate", "next")
     n = convert(note, "note").get_json()
     assert (n["id"], n["title"], n["tags"]) == (note, "Fix the gate", ["home"])
     assert convert(note, "note").status_code == 400 and convert(note, "box").status_code == 400

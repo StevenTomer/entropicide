@@ -1047,3 +1047,9 @@ dialog.draw-dlg:not([open]) { display: none; }
 .sk-colour.on { box-shadow: 0 0 0 2px var(--accent); }
 .sk-erase.on { background: var(--accent-soft); border-color: var(--accent); }
 .draw-tools select { width: auto; }
+
+/* A list's tasks under their project (app.js groupedByProject) */
+.proj-group { margin: 0.875rem 0 0.125rem; font-size: 0.8125rem; font-weight: 600; }
+.proj-group .link { color: var(--muted); }
+.proj-group .link:hover { color: var(--accent); }
+.row.task.in-group { margin-left: 1.25rem; }

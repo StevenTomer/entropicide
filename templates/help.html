@@ -85,7 +85,7 @@
       <dt>★ Focus</dt>
       <dd>What you're doing <em>today</em>. It shows starred tasks plus anything <strong>due today or overdue</strong>,
         so nothing due slips by. Star a task (☆ on its row, right-click → Star, <code>!focus</code>, or drag it onto Focus)
-        to pull it into today's list; unstar it if the day changes. Tasks in Someday, Later, or an inactive project
+        to pull it into today's list; unstar it if the day changes. Tasks in Someday or Later, or in a completed project,
         don't show here. Sorted by priority.
         <div class="ex">Morning: star the 3–5 Queue tasks you mean to finish today.</div></dd>
 
@@ -404,17 +404,25 @@
       Give it a name that says what done looks like, and keep at least one next action in its Queue.</p>
     <ul>
       <li><strong>Projects</strong> in the sidebar opens the Projects page, with every project by status (the number is how many
-        are active). Add one with the <strong>+</strong> beside it. Open a project to see and add its tasks; tasks added
-        there go to its Queue.</li>
+        are being worked on: not in Someday or Later, nor completed). Add one with the <strong>+</strong> beside it. Open a
+        project to see and add its tasks.</li>
       <li>Move tasks into it with right-click → Move to → <em>Project ›</em>, or the task's Project field.</li>
       <li><strong>Right-click</strong> a project's row (or press and hold it, on a phone) for a menu: its <em>Status</em>
-        (Active, Someday, Later or Completed, one click each, with Undo), Area, Priority, Tag, Open, Details, Star,
+        (Inbox, Queue, Soon, Waiting, Scheduled, Someday, Later or Completed, one click each, with Undo), Area, Priority, Tag, Open, Details, Star,
         Sequential and Move to trash.</li>
       <li><strong>Priority:</strong> on the Projects page, press a project's ↕ and drag up to raise its priority, down to lower
         it, as for tasks (or set it in its details). Higher ones come first, tinted redder; lower ones bluer.</li>
-      <li><strong>Status:</strong> <em>Active</em> projects' tasks show in Focus and the Queue. Set a project to <em>Someday</em>
-        or <em>Later</em> to park it with everything in it (its tasks drop out of the Queue; the project shows in the Someday/Later lists).
-        <em>Completed</em> projects are listed for 30 days.</li>
+      <li><strong>Status:</strong> a project is in one of the same lists as a task (Queue is what was called Active), or
+        <em>Completed</em> (listed for 30 days). Moving it further off (Soon, Waiting, Scheduled, Someday, Later) takes its tasks
+        and subprojects there too, unless they're further off already; moving it nearer brings back the ones that went with it.
+        A task added to it starts no nearer than it is. Any of them can then be moved nearer by itself, and stays there: park a
+        project in Someday but keep one task in the Queue, say.
+        <div class="ex">Set <em>Kitchen</em> to Someday: “Measure”, “Pick tiles” and “Get quotes” go to Someday with it.</div></li>
+      <li><strong>Starts:</strong> a project's start date (in its details). One still to come puts it, and what's in it, in
+        Scheduled until then; on the day it all joins the Queue.</li>
+      <li><strong>In the lists:</strong> a list's tasks come under their project, and projects show in their list too (a Someday
+        project in Someday, and so on), each above its tasks. Settings → Lists turns that off on a device, leaving each
+        project's name as a heading over its tasks.</li>
       <li><strong>Sequential:</strong> only the first Queue task of the project shows in the Queue and Focus; finishing it
         brings up the next. Good for steps that must happen in order (“Get quotes” → “Choose builder” → “Sign contract”).
         Order them by dragging in the project. Its <strong>subprojects</strong> are steps too, in the same order (drag them
@@ -476,7 +484,7 @@
         one that's <em>stalled</em> (nothing to do next). Add a next action, then <em>Reviewed</em>, or move it to Someday or
         Later, or complete it. Each project comes up again after its interval: every week to begin with; 2 or 4 weeks, or never,
         under <em>Review every</em> (there, or in the project's details).</li>
-      <li><strong>Get creative:</strong> the Someday and Later lists; <em>To the Queue</em> or <em>Make active</em> starts one now.
+      <li><strong>Get creative:</strong> the Someday and Later lists; <em>To the Queue</em> starts one now.
         New ideas go in the box.</li>
       <li><strong>Done:</strong> <em>Finish the review</em> notes the day; the page then says when the last one was.</li>
     </ol>

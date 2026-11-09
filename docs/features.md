@@ -24,7 +24,10 @@ In brief:
 - **Projects** have a page of their own (the sidebar just counts them), sorted by priority, which
   you drag with each project's ↕ as for tasks. They can be *sequential*, so only their first action
   shows in the Queue, and have tags (which count for all their tasks), files (shown in each task's
-  details), Blocked by (holding back all their tasks) and Related to.
+  details), Blocked by (holding back all their tasks) and Related to. They're in the same lists as
+  tasks (Inbox, Queue, Soon, Waiting, Scheduled, Someday, Later) or Completed, and moving one further
+  off takes its tasks along (each can be moved nearer again); a start date schedules it, and them.
+  A list's tasks come under their project, and (a setting) projects show in the lists too.
 - **Subprojects:** a project can be a part of a bigger one, at any depth (*New subproject…*,
   *Move into*, or *Part of* in its details); the Projects page shows them as a tree that folds. A
   project that's waiting, or in Someday or Later, holds back everything in it. On the project's

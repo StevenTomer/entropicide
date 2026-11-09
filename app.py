@@ -36,7 +36,10 @@ import icons
 import richtext
 
 TASK_STATES = {"inbox", "next", "soon", "waiting", "scheduled", "someday", "later"}
-PROJECT_STATES = {"active", "someday", "later", "done"}
+# Projects take the task states, or done. ("active", from before they did, means next.)
+PROJECT_STATES = TASK_STATES | {"done"}
+# A project in these isn't being worked on now (nor is one that's done).
+RESTING = ("someday", "later")
 REPEATS = set(db.DEFAULT_ON_MISS)
 # every N days (every:9), weeks (every:2w), months (every:3m) or years (every:1y); N up to 999
 EVERY_RE = re.compile(r"every:([1-9][0-9]{0,2})([wmy]?)")
@@ -590,6 +593,73 @@ def project_contents(project_id):
     return out
 
 
+def schedule_project(fields, old):
+    """A project's start date, as a task's: one still to come puts it in Scheduled (unless it's
+    in Someday or Later, or done), and once there's none to come it's back in the Queue."""
+    state = fields.get("state", old["state"])
+    start = fields.get("start_date", old["start_date"])
+    future = bool(start) and start > client_today()
+    if state == "scheduled" and not future:
+        if "state" in fields and not ("start_date" in fields and not start):
+            raise ValueError("A scheduled project needs a start date still to come.")
+        fields["state"] = "next"
+    elif future and state in ("inbox", "next", "soon") and ("start_date" in fields or "state" not in fields):
+        fields["state"] = "scheduled"
+
+
+def move_to_state(doc_id, kind, state, start):
+    """Moves a task or subproject (kind) to a state with its project; into Scheduled, not
+    before start (and out of it, its start date to come is dropped)."""
+    view = "tasks" if kind == "task" else "projects"
+    row = db.get_db().execute(f"SELECT start_date FROM {view} WHERE id = ?", (doc_id,)).fetchone()
+    own = row["start_date"]
+    if state == "scheduled":
+        own = max(own or "", start or "") or None
+    elif own and own > client_today():
+        own = None
+    db.get_db().execute(f"UPDATE {view} SET state = ?, start_date = ? WHERE id = ?", (state, own, doc_id))
+
+
+def carry_state(project_id, old, new):
+    """A project's tasks and subprojects follow its state, but only as far as it goes: moved
+    further off (Soon, Waiting, Scheduled, Someday, Later), those nearer than it go there too;
+    brought nearer, those that were where it was come with it. Any can then be moved nearer
+    by hand, and stay there. (Done, or reopened, moves nothing.)"""
+    if "done" in (old, new) or old == new:
+        return
+    conn = db.get_db()
+    start = conn.execute("SELECT start_date FROM projects WHERE id = ?", (project_id,)).fetchone()[0]
+    ids = project_contents(project_id)
+    if not ids:
+        return
+    rank = db.STATE_RANK
+    for r in conn.execute(f"SELECT id, kind FROM documents WHERE id IN ({marks_for(ids)}) AND deleted_at IS NULL", list(ids)).fetchall():
+        x = conn.execute(f"SELECT state, {'completed_at' if r['kind'] == 'task' else 'NULL AS completed_at'} "
+                         f"FROM {'tasks' if r['kind'] == 'task' else 'projects'} WHERE id = ?", (r["id"],)).fetchone()
+        if x["completed_at"] or x["state"] == "done":
+            continue
+        if rank[new] > rank[x["state"]]:
+            move_to_state(r["id"], r["kind"], new, start)
+        elif rank[new] < rank[old] and x["state"] == old:
+            move_to_state(r["id"], r["kind"], "next" if new == "inbox" else new, start)
+
+
+def join_project(doc_id, project_id):
+    """A task or subproject put in a project starts no nearer than the project is (it can be
+    moved nearer afterwards)."""
+    if not project_id:
+        return
+    conn = db.get_db()
+    p = conn.execute("SELECT state, start_date FROM projects WHERE id = ?", (project_id,)).fetchone()
+    kind = kind_of(doc_id)
+    x = conn.execute(f"SELECT state FROM {'tasks' if kind == 'task' else 'projects'} WHERE id = ?", (doc_id,)).fetchone()
+    if not p or p["state"] == "done" or x["state"] == "done" or db.STATE_RANK[p["state"]] <= db.STATE_RANK.get(x["state"], 0):
+        return
+    move_to_state(doc_id, kind, p["state"], p["start_date"])
+    if kind == "project":
+        carry_state(doc_id, x["state"], p["state"])
+
+
 def waits_on(doc_id):
     """What a task or project can't be done before: what it's blocked by, and what the
     projects it's in (at any depth) are blocked by; for a project, also what's in it."""
@@ -868,13 +938,14 @@ def projects_json(rows):
         moving = {r[0] for r in db.get_db().execute(
             f"SELECT project_id FROM tasks WHERE project_id IN ({marks_for(ids)}) AND completed_at IS NULL "
             "AND deleted_at IS NULL AND state IN ('next', 'soon', 'waiting', 'scheduled') UNION "
-            f"SELECT parent_id FROM projects WHERE parent_id IN ({marks_for(ids)}) AND state = 'active' "
+            f"SELECT parent_id FROM projects WHERE parent_id IN ({marks_for(ids)}) AND state IN ('next', 'soon', 'waiting', 'scheduled') "
             "AND deleted_at IS NULL", ids * 2)}
     def shape(r):
-        due = r["state"] == "active" and r["review_every"] > 0 and (
+        working = r["state"] not in (*RESTING, "done")
+        due = working and r["review_every"] > 0 and (
             not r["last_reviewed"] or date.fromisoformat(r["last_reviewed"]) + timedelta(days=r["review_every"]) <= date.fromisoformat(today))
         return dict(r) | {"focus": bool(r["focus"]), "sequential": bool(r["sequential"]), "done": done.get(r["id"], 0),
-                          "review_due": due, "stalled": r["state"] == "active" and r["id"] not in moving}
+                          "review_due": due, "stalled": r["state"] in ("inbox", "next", "soon") and r["id"] not in moving}
     return with_shared(rows, "project", shape)
 
 
@@ -1317,6 +1388,8 @@ def catch_up(uid, today, now):
     conn.execute("UPDATE tasks SET state = 'next' WHERE user_id = ? AND state = 'scheduled' "
                  "AND completed_at IS NULL AND (start_date < ? OR (start_date = ? AND "
                  "(start_time IS NULL OR start_time <= ?)))", (uid, today, today, now))
+    conn.execute("UPDATE projects SET state = 'next' WHERE user_id = ? AND state = 'scheduled' AND start_date <= ?",
+                 (uid, today))
     conn.commit()
 
 
@@ -1388,6 +1461,7 @@ def insert_task(data, today):
     fields["user_id"] = g.user["id"]
     conn = db.get_db()
     task_id = db.insert(conn, "tasks", fields)
+    join_project(task_id, fields.get("project_id"))
     if isinstance(data.get("tags"), list):
         set_tags(task_id, data["tags"])
     set_blockers("task", task_id, given_ids(data, "blocked_by"))
@@ -1468,7 +1542,7 @@ def convert_document(doc_id):
                     raise ValueError("Only an empty project can be changed: move its tasks and subprojects out first.")
                 if from_kind["state"] == "done":
                     raise ValueError("Reopen the project first.")
-                held = from_kind["state"] if from_kind["state"] in ("someday", "later") else None
+                held = from_kind["state"] if from_kind["state"] != "scheduled" or (from_kind["start_date"] or "") > client_today() else None
                 fields = {"area_id": from_kind["area_id"], "focus": from_kind["focus"], "due_date": from_kind["due_date"],
                           "priority": from_kind["priority"]}
                 if to == "task":
@@ -1524,9 +1598,10 @@ def task_to_project(t, checklist):
         items, notes = richtext.take_checklists(t["notes"])
         items = [(words[:500], done) for words, done in items]
     parent = t["project_id"] and owned("projects", t["project_id"])
-    state = t["state"] if t["state"] in ("someday", "later") else "active"
+    # (Making it a project is dealing with it: out of the Inbox, into the Queue.)
+    state = "next" if t["state"] == "inbox" or (t["state"] == "scheduled" and (t["start_date"] or "") <= client_today()) else t["state"]
     become(t, "project", {"notes": notes, "area_id": parent["area_id"] if parent else t["area_id"],
-                          "state": state, "focus": t["focus"], "due_date": t["due_date"], "parent_id": t["project_id"],
+                          "state": state, "start_date": t["start_date"] if state == "scheduled" else None, "focus": t["focus"], "due_date": t["due_date"], "parent_id": t["project_id"],
                           "step": t["position"] if t["project_id"] else None,
                           "priority": t["priority"], "position": next_position("projects")})
     first = next_position("tasks")
@@ -1577,7 +1652,7 @@ def update_tasks():
 def apply_task_update(task, data, today):
     """Apply API-style changes to one of g.user's tasks (from the app or from Google)."""
     task_id = task["id"]
-    was_done = task["completed_at"]
+    was_done, was_in = task["completed_at"], task["project_id"]
     fields = task_fields(data)
     reminder_follows(task, fields)
     repeat, on_miss = repeat_args(data)
@@ -1621,6 +1696,8 @@ def apply_task_update(task, data, today):
     set_related("task", task_id, given_ids(data, "related"))
     if "project_id" in fields:
         check_no_loops(task_id)
+        if fields["project_id"] != was_in:
+            join_project(task_id, fields["project_id"])
     if data.get("repeat_from") in ("done", "calendar"):
         set_repeat_from(task_id, data["repeat_from"] == "done", today)
     task = owned("tasks", task_id)
@@ -2431,8 +2508,8 @@ def list_tasks(name, tasks, projects, today):
             out.append(project_id)
             project_id = projects[project_id]["parent_id"]
         return out
-    def active(t):
-        return all(projects[p]["state"] == "active" for p in chain(t["project_id"]))
+    def active(t):  # (a task in a done project is put away with it)
+        return all(projects[p]["state"] != "done" for p in chain(t["project_id"]))
     # Blocked: waiting on an open task or project (or in a project that is, at any level), in a
     # subproject waiting its turn in a sequential project, or not the first Next action of a
     # sequential project. (app.js's sequentialBlocked agrees.)
@@ -2446,7 +2523,7 @@ def list_tasks(name, tasks, projects, today):
         if p["sequential"]:
             steps = sorted([(t["position"], t["id"]) for t in tasks if t["project_id"] == p["id"] and t["state"] == "next"]
                            + [(q["step"] if q["step"] is not None else float("inf"), q["id"])
-                              for q in projects.values() if q["parent_id"] == p["id"] and q["state"] == "active"])
+                              for q in projects.values() if q["parent_id"] == p["id"] and q["state"] == "next"])
             later |= {i for _, i in steps[1:]}
     held = {i for i in later if i in projects}
     blocked = {t["id"] for t in tasks
@@ -2994,10 +3071,13 @@ def project_fields(data):
         if key == "sequential":
             out[key] = 1 if value else 0
         elif key == "state":
+            value = "next" if value == "active" else value
             if value not in PROJECT_STATES:
                 raise ValueError("bad state")
             out[key] = value
             out["completed_at"] = utcnow() if value == "done" else None
+        elif key == "start_date":
+            out[key] = clean_date(value)
         elif key == "parent_id":
             out[key] = check_ref("projects", value)
         elif key == "step":
@@ -3068,8 +3148,14 @@ def create_project():
     fields["user_id"] = g.user["id"]
     place_in_parent(fields)
     conn = db.get_db()
+    try:
+        schedule_project(fields, {"state": "next", "start_date": None})
+    except ValueError as e:
+        return bad(str(e))
     project_id = db.insert(conn, "projects", fields)
     try:
+        if fields.get("parent_id"):
+            join_project(project_id, fields["parent_id"])
         project_links_and_tags(project_id, body())
     except (ValueError, TypeError) as e:
         conn.rollback()
@@ -3096,9 +3182,14 @@ def update_project(project_id):
         fields = project_fields(data)
         check_parent(project_id, fields.get("parent_id"))
         place_in_parent(fields, old["parent_id"])
+        schedule_project(fields, old)
         if fields:
             sets = ", ".join(f"{k} = ?" for k in fields)
             conn.execute(f"UPDATE projects SET {sets} WHERE id = ?", (*fields.values(), project_id))
+        if fields.get("state", old["state"]) != old["state"]:
+            carry_state(project_id, old["state"], fields["state"])
+        if fields.get("parent_id") and fields["parent_id"] != old["parent_id"]:
+            join_project(project_id, fields["parent_id"])
         if "deleted_at" in fields:
             trashed(project_id, fields["deleted_at"], old["deleted_at"])
         project_links_and_tags(project_id, data)

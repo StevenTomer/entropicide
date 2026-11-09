@@ -72,6 +72,11 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
 - **Repeats** are encoded strings validated by `valid_repeat`: `daily|weekdays|weekly|monthly|
   yearly`, `every:N[wmy]`, `days:0,2,4` (Mon=0), `nth:(-1|1-4):D`. Server (app.py) and browser
   (app.js `repeatLabel`, `parseEvery`…, quickadd.js) both understand them; change both.
+- **Projects take the task states** (or `done`; `active` is the old name for `next`). Moving one
+  further off (`db.STATE_RANK`) moves what's in it along (app.py `carry_state`, `join_project`,
+  `schedule_project`; app.js mirrors them for offline changes), but nothing holds tasks back by
+  their project's state: each can be moved nearer by hand. `PRAGMA user_version` 4 moved the tasks
+  of Someday/Later projects when this came in.
 - **Task states** are `inbox next soon waiting scheduled someday later`; `next` is shown to
   users as "Queue". Focus is a flag, not a state.
 - **Old "Todo" name:** the app was renamed. Compatibility shims (the `todo` header value,
@@ -80,8 +85,8 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
 - **Blocked by / Related to / subprojects:** `blocked_by` and `related` are plain ids of tasks
   and projects (ids are unique across kinds; `related` items carry their `kind`). Projects nest
   (`parent_id`); a subproject's `step` orders it among its parent's tasks (comparable with their
-  `position`). A project that's blocked, in Someday or Later, or (in a sequential parent) not yet
-  the first step holds back everything in it; `waits_on` / `check_no_loops` refuse
+  `position`). A project that's blocked, completed, or (in a sequential parent) not yet the
+  first step holds back everything in it; `waits_on` / `check_no_loops` refuse
   waits that could never end. Server (`list_tasks`) and browser (`waitingOn`, `projectActive`,
   `laterSteps`, `sequentialBlocked`) must agree on what's blocked.
 - Attachments are blobs in the database (deduplicated by sha256), so the DB file is the

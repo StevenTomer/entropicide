@@ -154,3 +154,63 @@ def test_attachments_table_upgrades(tmp_path):
     assert conn.execute("SELECT id, document_id, name FROM attachments").fetchall() == [(7, 1, "a.txt")]
     conn.execute("DELETE FROM attachments")  # the trigger that drops unused files still works
     assert conn.execute("SELECT COUNT(*) FROM blobs").fetchone()[0] == 0
+
+
+def test_projects_take_the_task_states(app, user_client):
+    """A project's state carries its tasks and subprojects as far as it goes, no further, and
+    any of them can be moved nearer again."""
+    client = user_client("ann")
+    add, project, patch = helpers(client)
+    house = project(name="House")
+    assert house["state"] == "next"
+    paint = add(title="Paint", state="next", project_id=house["id"])["id"]
+    chase = add(title="Chase the builder", state="waiting", project_id=house["id"])["id"]
+    dream = add(title="A conservatory", state="later", project_id=house["id"])["id"]
+    shed = project(name="Shed", parent_id=house["id"])["id"]
+    states = lambda: {i: (x["state"]) for d in data(client) for i, x in d.items()}  # noqa: E731
+    # Further off: those nearer go with it; those further off stay.
+    patch("projects", house["id"], state="someday")
+    assert [states()[i] for i in (paint, chase, dream, shed)] == ["someday", "someday", "later", "someday"]
+    # Moved nearer by hand, a task stays there.
+    patch("tasks", paint, state="next")
+    tasks, _ = data(client)
+    assert tasks[paint]["state"] == "next"
+    # Back to Soon: what went with it comes back (to Soon), Paint goes to Soon as it's nearer,
+    # and Later stays where it is.
+    patch("projects", house["id"], state="soon")
+    assert [states()[i] for i in (paint, chase, dream, shed)] == ["soon", "soon", "later", "soon"]
+    # A task put in it starts no nearer than it is.
+    assert add(title="Sweep", state="next", project_id=house["id"])["state"] == "soon"
+    loose = add(title="Fix the door", state="inbox")["id"]
+    patch("tasks", loose, project_id=house["id"])
+    assert states()[loose] == "soon"
+    # The old name still works; done (and reopened) moves nothing.
+    assert patch("projects", house["id"], state="active").get_json()["state"] == "next"
+    patch("projects", house["id"], state="done")
+    patch("projects", house["id"], state="next")
+    assert states()[dream] == "later"
+    assert patch("projects", house["id"], state="bogus").status_code == 400
+
+
+def test_a_projects_start_date(app, user_client):
+    client = user_client("ann")
+    add, project, patch = helpers(client)
+    trip = project(name="Trip")["id"]
+    pack = add(title="Pack", state="next", project_id=trip)["id"]
+    book = add(title="Book", state="next", project_id=trip, start_date="2026-12-01")["id"]
+    # A start still to come schedules it, and its tasks, not before then.
+    r = client.patch(f"/api/projects/{trip}?now=2026-11-09T09:00", json={"start_date": "2026-11-20"}, headers=H).get_json()
+    assert (r["state"], r["start_date"]) == ("scheduled", "2026-11-20")
+    tasks, _ = data(client)
+    assert (tasks[pack]["state"], tasks[pack]["start_date"]) == ("scheduled", "2026-11-20")
+    assert (tasks[book]["state"], tasks[book]["start_date"]) == ("scheduled", "2026-12-01")
+    # Scheduled needs a start to come; clearing it brings it (and what went with it) back.
+    bad = client.patch(f"/api/projects/{project(name='Other')['id']}?now=2026-11-09T09:00", json={"state": "scheduled"}, headers=H)
+    assert bad.status_code == 400
+    # On the day, it (and the tasks with it) join the Queue.
+    tasks = {t["id"]: t for t in client.get("/api/data?now=2026-11-20T08:00").get_json()["tasks"]}
+    projects = {p["id"]: p for p in client.get("/api/data?now=2026-11-20T08:00").get_json()["projects"]}
+    assert projects[trip]["state"] == "next" and tasks[pack]["state"] == "next" and tasks[book]["state"] == "scheduled"
+    # Further off than Scheduled (Someday) keeps the date but doesn't schedule.
+    r = client.patch(f"/api/projects/{trip}?now=2026-11-20T09:00", json={"state": "someday", "start_date": "2027-01-01"}, headers=H).get_json()
+    assert r["state"] == "someday"

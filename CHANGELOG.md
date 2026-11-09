@@ -62,6 +62,13 @@ Settings → Troubleshooting.
   **Sketch** (pen and ink, in six colours and three sizes, with an eraser and undo; it follows a
   stylus's pressure) or a **Diagram** (boxes, arrows, shapes and words, with Excalidraw built in).
   They're placed like any picture, and *Edit drawing* opens them again to carry on.
+- **Projects use the same lists as tasks:** Inbox, Queue (what was Active), Soon, Waiting,
+  Scheduled, Someday and Later, or Completed. Moving a project further off takes its tasks and
+  subprojects with it (unless they're further off already), and moving it nearer brings them back;
+  any can then be moved nearer on its own. A task added to a project starts no nearer than it.
+- **A project's start date:** one still to come puts it, and what's in it, in Scheduled until then.
+- **Lists by project:** a list's tasks come under their project, with the list's projects shown
+  too (Settings → Lists turns that off on a device, leaving each project's name as a heading).
 - **Fixed:** the Vim editor stayed light in dark mode.
 - **Weekly review:** *Review* in the sidebar walks you through GTD's weekly review: empty the
   Inbox and loose notes, look over what's overdue, waited for and coming up, then each project due

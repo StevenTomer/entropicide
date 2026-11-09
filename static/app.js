@@ -263,7 +263,7 @@ const OFFLINE_NEW = {
     start_time: null, waiting_for: "", energy: null, minutes: null, priority: 0, series_id: null, series_index: null,
     missed: false, completed_at: null, repeat: null, on_miss: null, series_latest: null, blocked_by: [], people: [],
     spent: 0, remind_at: null, remind_before: null }),
-  projects: () => ({ name: "", notes: "", sequential: false, state: "active", focus: false, due_date: null,
+  projects: () => ({ name: "", notes: "", sequential: false, state: "next", focus: false, due_date: null, start_date: null,
     completed_at: null, priority: 0, blocked_by: [], parent_id: null, step: null, review_every: 7, last_reviewed: null,
     review_due: false, stalled: true }),
   notes: () => ({ title: "", body: "", font: "", category_id: null, journal_id: null, entry_date: null, entry_time: null,
@@ -307,6 +307,8 @@ function changeOffline(kind, id, changes) {
   const x = list.find((y) => y.id === id) || extra.find((y) => y.id === id) || offlineGone.get(key);
   if (!x) return null;
   const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
+  const wasState = x.state, wasIn = kind === "tasks" ? x.project_id : x.parent_id;
+  if (kind === "projects" && changes.state === "active") changes = { ...changes, state: "next" };  // (its old name)
   for (const [k, v] of Object.entries(changes)) {
     if (k === "completed") x.completed_at = v ? x.completed_at || stamp : null;
     else if (k === "deleted") x.deleted_at = v ? stamp : null;
@@ -317,6 +319,11 @@ function changeOffline(kind, id, changes) {
     else if (k !== "defer" && k !== "on_miss") x[k] = v;
   }
   if (kind === "projects" && "state" in changes) x.completed_at = changes.state === "done" ? stamp : null;
+  if (kind === "projects") {
+    scheduleProject(x, changes);
+    if (x.state !== wasState) carryState(x, wasState, x.state);
+  }
+  if (kind !== "notes" && (x.project_id ?? x.parent_id ?? null) !== (wasIn ?? null)) joinProject(x, kind === "tasks" ? "task" : "project");
   if (kind === "notes") noteChangedOffline(x, changes, stamp);
   // Like /api/data: only open tasks, and projects and notes not in the trash.
   const gone = kind === "tasks" ? x.completed_at || x.deleted_at : x.deleted_at;
@@ -424,9 +431,58 @@ function projectChain(id) {
   return out;
 }
 
-// A task's projects (at every level) are all active (not Someday, Later or done).
+// A task's projects (at every level) aren't done. (A project's state moves its tasks along
+// with it, rather than hiding them: see carryState.)
 function projectActive(t) {
-  return projectChain(t.project_id).every((p) => p.state === "active");
+  return projectChain(t.project_id).every((p) => p.state !== "done");
+}
+
+// ---- projects' states ----
+// Projects take the task states (and done). These mirror app.py's schedule_project,
+// carry_state and join_project, for changes made offline.
+
+// How far off each state is; moving a project further off takes what's in it along.
+const STATE_RANK = { inbox: 0, next: 0, soon: 1, waiting: 2, scheduled: 2, someday: 3, later: 4 };
+// Being worked on now: not resting in Someday or Later, nor done.
+const projectWorking = (p) => !["someday", "later", "done"].includes(p.state);
+
+function scheduleProject(p, changes) {
+  const future = !!p.start_date && p.start_date > today();
+  if (p.state === "scheduled" && !future) p.state = "next";
+  else if (future && ["inbox", "next", "soon"].includes(p.state) && ("start_date" in changes || !("state" in changes))) p.state = "scheduled";
+}
+
+// Everything in a project, at any depth, as [{kind, x}].
+function projectContents(p, seen = new Set([p.id])) {
+  const out = [];
+  for (const t of S.data.tasks) if (t.project_id === p.id) out.push({ kind: "task", x: t });
+  for (const q of S.data.projects) {
+    if (q.parent_id === p.id && !seen.has(q.id)) { seen.add(q.id); out.push({ kind: "project", x: q }, ...projectContents(q, seen)); }
+  }
+  return out;
+}
+
+function moveToState(x, state, start) {
+  if (state === "scheduled") x.start_date = [x.start_date, start].filter(Boolean).sort().at(-1) || null;
+  else if (x.start_date && x.start_date > today()) x.start_date = null;
+  x.state = state;
+}
+
+function carryState(p, from, to) {
+  if (from === to || from === "done" || to === "done") return;
+  for (const { x } of projectContents(p)) {
+    if (x.completed_at || x.state === "done") continue;
+    if (STATE_RANK[to] > STATE_RANK[x.state]) moveToState(x, to, p.start_date);
+    else if (STATE_RANK[to] < STATE_RANK[from] && x.state === from) moveToState(x, to === "inbox" ? "next" : to, p.start_date);
+  }
+}
+
+function joinProject(x, kind) {
+  const p = projectById(kind === "task" ? x.project_id : x.parent_id);
+  if (!p || p.state === "done" || x.state === "done" || STATE_RANK[p.state] <= (STATE_RANK[x.state] ?? 0)) return;
+  const from = x.state;
+  moveToState(x, p.state, p.start_date);
+  if (kind === "project") carryState(x, from, p.state);
 }
 
 // A project's steps: its tasks and subprojects, in their one order (a task's position, a
@@ -444,7 +500,7 @@ function laterSteps() {
   const later = new Set();
   for (const p of S.data.projects) {
     if (!p.sequential) continue;
-    projectSteps(p).filter((s) => (s.kind === "task" ? s.x.state === "next" : s.x.state === "active"))
+    projectSteps(p).filter((s) => s.x.state === "next")
       .slice(1).forEach((s) => later.add(s.x.id));
   }
   return later;
@@ -520,6 +576,42 @@ function viewTasks(view) {
   }
   if (!view.startsWith("project:")) list = list.filter((t) => inArea(taskArea(t)));
   return list;
+}
+
+// ---- lists by project ----
+// In a list (Inbox, Queue, Soon …), tasks with a project come under it, by where its first one
+// is: under its row, when projects are shown in the lists (a setting, per device) and it's in
+// this list too, else under a heading with its name. Shown, the list's projects with none of
+// their tasks in it come too. Tasks with no project come first.
+
+const projectsInLists = () => load("projectsInLists", "1") === "1";
+
+function groupedByProject(list) {
+  const shown = projectsInLists(), loose = [], order = [], tasks = new Map();
+  for (const t of list) {
+    const p = projectById(t.project_id);
+    if (!p) { loose.push(t); continue; }
+    if (!tasks.has(p.id)) { tasks.set(p.id, []); order.push(p); }
+    tasks.get(p.id).push(t);
+  }
+  if (shown && !S.search && !S.tagFilter.size) {
+    for (const p of byPriority(S.data.projects.filter((q) => q.state === S.view && inArea(q.area_id)))) {
+      if (!tasks.has(p.id)) { tasks.set(p.id, []); order.push(p); }
+    }
+  }
+  let html = loose.map((t) => taskRow(t, {})).join(""), rows = 0;
+  for (const p of order) {
+    if (shown && p.state === S.view) {
+      html += projectRow(p);
+      rows++;
+    } else {
+      const path = projectChain(p.id).reverse().map((q) => q.name).join(" › ");
+      html += `<h3 class="proj-group"><button type="button" class="link open-subproject" data-project="${p.id}"
+        title="Open the project">▤ ${h(path)}</button></h3>`;
+    }
+    html += tasks.get(p.id).map((t) => taskRow(t, { grouped: true })).join("");
+  }
+  return { html, projects: rows };
 }
 
 function byStart(list) {
@@ -682,7 +774,8 @@ function replaceTask(task) {
 // changes that alter which rows there are (so everything's reloaded after them).
 const SAVING = {
   task: { path: "tasks", put: (x) => replaceTask(x), reload: ["completed", "deleted"] },
-  project: { path: "projects", put: (x) => replaceProject(x), reload: ["deleted", "state"] },
+  // (A project's state, start date and parent can move what's in it.)
+  project: { path: "projects", put: (x) => replaceProject(x), reload: ["deleted", "state", "start_date", "parent_id"] },
   note: { path: "notes", put: (x) => upsertNote(x), reload: [] },
 };
 
@@ -705,7 +798,12 @@ function replaceProject(p) {
   if (i >= 0) S.data.projects[i] = p;
 }
 
-function patchProject(id, changes, options) { return patchItem("project", id, changes, options); }
+function patchProject(id, changes, options) {
+  // Scheduled needs a start still to come: tomorrow, as for a task, if it hasn't one.
+  const p = projectById(id);
+  if (changes.state === "scheduled" && !changes.start_date && !(p?.start_date > today())) changes = { ...changes, start_date: addDays(today(), 1) };
+  return patchItem("project", id, changes, options);
+}
 
 // ---- rendering -----------------------------------------------------------
 
@@ -747,7 +845,7 @@ function renderNav() {
   counts.recurring = viewTasks("recurring").length;
   counts.all = viewTasks("all").length;
   // Projects have a page of their own (and Move to › Project); the sidebar just counts them.
-  const projects = S.data.projects.filter((p) => p.state === "active" && inArea(p.area_id)).length;
+  const projects = S.data.projects.filter((p) => projectWorking(p) && inArea(p.area_id)).length;
   $("#nav").innerHTML =
     // Inbox, then Focus, then the other lists; the Calendar is an icon in the toolbar.
     STATES.map(([s, label]) => navItem(s, label, counts[s]) +
@@ -789,12 +887,12 @@ function viewTitle() {
   return STATE_LABEL[S.view] ?? "";
 }
 
-function taskRow(t, { showState }) {
+function taskRow(t, { showState, grouped = false }) {
   const p = t.project_id && projectById(t.project_id);
   const t0 = today();
   const meta = [];
   if (showState && t.state !== "next") meta.push(`<span class="badge">${STATE_LABEL[t.state]}</span>`);
-  if (p && !S.view.startsWith("project:")) meta.push(`<span class="proj">${h(p.name)}</span>`);
+  if (p && !grouped && !S.view.startsWith("project:")) meta.push(`<span class="proj">${h(p.name)}</span>`);
   if (t.state === "scheduled" && t.start_date) meta.push(`<span class="start">Starts ${fmtWhen(t.start_date, t.start_time)}</span>`);
   if (t.waiting_for) meta.push(`<span class="waiting">⧗ ${h(t.waiting_for)}</span>`);
   if (t.due_date) {
@@ -833,7 +931,7 @@ function taskRow(t, { showState }) {
     (S.picked.has(t.id) ? " picked" : "") + (menu.ids.includes(t.id) ? " menu-target" : "") +
     (S.cursor === t.id ? " cursor" : "");
   const done = t.completed_at ? " done" : "";
-  return `<div class="row task${sel}${done}" data-task="${t.id}" draggable="true"${prioTint(t)}>
+  return `<div class="row task${sel}${done}${grouped ? " in-group" : ""}" data-task="${t.id}" draggable="true"${prioTint(t)}>
     <input type="checkbox" class="complete" aria-label="Complete" ${t.completed_at ? "checked" : ""}>
     <button class="star ${t.focus ? "on" : ""}" aria-label="Focus" title="Focus">★</button>
     ${areaIcon(taskArea(t))}
@@ -931,12 +1029,13 @@ function projectRow(p, depth = null, { draggable = false, onPage = draggable } =
     <div class="row-body">
       <div class="title">${h(p.name)}</div>
       <div class="meta">
-        ${depth && p.state !== "active" ? `<span class="badge">${PROJECT_STATES.find(([s]) => s === p.state)?.[1] || p.state}</span>` : ""}
+        ${depth && p.state !== "next" ? `<span class="badge">${PROJECT_STATES.find(([s]) => s === p.state)?.[1] || p.state}</span>` : ""}
         ${p.sequential ? '<span class="badge">Sequential</span>' : ""}
         ${parent ? `<span>in ${h(parent.name)}</span>` : ""}
         ${area ? `<span>${h(area.name)}</span>` : ""}
         <span>${n} open</span>
         ${subs.length ? `<span>${subs.length} subproject${subs.length > 1 ? "s" : ""}</span>` : ""}
+        ${p.state === "scheduled" && p.start_date ? `<span class="start">Starts ${fmtDate(p.start_date)}</span>` : ""}
         ${p.due_date ? `<span class="due">Due ${fmtDate(p.due_date)}</span>` : ""}
         ${waits.length ? `<span class="blocked" title="Waiting on: ${h(waits.map((b) => b.title).join(", "))}">🔒 after ${
           h(waits[0].title)}${waits.length > 1 ? ` +${waits.length - 1}` : ""}</span>` : ""}
@@ -994,7 +1093,7 @@ function renderList() {
 
   if (S.view === "projects") {
     $("#tag-bar").innerHTML = "";
-    const groups = [["active", "Active"], ["someday", "Someday"], ["later", "Later"], ["done", "Completed"]];
+    const groups = PROJECT_STATES;
     // Subprojects show under their project (whatever their status), folded away if asked.
     const tree = (p, depth, seen) => projectRow(p, depth) + (foldedProjects.has(p.id) ? "" :
       projectSteps(p, []).map((st) => st.x).filter((q) => !seen.has(q.id) && seen.add(q.id)).map((q) => tree(q, depth + 1, seen)).join(""));
@@ -1027,12 +1126,6 @@ function renderList() {
         ? '<button class="link complete-project">Mark project complete</button>'
         : '<button class="link reopen-project">Reopen project</button>'}
     </div>`;
-  }
-
-  if (S.view === "someday" || S.view === "later") {
-    const ps = byPriority(S.data.projects.filter((p) => p.state === S.view && inArea(p.area_id)));
-    if (ps.length) html += '<h2 class="group">Projects</h2>' + ps.map(projectRow).join("") +
-      '<h2 class="group">Actions</h2>';
   }
 
   if (S.view === "trash") {
@@ -1070,6 +1163,10 @@ function renderList() {
       const rows = list.filter((t) => t.state === st);
       if (rows.length) html += `<h2 class="group">${label}</h2>` + rows.map((t) => taskRow(t, {})).join("");
     }
+  } else if (STATE_LABEL[S.view]) {
+    const grouped = groupedByProject(list);
+    html += grouped.html;
+    subs = grouped.projects;
   } else if (S.view.startsWith("project:") && !S.search && !S.tagFilter.size) {
     // Its tasks and subprojects, in their one order (drag either to change it); what's done
     // folds away under them.
@@ -1617,8 +1714,10 @@ function renderDetail() {
       ${linkedNotes(p, "project")}
       </div><div class="d-side">
       <section class="d-group" aria-label="About the project">
-        <label>Status <select data-field="state">${options(
-          [["active", "Active"], ["someday", "Someday"], ["later", "Later"], ["done", "Completed"]], p.state)}</select></label>
+        <div class="two">
+          <label>Status <select data-field="state">${options(PROJECT_STATES, p.state)}</select></label>
+          <label title="Not before: it (and what's in it) waits in Scheduled until then">Starts <input type="date" data-field="start_date" value="${h(p.start_date || "")}"></label>
+        </div>
         <label>Area <select data-field="area_id">${options(areaOpts, p.area_id)}</select></label>
         <label title="A project can be a part of a bigger one">Part of <select data-field="parent_id">${options(
           [["", "No project (top level)"], ...parentChoices(p).map((q) => [q.id, q.name])], p.parent_id ?? "")}</select></label>
@@ -1861,7 +1960,7 @@ function reviewHtml() {
     const projects = S.data.projects.filter((p) => ["someday", "later"].includes(p.state) && inArea(p.area_id));
     html += `<p class="muted small">Anything here to start now? Anything to let go of?</p>
       <h2 class="group">Someday and Later projects · ${projects.length}</h2>` +
-      (projects.map((p) => promoteRow(p.name, "project", p.id, p.state, "Make active")).join("") || '<p class="empty small">None.</p>') +
+      (projects.map((p) => promoteRow(p.name, "project", p.id, p.state, "To the Queue")).join("") || '<p class="empty small">None.</p>') +
       `<h2 class="group">Someday and Later tasks · ${tasks.length}</h2>` +
       (tasks.map((t) => promoteRow(t.title, "task", t.id, t.state, "To the Queue")).join("") || '<p class="empty small">None.</p>') +
       '<h2 class="group">New ideas</h2>' + capture;
@@ -1913,9 +2012,9 @@ async function reviewClick(b) {
   if (item && b.classList.contains("review-open-item")) return openRef(item.dataset.id);
   if (item && b.classList.contains("review-promote-btn")) {
     const id = Number(item.dataset.id);
-    if (item.dataset.kind === "project") await patchProject(id, { state: "active" });
+    if (item.dataset.kind === "project") await patchProject(id, { state: "next" });
     else await patchTask(id, { state: "next" });
-    return toast(item.dataset.kind === "project" ? "Active again." : "In the Queue.");
+    return toast("In the Queue.");
   }
   if (b.classList.contains("review-finish-btn")) {
     S.data.user.settings = await api("PATCH", "/me/settings", { last_review: today() });
@@ -3026,7 +3125,7 @@ function paletteItems() {
   add("Command", "Download my data", () => { location.href = BASE + "/api/export"; });
   for (const [view, label] of PAL_LISTS) add("List", label, () => setView(view));
   for (const p of S.data.projects) {
-    add("Project", p.name, () => setView(`project:${p.id}`), p.state === "active" ? "" : p.state === "done" ? "completed" : p.state);
+    add("Project", p.name, () => setView(`project:${p.id}`), p.state === "next" ? "" : p.state === "done" ? "completed" : STATE_LABEL[p.state] || p.state);
   }
   for (const a of S.data.areas) add("Area", a.name, () => setAreas([String(a.id)]), "show only");
   for (const tag of S.data.tags) add("Tag", "#" + tag.name, () => { setView("all"); S.tagFilter.add(tag.name); render(); });
@@ -3706,6 +3805,13 @@ async function openSettings() {
     </section>
 
     <section>
+      <h3>Lists</h3>
+      <p class="muted small">For this device only. Tasks in the lists (Inbox, Queue, Soon …) come under their project.</p>
+      <label class="check"><input type="checkbox" class="projects-in-lists" ${projectsInLists() ? "checked" : ""}>
+        Show projects in the lists too (a Someday project in Someday, and so on), each above its tasks</label>
+    </section>
+
+    <section>
       <h3>Notes editor</h3>
       <p class="muted small">For this device only. <em>Vim</em> edits the text of tasks, projects and notes as its HTML,
         with Vim keys (normal, insert and visual modes, motions, <code>:w</code> to save, <code>:q</code> to close,
@@ -4041,6 +4147,11 @@ function bindSettings() {
   });
   dlg.addEventListener("change", async (e) => {
     const t = e.target;
+    if (t.classList.contains("projects-in-lists")) {
+      save("projectsInLists", t.checked ? "1" : "0");
+      renderList();
+      return;
+    }
     if (t.classList.contains("notes-editor")) {
       save("notesEditor", t.value);
       if (t.value === "vim") loadVim().catch(() => toast("Couldn't load the Vim editor. Are you offline?"));
@@ -4314,14 +4425,14 @@ function moveItem(ts) {
   const chips = STATES.map(([s]) => s).filter((s) => s !== "scheduled").map((s) => ({
     label: STATE_LABEL[s], current: all((t) => t.state === s), run: () => dropOnNav(ts, s),
   }));
-  if (S.data.projects.some((p) => p.state === "active") || ts.some((t) => t.project_id)) {
+  if (S.data.projects.some((p) => p.state !== "done") || ts.some((t) => t.project_id)) {
     chips.push({ label: "Project", sub: () => projectItems(ts) });
   }
   return { label: "Move to", chips };
 }
 
 function projectItems(ts) {
-  const projects = S.data.projects.filter((p) => p.state === "active").map((p) => ({
+  const projects = byPriority(S.data.projects.filter((p) => projectWorking(p))).map((p) => ({
     label: p.name, current: ts.every((t) => t.project_id === p.id), run: () => dropOnNav(ts, `project:${p.id}`),
   }));
   if (ts.some((t) => t.project_id)) {
@@ -4550,7 +4661,8 @@ function markMenuTarget() {
 
 // ---- a project's menu (right-click, or press and hold, a project's row) ----
 
-const PROJECT_STATES = [["active", "Active"], ["someday", "Someday"], ["later", "Later"], ["done", "Completed"]];
+// A project's states: a task's, and Completed.
+const PROJECT_STATES = [...STATES, ["done", "Completed"]];
 
 function openProjectMenu(id, x, y) {
   const p = projectById(id);
@@ -4574,8 +4686,7 @@ function projectMenuItems(p) {
   return [
     { label: "Status", chips: PROJECT_STATES.map(([state, name]) => ({
       label: name, current: p.state === state,
-      run: () => changeProject(p, { state }, `“${p.name}” ${{ active: "is active", someday: "is in Someday", later: "is in Later",
-        done: "is completed" }[state]} now.`),
+      run: () => changeProject(p, { state }, state === "done" ? `“${p.name}” is completed now.` : `“${p.name}” is in ${name} now.`),
     })) },
     S.data.areas.length ? { label: "Area", chips: [
       { label: "None", current: !p.area_id, run: () => changeProject(p, { area_id: null }) },
@@ -4596,7 +4707,7 @@ function projectMenuItems(p) {
     ] },
     { label: p.focus ? "Unstar" : "Star", run: () => changeProject(p, { focus: !p.focus }) },
     { label: "Waypoint", toggle: true, checked: !!p.waypoint, run: () => changeProject(p, { waypoint: !p.waypoint }) },
-    ...(p.state === "active" ? [{ label: "Mark reviewed", hint: p.review_due ? "due" : "", run: () => changeProject(p, { reviewed: true }, `“${p.name}” is reviewed.`) }] : []),
+    ...(projectWorking(p) ? [{ label: "Mark reviewed", hint: p.review_due ? "due" : "", run: () => changeProject(p, { reviewed: true }, `“${p.name}” is reviewed.`) }] : []),
     { label: "Sequential", toggle: true, checked: p.sequential, run: () => changeProject(p, { sequential: !p.sequential }) },
     ...(projectEmpty(p) ? [{ sep: true }, { label: "Make it a task", run: () => convertTo(p.id, "task") },
       { label: "Make it a note", run: () => convertTo(p.id, "note") }] : []),
@@ -4842,8 +4953,8 @@ function bind() {
     if (b?.classList.contains("complete-project") || b?.classList.contains("reopen-project")) {
       const id = Number(b.closest("[data-project]").dataset.project);
       const done = b.classList.contains("complete-project");
-      await patchProject(id, { state: done ? "done" : "active" });
-      if (done) toast("Project completed.", () => patchProject(id, { state: "active" }));
+      await patchProject(id, { state: done ? "done" : "next" });
+      if (done) toast("Project completed.", () => patchProject(id, { state: "next" }));
       return;
     }
     if (row?.dataset.template) {

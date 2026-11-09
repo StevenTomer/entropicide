@@ -22,7 +22,9 @@ function openDrawMenu(button) {
   menu.className = "draw-menu";
   menu.innerHTML = `<button type="button" data-draw="sketch"><b>Sketch</b><span>Pen and ink, by hand</span></button>
     <button type="button" data-draw="diagram"><b>Diagram</b><span>Shapes, arrows and words</span></button>`;
-  document.body.append(menu);
+  // Inside the dialog it's in, if it's in one: an open dialog is drawn above everything else
+  // on the page, which would hide the menu behind it.
+  (button.closest("dialog") || document.body).append(menu);
   const r = button.getBoundingClientRect();
   menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${Math.min(r.bottom + 4, innerHeight - menu.offsetHeight - 8)}px`;

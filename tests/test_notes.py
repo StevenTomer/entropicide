@@ -3,6 +3,7 @@ links to tasks, pinning, files and pictures, journals, the trash, sharing to the
 making a task into a note."""
 import io
 import json
+import re
 import sqlite3
 import zipfile
 
@@ -155,14 +156,14 @@ def test_sharing_to_notes_and_journals(app, user_client):
     n = data(client)["notes"][0]
     pic = n["attachments"][0]["id"]
     assert n["body"] == f'<p>Look at this</p><p><img data-file="{pic}" data-size="l"></p>'
-    # To a journal: today's entry, made once, and added to after that.
+    # To a journal: a new entry each time, at the moment it was shared.
     j = client.post("/api/journals", json={"name": "Diary"}, headers=H).get_json()["id"]
     client.patch("/api/me/settings", json={"share_to": f"journal:{j}"}, headers=H)
     share(client, files=(io.BytesIO(b"one"), "a.jpg"))
     share(client, files=(io.BytesIO(b"two"), "b.png"), title="Lunch")
-    entries = [x for x in data(client)["notes"] if x["journal_id"] == j]
-    assert len(entries) == 1 and len(entries[0]["attachments"]) == 2
-    assert entries[0]["title"] == "Lunch" and entries[0]["body"].count("<img") == 2
+    entries = sorted((x for x in data(client)["notes"] if x["journal_id"] == j), key=lambda x: x["id"])
+    assert [(len(e["attachments"]), e["title"]) for e in entries] == [(1, ""), (1, "Lunch")]
+    assert all(e["entry_date"] and re.fullmatch(r"\d\d:\d\d", e["entry_time"]) for e in entries)
     # Inbox is still the default for everyone else.
     other = user_client("bob")
     assert "shared=" in share(other, text="Call Jo").headers["Location"]
@@ -229,20 +230,53 @@ def test_sharing_asks_each_time(app, user_client):
     assert "shared=" in loc and "ask=1" in loc
     task = data(client)["tasks"][0]
     assert task["state"] == "inbox" and task["title"] == "IMG_1.jpg"
-    # Into today's journal entry: the picture goes in the text, without the file name as a title.
+    # Into a journal, as an entry at that moment: the picture goes in the text, without the
+    # file name as a title.
     j = client.post("/api/journals", json={"name": "Diary"}, headers=H).get_json()["id"]
-    n = client.post(f"/api/tasks/{task['id']}/to-note?today=2026-11-07", json={"journal_id": j}, headers=H).get_json()
+    n = client.post(f"/api/tasks/{task['id']}/to-note?now=2026-11-07T10:30", json={"journal_id": j}, headers=H).get_json()
     pic = n["attachments"][0]["id"]
-    assert (n["journal_id"], n["entry_date"], n["title"]) == (j, "2026-11-07", "")
+    assert (n["id"], n["journal_id"], n["entry_date"], n["entry_time"], n["title"]) == (task["id"], j, "2026-11-07", "10:30", "")
     assert n["body"] == f'<p><img data-file="{pic}" data-size="l"></p>'
     assert data(client)["tasks"] == []
-    # A second share the same day joins the same entry, its words in bold if the entry has a title.
-    client.patch(f"/api/notes/{n['id']}", json={"title": "Saturday"}, headers=H)
+    # Another the same day is an entry of its own.
     share(client, title="Lunch spot", text="Great tacos")
     t2 = data(client)["tasks"][0]["id"]
-    n2 = client.post(f"/api/tasks/{t2}/to-note?today=2026-11-07", json={"journal_id": j}, headers=H).get_json()
-    assert n2["id"] == n["id"] and n2["body"].endswith("<p><b>Lunch spot</b></p><p>Great tacos</p>")
+    n2 = client.post(f"/api/tasks/{t2}/to-note?now=2026-11-07T13:05", json={"journal_id": j}, headers=H).get_json()
+    assert n2["id"] != n["id"] and (n2["title"], n2["entry_time"]) == ("Lunch spot", "13:05")
+    assert n2["body"] == "<p>Great tacos</p>"
     # Someone else's journal can't be used.
     other = user_client("bob")
     t3 = other.post("/api/tasks", json={"title": "x"}, headers=H).get_json()["id"]
     assert other.post(f"/api/tasks/{t3}/to-note", json={"journal_id": j}, headers=H).status_code == 404
+
+
+def test_entries_are_at_a_point_in_time(app, user_client):
+    client = user_client("ann")
+    j = client.post("/api/journals", json={"name": "Diary"}, headers=H).get_json()["id"]
+    new = lambda **n: client.post("/api/notes?now=2026-11-07T09:15", json=n, headers=H).get_json()  # noqa: E731
+    a, b = new(journal_id=j, body="<p>Coffee</p>"), new(journal_id=j, body="<p>Rain</p>", entry_time="16:40")
+    assert (a["entry_date"], a["entry_time"]) == ("2026-11-07", "09:15")  # (now, unless given)
+    assert (b["entry_date"], b["entry_time"]) == ("2026-11-07", "16:40")  # (two on one day)
+    assert client.patch(f"/api/notes/{a['id']}", json={"entry_time": "9am"}, headers=H).status_code == 400
+    out = client.patch(f"/api/notes/{a['id']}", json={"journal_id": None}, headers=H).get_json()
+    assert (out["entry_date"], out["entry_time"]) == (None, None)
+
+
+def test_older_entries_get_their_times(tmp_path):
+    path = str(tmp_path / "db.db")
+    db.init_db(path)
+    conn = db.connect(path)
+    uid = conn.execute("INSERT INTO users (username, password_hash, settings) VALUES ('ann', 'x', ?)",
+                       ('{"timezone": "America/Denver"}',)).lastrowid
+    j = conn.execute("INSERT INTO journals (user_id, name) VALUES (?, 'Diary')", (uid,)).lastrowid
+    on_day = db.insert(conn, "notes", {"user_id": uid, "journal_id": j, "entry_date": "2026-11-07",
+                                       "created_at": "2026-11-07 22:30:00"})  # 15:30 in Denver
+    later = db.insert(conn, "notes", {"user_id": uid, "journal_id": j, "entry_date": "2026-11-01",
+                                      "created_at": "2026-11-07 22:30:00"})  # written days after
+    conn.executescript("DROP VIEW tasks; DROP VIEW projects; DROP VIEW notes; ALTER TABLE note_data DROP COLUMN entry_time;")
+    conn.commit()
+    conn.close()
+    db.init_db(path)
+    conn = db.connect(path)
+    times = dict(conn.execute("SELECT id, entry_time FROM notes").fetchall())
+    assert times == {on_day: "15:30", later: None}

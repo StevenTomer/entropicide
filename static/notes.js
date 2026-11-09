@@ -37,7 +37,7 @@ const categoryById = (id) => S.data.note_categories.find((c) => c.id === id);
 const journalById = (id) => S.data.journals.find((j) => j.id === id);
 const currentJournal = () => journalById(NV.journal) || S.data.journals[0] || null;
 const noteLabel = (n) => n.title || noteText(n).split("\n")[0].slice(0, 80) ||
-  (n.journal_id ? `Entry for ${fmtDate(n.entry_date)}` : "Untitled note");
+  (n.journal_id ? `Entry, ${fmtWhen(n.entry_date, n.entry_time)}` : "Untitled note");
 const utcNow = () => new Date().toISOString().slice(0, 19).replace("T", " ");
 
 function notesViewTitle() {
@@ -70,6 +70,9 @@ function noteHas(n, what) {
 
 // The day a note is on: a journal entry's day, else the day it was written (local).
 const noteDay = (n) => n.entry_date || (n.created_at ? localStamp(n.created_at)[0] : today());
+// When a note is, to order a journal by: its entry's day and time (else when it was written).
+const noteMoment = (n) => `${noteDay(n)} ${n.entry_time || (n.created_at ? localStamp(n.created_at)[1] : "")}`;
+const timeNow = () => nowStamp().slice(11, 16);
 
 // How well n matches the search terms (higher is better), or -1 if it doesn't.
 function noteScore(n, terms) {
@@ -166,7 +169,7 @@ function shownNotes(terms) {
   const edited = (a, b) => (b.updated_at || "").localeCompare(a.updated_at || "") || b.id - a.id;
   if (journalPage) {
     const dir = NV.order === "oldest" ? -1 : 1;
-    scored.sort(by((a, b) => dir * (noteDay(b).localeCompare(noteDay(a)) || (b.created_at || "").localeCompare(a.created_at || "") || b.id - a.id)));
+    scored.sort(by((a, b) => dir * (noteMoment(b).localeCompare(noteMoment(a)) || b.id - a.id)));
   } else if (NV.sort === "created") scored.sort(by((a, b) => (b.created_at || "").localeCompare(a.created_at || "") || b.id - a.id));
   else if (NV.sort === "oldest") scored.sort(by((a, b) => (a.created_at || "").localeCompare(b.created_at || "") || a.id - b.id));
   else if (NV.sort === "title") scored.sort(by((a, b) => (!a.title - !b.title) || noteLabel(a).localeCompare(noteLabel(b), undefined, { sensitivity: "base" })));
@@ -289,14 +292,15 @@ function renderJournal(el, terms, words) {
       </div>` : ""}
   </div>` + (S.search.trim() ? SEARCH_TIP : "");
   if (!j) {
-    el.innerHTML = html + `<p class="empty">A journal is a diary: an entry for each day you write, with pictures where you
-      want them in it. You can keep more than one (a travel journal, say).<br><br>
+    el.innerHTML = html + `<p class="empty">A journal keeps notes at points in time: each entry is something worth saving,
+      when it happened (as many in a day as you like), with pictures where you want them in it. You can keep more than one
+      (a travel journal, say).<br><br>
       <button type="button" class="primary start-journal">Start a journal</button></p>`;
     return;
   }
   const shown = shownNotes(terms).map(([n]) => n);
   if (!shown.length) html += `<p class="empty">${S.search || S.tagFilter.size ? "Nothing matches." :
-    "No entries yet. Press <kbd>N</kbd> or <em>+ New entry</em> to write today's."}</p>`;
+    "No entries yet. Press <kbd>N</kbd> or <em>+ New entry</em> to write one."}</p>`;
   let month = null;
   for (const n of shown) {
     const day = noteDay(n);
@@ -304,7 +308,7 @@ function renderJournal(el, terms, words) {
     if (m !== month) html += `<h2 class="group journal-month">${h(month = m)}</h2>`;
     const color = categoryById(n.category_id)?.color || "";
     html += `<article class="journal-entry" data-note="${n.id}" data-color="${h(color)}" tabindex="0">
-      <div class="entry-day">${h(dayHeading(day))}</div>
+      <div class="entry-day">${h(dayHeading(day))}${n.entry_time ? `, ${h(fmtTime(n.entry_time))}` : ""}</div>
       ${n.title ? `<h3 class="note-title">${markWords(n.title, words)}</h3>` : ""}
       ${words.length ? `<p class="note-snippet">${snippet(noteText(n), words, 400)}</p>`
         : `<div class="note-body${fontClass(n)}">${showBody(n.body) || '<p class="muted">(empty)</p>'}</div>`}
@@ -353,9 +357,9 @@ async function trashNote(id) {
 // A note changed offline (app.js's changeOffline): its edit time, and its links as ids.
 function noteChangedOffline(n, changes, stamp) {
   if (Object.keys(changes).some((k) => ["title", "body", "font", "category_id", "area_id", "journal_id", "entry_date",
-    "tags", "related"].includes(k))) n.updated_at = stamp;
-  if (changes.journal_id && !n.entry_date) n.entry_date = today();
-  if ("journal_id" in changes && !changes.journal_id) n.entry_date = null;
+    "entry_time", "tags", "related"].includes(k))) n.updated_at = stamp;
+  if (changes.journal_id && !n.entry_date) { n.entry_date = today(); n.entry_time ??= timeNow(); }
+  if ("journal_id" in changes && !changes.journal_id) n.entry_date = n.entry_time = null;
 }
 
 // ---- the editor (a dialog over the page, saving as you type) ----
@@ -401,7 +405,7 @@ function draftNote(extra = {}) {
   const journal = S.view === "journal" ? currentJournal() : null;
   const cat = S.view === "notes" && NV.category && NV.category !== "none" ? Number(NV.category) : null;
   return { id: null, title: "", body: "", font: "", category_id: cat, area_id: chosenArea(), journal_id: journal?.id ?? null,
-    entry_date: journal ? today() : null, pinned: false, created_at: null, updated_at: null, deleted_at: null,
+    entry_date: journal ? today() : null, entry_time: journal ? timeNow() : null, pinned: false, created_at: null, updated_at: null, deleted_at: null,
     tags: [...S.tagFilter], attachments: [], related: [], ...extra };
 }
 
@@ -426,7 +430,7 @@ function openSharedNote(id) {
   if (n.journal_id) { NV.journal = n.journal_id; save("journal", n.journal_id); }
   setView(n.journal_id ? "journal" : "notes");
   openNote(n);
-  toast(n.journal_id ? `Added to today's entry in “${journalById(n.journal_id)?.name || "your journal"}”.` : "Added to your notes.");
+  toast(n.journal_id ? `Added to “${journalById(n.journal_id)?.name || "your journal"}”, as a new entry.` : "Added to your notes.");
 }
 
 function openNote(n) {
@@ -458,12 +462,13 @@ function editorHtml(n) {
     <div class="ne-head">
       <select class="ne-category" aria-label="Category">${options([["", "No category"], ...cats.map((c) => [c.id, c.name]),
         ["new", "New category…"]], n.category_id ?? "")}</select>
-      <label class="check ne-entry" title="Put it in a journal, as the entry for a day"><input type="checkbox" class="ne-journal-on"
+      <label class="check ne-entry" title="Put it in a journal, as an entry at a point in time (now, or when you choose)"><input type="checkbox" class="ne-journal-on"
         ${n.journal_id ? "checked" : ""}> Journal entry</label>
       <span class="ne-journal-opts"${n.journal_id ? "" : " hidden"}>
         <select class="ne-journal" aria-label="Journal">${options([...S.data.journals.map((j) => [j.id, j.name]),
           ["new", "New journal…"]], n.journal_id ?? "")}</select>
         <input type="date" class="ne-date" value="${h(n.entry_date || today())}" aria-label="The entry's day">
+        <input type="time" class="ne-time" value="${h(n.entry_time || "")}" aria-label="The entry's time">
       </span>
       <span class="ne-space"></span>
       <button type="button" class="icon ne-pin${n.pinned ? " on" : ""}" aria-pressed="${n.pinned}" title="${n.pinned ? "Unpin" : "Pin"}"
@@ -541,7 +546,7 @@ function saveNote({ force } = {}) {
     let saved;
     if (!n.id) {
       const fresh = { title: n.title, body: n.body, font: n.font, category_id: n.category_id, area_id: n.area_id,
-        journal_id: n.journal_id, entry_date: n.entry_date, pinned: n.pinned, tags: n.tags,
+        journal_id: n.journal_id, entry_date: n.entry_date, entry_time: n.entry_time, pinned: n.pinned, tags: n.tags,
         related: n.related.map((r) => r.id ?? r),
         created_at: ned.created, ...changes };
       if (!force && !fresh.title?.trim() && !fresh.body) { ned.dirty = new Set([...ned.dirty, ...Object.keys(changes)]); return; }
@@ -578,11 +583,14 @@ async function setNoteJournal(on) {
   }
   n.journal_id = on ? (n.journal_id || currentJournal()?.id) : null;
   n.entry_date = on ? (n.entry_date || today()) : null;
+  n.entry_time = on ? (n.entry_time || timeNow()) : null;
   $(".ne-journal-opts", dlg).hidden = !on;
   $(".ne-journal", dlg).innerHTML = options([...S.data.journals.map((j) => [j.id, j.name]), ["new", "New journal…"]], n.journal_id ?? "");
   $(".ne-date", dlg).value = n.entry_date || today();
+  $(".ne-time", dlg).value = n.entry_time || "";
   noteFieldChanged("journal_id");
   noteFieldChanged("entry_date");
+  noteFieldChanged("entry_time");
 }
 
 async function newCategory() {
@@ -651,6 +659,9 @@ function bindNoteDialog(dlg) {
       if (!t.value) return;
       n.entry_date = t.value;
       noteFieldChanged("entry_date");
+    } else if (t.classList.contains("ne-time")) {
+      n.entry_time = t.value || null;  // (none: just the day)
+      noteFieldChanged("entry_time");
     } else if (t.classList.contains("ne-area")) {
       n.area_id = t.value ? Number(t.value) : null;
       noteFieldChanged("area_id");
@@ -793,7 +804,7 @@ function askShared(taskId) {
     <div class="share-choices">
       <button type="button" class="primary" data-to="inbox">📥 A task in the Inbox</button>
       <button type="button" data-to="note">📝 A new note</button>
-      ${S.data.journals.map((j) => `<button type="button" data-to="journal" data-journal="${j.id}">📓 Today's entry in “${h(j.name)}”</button>`).join("")}
+      ${S.data.journals.map((j) => `<button type="button" data-to="journal" data-journal="${j.id}">📓 A new entry in “${h(j.name)}”</button>`).join("")}
     </div>
     <p class="muted small">Closing this leaves it in the Inbox. To stop being asked, choose a place in Settings → Sharing to Entropicide.</p>`;
   dlg.onclick = async (e) => {

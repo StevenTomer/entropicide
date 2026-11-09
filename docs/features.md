@@ -45,8 +45,9 @@ In brief:
   and linked tasks, with `"phrases"`, `-word`, `#tag`, `cat:`, `journal:`, `area:`, `has:`,
   `is:pinned`, `before:` / `after:` / `on:`. Saved as you type, and offline too. A task can
   become a note. Stored as cleaned HTML (`richtext.py`).
-- **Journals:** a note ticked as a journal entry belongs to a journal, on a day; the Journal page
-  reads them by month. As many journals as you like.
+- **Journals:** a note ticked as a journal entry belongs to a journal, at a point in time (a day
+  and, if you like, a time; any number in a day). The Journal page reads them in order, under
+  their months. As many journals as you like.
 - **Areas** (Work, Home, …) filter the whole app from the sidebar dropdown: tick one or several
   (or *No area*); none ticked shows everything. New tasks go in the first area ticked. Each can have an
   SVG icon (Settings → Areas: upload a file, or give a URL to download it from), shown before
@@ -120,7 +121,7 @@ In brief:
   dentist" finds *Call dentist*) ([api.md](api.md): curl, Alexa, Home Assistant, Shortcuts).
 - **Share menu:** the installed app (Android) takes shared pages, text, photos and files as new
   Inbox tasks (`/share`, the manifest's `share_target`), or (Settings → Sharing to Entropicide)
-  as a new note, or added to today's entry in a journal, with pictures placed in the text; or it
+  as a new note, or a new entry in a journal, with pictures placed in the text; or it
   asks each time.
 - **Repeating tasks** start each copy with its checklist unticked, and can carry their
   attachments to each copy (stored once).

@@ -265,7 +265,8 @@ const OFFLINE_NEW = {
     spent: 0, remind_at: null, remind_before: null }),
   projects: () => ({ name: "", notes: "", sequential: false, state: "active", focus: false, due_date: null,
     completed_at: null, priority: 0, blocked_by: [], parent_id: null, step: null }),
-  notes: () => ({ title: "", body: "", font: "", category_id: null, journal_id: null, entry_date: null, pinned: false }),
+  notes: () => ({ title: "", body: "", font: "", category_id: null, journal_id: null, entry_date: null, entry_time: null,
+    pinned: false }),
 };
 
 // Changes op as the server would (near enough) on S.data, and returns what it would reply.
@@ -3452,7 +3453,7 @@ async function openSettings() {
         some text from another app. Pictures shared to a note or journal are placed in its text.</p>
       <label>Put what's shared <select class="share-to">${options([["ask", "Ask each time"], ["inbox", "In the Inbox, as a task"],
         ["note", "In Notes, as a new note"],
-        ...S.data.journals.map((j) => [`journal:${j.id}`, `In the journal “${j.name}” (today's entry)`])],
+        ...S.data.journals.map((j) => [`journal:${j.id}`, `In the journal “${j.name}”, as a new entry`])],
         me.settings.share_to)}</select></label>
     </section>
 

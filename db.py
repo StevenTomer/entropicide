@@ -109,7 +109,10 @@ KINDS = {
         "columns": [
             ("category_id", "INTEGER REFERENCES note_categories(id) ON DELETE SET NULL"),
             ("journal_id", "INTEGER REFERENCES journals(id) ON DELETE SET NULL"),
+            # A journal entry is a note at a point in time: the day, and (HH:MM, the user's
+            # local time) the time, if it has one. Any number of entries can be on a day.
             ("entry_date", "TEXT"),
+            ("entry_time", "TEXT"),
             ("pinned", "INTEGER NOT NULL DEFAULT 0"),
         ],
     },
@@ -345,7 +348,7 @@ CREATE TABLE IF NOT EXISTS document_links (
     CHECK (a < b)
 );
 
--- Notes are grouped in categories; a note in a journal is one of its entries, on its entry_date.
+-- Notes are grouped in categories; a note in a journal is one of its entries, at its entry_date (and entry_time).
 CREATE TABLE IF NOT EXISTS note_categories (
     id       INTEGER PRIMARY KEY,
     user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -504,11 +507,33 @@ def migrate(conn):
         conn.execute("ALTER TABLE users ADD COLUMN digest_sent TEXT")
     if legacy:
         to_documents(conn)
-    elif _is_table(conn, "project_data") and "step" not in {r["name"] for r in conn.execute("PRAGMA table_info(project_data)")}:
+        entry_times(conn)
+    elif "entry_time" not in {r["name"] for r in conn.execute("PRAGMA table_info(note_data)")}:
+        # Entries get a time: when they were written, in the user's time, if that was on their day.
+        conn.execute("ALTER TABLE note_data ADD COLUMN entry_time TEXT")
+        entry_times(conn)
+    if not legacy and "step" not in {r["name"] for r in conn.execute("PRAGMA table_info(project_data)")}:
         # Subprojects take a place among their parent's tasks (after them, to begin with).
         conn.execute("ALTER TABLE project_data ADD COLUMN step REAL")
         conn.execute("UPDATE project_data SET step = (SELECT COALESCE(MAX(t.position), 0) + 1 FROM task_data t "
                      "WHERE t.project_id = project_data.parent_id) + id / 1e9 WHERE parent_id IS NOT NULL")
+
+
+def entry_times(conn):
+    """Journal entries from before entries had times: the time each was written, in its user's
+    time zone (Settings), when that was on the entry's day."""
+    import json
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    for r in conn.execute("SELECT d.id, d.created_at, n.entry_date, u.settings FROM note_data n JOIN documents d ON d.id = n.id "
+                          "JOIN users u ON u.id = d.user_id WHERE n.journal_id IS NOT NULL AND n.entry_time IS NULL").fetchall():
+        try:
+            tz = ZoneInfo(json.loads(r["settings"] or "{}").get("timezone") or "UTC")
+            local = datetime.fromisoformat(r["created_at"].replace(" ", "T") + "+00:00").astimezone(tz)
+        except (ValueError, KeyError):
+            continue
+        if local.date().isoformat() == r["entry_date"]:
+            conn.execute("UPDATE note_data SET entry_time = ? WHERE id = ?", (local.strftime("%H:%M"), r["id"]))
 
 
 def _upgrade_legacy(conn):
@@ -613,14 +638,16 @@ def to_documents(conn):
             conn.execute(f"INSERT INTO documents (id, user_id, kind, title, body, area_id, created_at, updated_at, "
                          f"deleted_at) SELECT id + {p}, user_id, 'project', name, notes, area_id, created_at, created_at, "
                          "deleted_at FROM projects")
+            had = columns("projects")  # (columns that came after: empty)
             conn.execute(f"INSERT INTO project_data (id, {', '.join(own('project'))}) SELECT id + {p}, "
-                         + ", ".join("NULL" if c in ("parent_id", "step") else c for c in own("project")) + " FROM projects")
+                         + ", ".join(c if c in had else "NULL" for c in own("project")) + " FROM projects")
         if has("notes"):
             conn.execute(f"INSERT INTO documents (id, user_id, kind, title, body, font, area_id, created_at, updated_at, "
                          f"deleted_at) SELECT id + {n}, user_id, 'note', title, body, font, area_id, created_at, updated_at, "
                          "deleted_at FROM notes")
+            had = columns("notes")
             conn.execute(f"INSERT INTO note_data (id, {', '.join(own('note'))}) SELECT id + {n}, "
-                         f"{', '.join(own('note'))} FROM notes")
+                         + ", ".join(c if c in had else "NULL" for c in own("note")) + " FROM notes")
 
         # Tags, waits ("Blocked by") and links ("Related to", a note's "Linked to").
         for table, owner in (("task_tags", "task_id"), ("project_tags", f"project_id + {p}"),

@@ -12,11 +12,12 @@ Settings → Troubleshooting.
   their notes); pin the important ones. Sort by when they were written or last edited, filter by
   category, tag and what they have, and search with phrases, `-word`, `#tag`, `cat:`, `has:picture`,
   `before:` and more. They save as you type, offline too.
-- **Journals:** tick *Journal entry* on a note to put it in a journal, on a day. The Journal page
-  reads each journal by month; keep as many as you like.
+- **Journals:** tick *Journal entry* on a note to put it in a journal, at a point in time: a day
+  and a time (now, unless you change it), as many entries in a day as you like. The Journal page
+  reads each journal in order, under its months; keep as many as you like.
 - **Share to notes:** Settings → Sharing to Entropicide can send what you share from your phone
-  (photos especially) to a new note, or to today's entry in a journal, instead of the Inbox; or
-  **ask each time**, offering the Inbox, a new note, or today's entry in each journal.
+  (photos especially) to a new note, or as a new entry in a journal, instead of the Inbox; or
+  **ask each time**, offering the Inbox, a new note, or a new entry in each journal.
 - **Make it a note:** a task can become a note (right-click it, or the button in its details),
   with its notes, tags, files and links.
 - The Trash no longer says "Nothing here" when it only holds projects or notes.

@@ -85,7 +85,7 @@ DEFAULT_SETTINGS = {"defer_options": ["1h", "2h", "6h", "24h", "3d", "1w"], "tim
                     # sent when they end.
                     "quiet_hours": "",
                     # Where the phone's Share menu puts things: inbox (a task), note,
-                    # journal:<id> (today's entry in that journal), or ask (each time)
+                    # journal:<id> (a new entry in that journal), or ask (each time)
                     "share_to": "inbox"}
 # Reminders before a due date: the days a task can choose, and the time of day they come.
 REMIND_BEFORE_DAYS = (1, 2, 3, 7, 14, 30, 60, 90)
@@ -1938,18 +1938,15 @@ def share():
 
 
 def share_to_note(where, title, text, link, files):
-    """What was shared, as a new note (where "note"), or added to the end of today's entry in a
-    journal ("journal:<id>"; a journal since deleted makes a note instead). Pictures are placed
-    in the text, after any words. Returns the note's id; not committed."""
+    """What was shared, as a new note (where "note"), or a new entry in a journal, now
+    ("journal:<id>"; a journal since deleted makes a note instead). Pictures are placed in the
+    text, after any words. Returns the note's id; not committed."""
     conn = db.get_db()
     journal = where.startswith("journal:") and conn.execute(
         "SELECT id FROM journals WHERE id = ? AND user_id = ?", (int(where[8:] or 0), g.user["id"])).fetchone()
     words = richtext.from_text("\n\n".join(x for x in (text, link) if x))
-    if journal:
-        today = datetime.now(ZoneInfo(user_tz(g.user))).date().isoformat()
-        note_id = add_to_entry(journal["id"], today, title[:500], words)
-    else:
-        note_id = db.insert(conn, "notes", {"user_id": g.user["id"], "title": title[:500], "body": words})
+    note_id = db.insert(conn, "notes", {"user_id": g.user["id"], "title": title[:500], "body": words}
+                        | (entry_now(journal["id"]) if journal else {}))
     if files:
         before = conn.execute("SELECT COALESCE(MAX(id), 0) FROM attachments").fetchone()[0]
         save_files(note_id, files, "note")
@@ -2494,12 +2491,12 @@ def trash():
 # --- notes and journals --------------------------------------------------------
 # The Notes page: notes of formatted text (HTML cleaned by richtext.py) with pictures placed
 # in them and other files, in categories (each with a colour), with tags, an area, and links
-# to tasks and projects. A note in a journal is one of its entries, on its entry date.
+# to tasks and projects. A note in a journal is one of its entries, at a point in time (its entry date and time).
 
 # The colours a category can have (notes.js NOTE_COLORS draws them).
 NOTE_COLORS = {"", "red", "orange", "yellow", "green", "teal", "blue", "navy", "purple", "pink", "brown", "gray"}
 # Changes that make a note "edited" (pinning or trashing it doesn't).
-NOTE_EDITS = ("title", "body", "font", "category_id", "area_id", "journal_id", "entry_date",
+NOTE_EDITS = ("title", "body", "font", "category_id", "area_id", "journal_id", "entry_date", "entry_time",
               "tags", "related", "related_projects")  # (related_projects: from older apps)
 
 
@@ -2529,6 +2526,10 @@ def note_fields(data):
             out[key] = check_ref("journals", value)
         elif key == "entry_date":
             out[key] = clean_date(value)
+        elif key == "entry_time":
+            if value not in (None, "") and not TIME_RE.match(str(value)):
+                raise ValueError("times must be HH:MM")
+            out[key] = value or None
         elif key == "pinned":
             out[key] = 1 if value else 0
     return out
@@ -2540,11 +2541,13 @@ def write_note(data, note=None, today=None):
     fields = note_fields(data)
     old = note or {}
     journal = fields.get("journal_id", old.get("journal_id"))
-    # An entry is on a day: today unless given. A note taken out of its journal has none.
+    # An entry is at a point in time: now unless given. A note taken out of its journal has none.
     if journal and not fields.get("entry_date", old.get("entry_date")):
-        fields["entry_date"] = today or client_today()
+        day, hhmm = client_now()
+        fields["entry_date"] = today or day
+        fields.setdefault("entry_time", None if today else hhmm)
     if not journal and old.get("entry_date"):
-        fields["entry_date"] = None
+        fields["entry_date"] = fields["entry_time"] = None
     conn = db.get_db()
     if note is None:
         fields["user_id"] = g.user["id"]
@@ -2658,11 +2661,10 @@ named_list_routes("note_categories", "note-categories")
 named_list_routes("journals", "journals")
 
 
-def note_from_task(t, journal_id=None, today=None):
+def note_from_task(t, journal_id=None):
     """Task t as a note: its title, notes (as text), area, tags, files (pictures placed at the
-    end of the text) and links, as the same document. With journal_id, it's added to the end
-    of today's entry in that journal instead (made if need be), and the task goes. Returns the
-    note's id; not committed."""
+    end of the text) and links, as the same document; with journal_id, as a new entry in that
+    journal, now. Returns the note's id; not committed."""
     conn = db.get_db()
     project = t["project_id"] and owned("projects", t["project_id"])
     area = project["area_id"] if project else t["area_id"]
@@ -2671,16 +2673,9 @@ def note_from_task(t, journal_id=None, today=None):
         "SELECT 1 FROM attachments WHERE document_id = ? AND name = ?", (t["id"], t["title"])).fetchone() else t["title"]
     words = t["notes"]  # (formatted text already, as a note's is)
     files = {r[0] for r in conn.execute("SELECT id FROM attachments WHERE document_id = ?", (t["id"],))}
-    if journal_id:
-        note_id = add_to_entry(journal_id, today or client_today(), title, words, area)
-        conn.execute("INSERT OR IGNORE INTO document_tags SELECT ?, tag_id FROM document_tags WHERE document_id = ?",
-                     (note_id, t["id"]))
-        conn.execute("UPDATE attachments SET document_id = ? WHERE document_id = ?", (note_id, t["id"]))
-        copy_links(t["id"], note_id)
-        conn.execute("DELETE FROM tasks WHERE id = ?", (t["id"],))
-    else:
-        note_id = t["id"]
-        become(t, "note", {"title": title, "body": words, "area_id": area, "updated_at": utcnow()})
+    note_id = t["id"]
+    become(t, "note", {"title": title, "body": words, "area_id": area, "updated_at": utcnow()}
+           | (entry_now(journal_id) if journal_id else {}))
     place_pictures(note_id, files)
     if project:  # linked to its project
         link(note_id, project["id"])
@@ -2700,8 +2695,8 @@ def place_pictures(note_id, ids=None):
 @app.post("/api/tasks/<int:task_id>/to-note")
 @login_required
 def task_to_note(task_id):
-    """Make a task into a note, or, with {"journal_id": id}, add it to today's entry in that
-    journal (see note_from_task). The task itself goes."""
+    """Make a task into a note, or, with {"journal_id": id}, a new entry in that journal (see
+    note_from_task)."""
     t = owned("tasks", task_id)
     data = request.get_json(silent=True) or {}
     journal = data.get("journal_id") and owned("journals", int(data["journal_id"]))
@@ -2714,29 +2709,15 @@ def task_to_note(task_id):
     return jsonify(note_dict(note_id)), 201
 
 
-def add_to_entry(journal_id, today, title, words, area=None):
-    """Adds formatted words to the end of today's entry in a journal (made if need be), with
-    title as the entry's title if it has none, else as a bold line before them. Returns the
-    entry's id; not committed."""
-    conn = db.get_db()
-    note_id = journal_entry_today(journal_id, today)
-    if title and not conn.execute("SELECT title FROM notes WHERE id = ?", (note_id,)).fetchone()[0]:
-        conn.execute("UPDATE notes SET title = ? WHERE id = ?", (title, note_id))
-    elif title:
-        words = f"<p><b>{html.escape(title, quote=False)}</b></p>" + words
-    conn.execute("UPDATE notes SET body = body || ?, area_id = COALESCE(area_id, ?), updated_at = datetime('now') "
-                 "WHERE id = ?", (words, area, note_id))
-    return note_id
-
-
-def journal_entry_today(journal_id, today):
-    """Today's entry in a journal (the newest, if several), made if there isn't one."""
-    conn = db.get_db()
-    row = conn.execute("SELECT id FROM notes WHERE journal_id = ? AND entry_date = ? AND deleted_at IS NULL "
-                       "ORDER BY id DESC LIMIT 1", (journal_id, today)).fetchone()
-    if row:
-        return row["id"]
-    return db.insert(conn, "notes", {"user_id": g.user["id"], "journal_id": journal_id, "entry_date": today})
+def entry_now(journal_id):
+    """The fields that make a note an entry in a journal, at this moment: the time on the
+    user's device if the request says (?now=), else in their time zone."""
+    if request.args.get("now"):
+        day, hhmm = client_now()
+    else:
+        local = datetime.now(ZoneInfo(user_tz(g.user)))
+        day, hhmm = local.date().isoformat(), local.strftime("%H:%M")
+    return {"journal_id": journal_id, "entry_date": day, "entry_time": hhmm}
 
 
 # --- links -----------------------------------------------------------------

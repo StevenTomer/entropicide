@@ -751,7 +751,7 @@ function renderNav() {
   $("#nav").innerHTML =
     // Inbox, then Focus, then the other lists; the Calendar is an icon in the toolbar.
     STATES.map(([s, label]) => navItem(s, label, counts[s]) +
-      (s === "inbox" ? navItem("focus", "★ Focus", counts.focus, "focus") + navItem("review", "Review", reviewDue().length) : "") +
+      (s === "inbox" ? navItem("focus", "★ Focus", counts.focus, "focus") : "") +
       (s === "scheduled" ? navItem("recurring", "Recurring", counts.recurring) : "")).join("") +
     navItem("all", "All", counts.all) +
     `<div class="nav-section">
@@ -759,6 +759,7 @@ function renderNav() {
          <span class="nav-label">Projects</span>${projects ? `<span class="count">${projects}</span>` : ""}</a>
        <button class="icon add-project" title="New project" aria-label="New project">+</button>
      </div>` +
+    navItem("review", "Review", reviewDue().length) +
     navItem("timeline", "Timeline", 0, S.view.startsWith("timeline:") ? "active" : "") +
     navItem("notes", "Notes", 0) +
     navItem("journal", "Journal", 0) +

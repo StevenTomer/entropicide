@@ -210,13 +210,13 @@ def load_user():
 REQUESTED_WITH = {"entropicide", "todo"}
 
 
-KEY_ONLY = {"/api/add", "/api/complete"}
+KEY_ONLY = {"/api/add", "/api/complete", "/api/app/crash"}
 
 
 @app.before_request
 def csrf_check():
-    # API writes must carry a custom header, which a cross-site form can't send. (Not
-    # /api/add or /api/complete, which go by their key alone, never the signed-in user's cookie.)
+    # API writes must carry a custom header, which a cross-site form can't send. (Not those in
+    # KEY_ONLY, which go by their key alone, never the signed-in user's cookie.)
     if (request.path.startswith("/api/") and request.method != "GET" and request.path not in KEY_ONLY
             and request.headers.get("X-Requested-With") not in REQUESTED_WITH):
         abort(403)
@@ -2209,6 +2209,18 @@ def app_add():
 # names them; "next" is the Queue's own name.
 READ_LISTS = {"focus": "Focus", "queue": "Queue", "next": "Queue", "inbox": "Inbox", "soon": "Soon",
               "later": "Later", "someday": "Someday", "waiting": "Waiting", "scheduled": "Scheduled"}
+
+
+@app.post("/api/app/crash")
+@require_key()
+def app_crash():
+    """The Android app saying why it crashed (or what it caught): {"report": the error, with
+    the app's version and the phone}. Goes to the app log (Settings → Troubleshooting)."""
+    report = str((request.get_json(silent=True) or {}).get("report") or "")[:8000]
+    if not report:
+        return bad("Say what happened.")
+    app_log("app-crash", **request_info(), via=g.device["name"], report=report)
+    return "", 204
 
 
 @app.get("/api/read/<name>")

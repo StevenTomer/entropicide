@@ -216,3 +216,13 @@ def test_completing_a_repeating_task_takes_the_oldest_copy(app, user_client):
     assert len(copies) > 1
     r = app.test_client().post("/api/complete", json={"text": "water the plants"}, headers=key)
     assert r.status_code == 200 and r.get_json()["task"]["id"] == copies[0][1]
+
+
+def test_the_app_reports_crashes(app, phone):
+    _, headers = phone
+    anon = app.test_client()
+    assert anon.post("/api/app/crash", json={"report": "x"}).status_code == 401
+    r = anon.post("/api/app/crash", json={"report": "1.0.6 on Android 16\njava.lang.RuntimeException: boom"}, headers=headers)
+    assert r.status_code == 204
+    logged = rows(app, "SELECT detail FROM app_log WHERE kind = 'app-crash'")
+    assert "RuntimeException: boom" in logged[0]["detail"]

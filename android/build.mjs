@@ -562,12 +562,102 @@ public class QuickAddTile extends TileService {
 }
 `);
 
-// Opening the app puts the notification back, if it was swiped away.
+// When the app crashes, it says why: the error goes to the site's app log (Settings →
+// Troubleshooting → App log) with the phone's key, or, if that can't be sent then, the next
+// time the app opens.
+java("CrashReport", `import android.content.Context;
+import android.content.SharedPreferences;
+import android.os.Build;
+import java.io.OutputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import org.json.JSONObject;
+
+final class CrashReport {
+    private static final String URL_ = "https://${ORIGIN}${BASE_PATH}/api/app/crash";
+
+    private CrashReport() {}
+
+    /** Catches what would crash the app, and sends any crash not sent yet. */
+    static void install(Context c) {
+        Context app = c.getApplicationContext();
+        Thread.UncaughtExceptionHandler before = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+            try {
+                String report = describe(error);
+                prefs(app).edit().putString("crash", report).commit();
+                Thread sender = new Thread(() -> send(app, report));
+                sender.start();
+                sender.join(3000);  // (a moment to send it before the app goes)
+            } catch (Throwable ignored) {
+                // (nothing more can be done)
+            }
+            if (before != null) before.uncaughtException(thread, error);
+        });
+        String waiting = prefs(app).getString("crash", null);
+        if (waiting != null) new Thread(() -> send(app, waiting)).start();
+    }
+
+    /** Reports an error that was caught (the app carried on). */
+    static void caught(Context c, Throwable error) {
+        Context app = c.getApplicationContext();
+        String report = "(caught) " + describe(error);
+        new Thread(() -> send(app, report)).start();
+    }
+
+    private static SharedPreferences prefs(Context c) {
+        return c.getSharedPreferences("crash", Context.MODE_PRIVATE);
+    }
+
+    private static String describe(Throwable error) {
+        StringWriter out = new StringWriter();
+        error.printStackTrace(new PrintWriter(out));
+        String trace = out.toString();
+        return "${versionName} on Android " + Build.VERSION.RELEASE + " (" + Build.VERSION.SDK_INT + "), "
+                + Build.MANUFACTURER + " " + Build.MODEL + "\\n" + (trace.length() > 6000 ? trace.substring(0, 6000) : trace);
+    }
+
+    private static void send(Context c, String report) {
+        String key = QuickAdd.key(c);
+        if (key == null) return;
+        try {
+            HttpURLConnection http = (HttpURLConnection) new URL(URL_).openConnection();
+            http.setConnectTimeout(5000);
+            http.setReadTimeout(5000);
+            http.setRequestMethod("POST");
+            http.setDoOutput(true);
+            http.setRequestProperty("Content-Type", "application/json");
+            http.setRequestProperty("Authorization", "Bearer " + key);
+            try (OutputStream body = http.getOutputStream()) {
+                body.write(new JSONObject().put("report", report).toString().getBytes(StandardCharsets.UTF_8));
+            }
+            if (http.getResponseCode() < 300 && report.equals(prefs(c).getString("crash", null))) {
+                prefs(c).edit().remove("crash").apply();
+            }
+            http.disconnect();
+        } catch (Exception ignored) {
+            // (kept, to try again next time)
+        }
+    }
+}
+`);
+
+const application = path.join(javaDir, "Application.java");
+const applicationSrc = fs.readFileSync(application, "utf8");
+if (!applicationSrc.includes("super.onCreate();")) throw new Error("Application changed");
+fs.writeFileSync(application, applicationSrc.replace("super.onCreate();",
+  "super.onCreate();\n      CrashReport.install(this);"));
+
+// Opening the app puts the notification back, if it was swiped away (and a problem with that
+// is reported, not let stop the app from opening).
 const launcher = path.join(javaDir, "LauncherActivity.java");
 const launcherSrc = fs.readFileSync(launcher, "utf8");
 if (!launcherSrc.includes("super.onCreate(savedInstanceState);")) throw new Error("LauncherActivity changed");
 fs.writeFileSync(launcher, launcherSrc.replace("super.onCreate(savedInstanceState);",
-  "super.onCreate(savedInstanceState);\n        QuickAdd.show(this, null);"));
+  "super.onCreate(savedInstanceState);\n        try {\n            QuickAdd.show(this, null);\n        } catch (Throwable e) {\n            CrashReport.caught(this, e);\n        }"));
 
 fs.mkdirSync(path.join(SRC, "res", "drawable"), { recursive: true });
 fs.writeFileSync(path.join(SRC, "res", "drawable", "ic_tile_add.xml"),

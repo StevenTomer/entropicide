@@ -58,6 +58,8 @@ Settings → Troubleshooting.
   a task now keeps it the same item, so links to it, and what waited on it, simply stay.
 - Moving a task into a project that waits on it, or a project into one it waits on, is refused (it
   could never finish).
+- **Text sizes:** a size list in the editor (Small, Normal, Large, Larger, Huge), for the words
+  selected or what you type next, in tasks, projects and notes alike.
 - **Search tasks like notes:** all the words, anywhere (title, text, tags, project, files,
   people), `"a phrase"`, `-word`, `#tag`, `project:`, `area:`, `in:queue`, `is:overdue` /
   `blocked` / `focus`, `has:checklist` / `file` / `reminder`, and `before:` / `after:` / `on:today`

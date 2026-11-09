@@ -23,6 +23,8 @@ const NOTE_RENAME = { h4: "h3", h5: "h3", h6: "h3", section: "div", article: "di
   main: "div", figure: "div", figcaption: "div", table: "div", tbody: "div", thead: "div", tr: "div", dl: "div",
   dt: "div", dd: "div" };
 const FONT_NAMES = NOTE_FONTS.map(([v]) => v).filter(Boolean);
+// Sizes words can be (richtext.SIZES, and 3, the normal size).
+const FONT_SIZES = [["2", "Small"], ["3", "Normal size"], ["4", "Large"], ["5", "Larger"], ["6", "Huge"]];
 
 // One of NOTE_FONTS for a CSS font-family list, if it's clearly one of them (richtext.font_from_family).
 function fontFromFamily(family) {
@@ -72,9 +74,10 @@ function cleanNoteHtml(html) {
       const href = (node.getAttribute("href") || "").trim();
       if (/^(https?:\/\/|mailto:)[^\s"'<>]+$/i.test(href)) opens.push(["a", ` href="${h(href)}" target="_blank" rel="noopener noreferrer"`]);
     } else if (tag === "font") {
-      const f = node.getAttribute("face") || "";
+      const f = node.getAttribute("face") || "", size = node.getAttribute("size");
       const face = FONT_NAMES.includes(f) ? f : fontFromFamily(f);
-      if (face) opens.push(["font", ` face="${face}"`]);
+      const sized = FONT_SIZES.some(([v]) => v === size && v !== "3");
+      if (face || sized) opens.push(["font", (face ? ` face="${face}"` : "") + (sized ? ` size="${size}"` : "")]);
     } else if (NOTE_INLINE[tag]) opens.push([NOTE_INLINE[tag], ""]);
     opens.push(...styleTags(node.getAttribute("style")));
     const inner = [...(tag === "template" ? [] : node.childNodes)].map(walk).join("");
@@ -154,6 +157,7 @@ function editorText(host) {
 function editorTools({ font = null } = {}) {
   return `<div class="ne-tools" role="toolbar" aria-label="Formatting">
       ${font === null ? "" : `<select class="ne-font" aria-label="Font" title="Font: of the words selected, or of the whole note">${options(NOTE_FONTS, font)}</select>`}
+      <select class="ne-size" aria-label="Size" title="Size: of the words selected, or of what you type next">${options(FONT_SIZES, "3")}</select>
       <button type="button" data-cmd="bold" title="Bold (Ctrl+B)" aria-label="Bold"><b>B</b></button>
       <button type="button" data-cmd="italic" title="Italic (Ctrl+I)" aria-label="Italic"><i>I</i></button>
       <button type="button" data-cmd="underline" title="Underline (Ctrl+U)" aria-label="Underline"><u>U</u></button>
@@ -276,6 +280,9 @@ function bindEditor(root, host) {
     } else if (t.classList.contains("ne-font")) {
       use();
       setFont(t.value);
+    } else if (t.classList.contains("ne-size")) {
+      use();
+      setSize(t.value);
     }
   });
   root.addEventListener("keydown", (e) => {
@@ -547,6 +554,10 @@ function markTools() {
     b.classList.toggle("on", !!on);
   }
   const anchor = getSelection().anchorNode;
+  const size = $(".ne-size", ed.root);
+  const sized = anchor && editorBody().contains(anchor) && (anchor.nodeType === 1 ? anchor : anchor.parentNode).closest?.("font[size]");
+  if (size) size.value = sized && editorBody().contains(sized) && FONT_SIZES.some(([v]) => v === sized.getAttribute("size"))
+    ? sized.getAttribute("size") : "3";
   const font = $(".ne-font", ed.root);
   if (!font) return;
   const face = anchor && editorBody().contains(anchor) && (anchor.nodeType === 1 ? anchor : anchor.parentNode).closest?.("font[face]");
@@ -591,6 +602,16 @@ function toggleChecklist() {
   const ul = getSelection().anchorNode && (getSelection().anchorNode.nodeType === 1
     ? getSelection().anchorNode : getSelection().anchorNode.parentNode).closest?.("ul");
   if (ul && editorBody().contains(ul)) ul.setAttribute("data-check", "");
+}
+
+// The words selected in a size, or what's typed next if none are (the browser's editor carries
+// it on as you type). Normal (3) is dropped when it's saved, leaving the text's own size.
+function setSize(value) {
+  restoreRange();
+  document.execCommand("styleWithCSS", false, false);
+  document.execCommand("fontSize", false, value);
+  ed.changed();
+  markTools();
 }
 
 function setFont(value) {

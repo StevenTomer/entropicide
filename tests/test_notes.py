@@ -42,6 +42,9 @@ def test_formatted_text_is_cleaned():
                  'data-behind="yes">') == '<img data-file="13">'
     assert clean('<img data-file="13" data-orig="12" data-crop="2000,0,0,0" data-rotate="45" data-opacity="3">') == \
         '<img data-file="13" data-orig="12">'
+    # Sizes (not the normal one, 3), with or without a font.
+    assert clean('<font size="6">a</font><font size="3">b</font><font size="9">c</font><font face="serif" size="2">d</font>') == \
+        '<font size="6">a</font>bc<font face="serif" size="2">d</font>'
     # Checklists, and ticked items.
     assert clean('<ul data-check="" class="x"><li data-done="1">a</li><li data-done="yes">b</li></ul><ul data-done="1">'
                  '<li>c</li></ul>') == '<ul data-check><li data-done="1">a</li><li>b</li></ul><ul><li>c</li></ul>'

@@ -13,6 +13,9 @@ from html.parser import HTMLParser
 
 # Typefaces a note (or a stretch of one) can be in: <font face="serif">, styled in app.css.
 FONTS = ("sans", "serif", "mono", "hand", "round", "narrow")
+# Sizes words can be (<font size="5">, as the browser's editor writes them; app.css sizes them
+# against the text around): small, large, larger, huge. 3, the normal size, isn't kept.
+SIZES = ("2", "4", "5", "6")
 # How wide a picture placed in a note shows: small, medium, or the width of the note.
 IMAGE_SIZES = ("s", "m", "l")
 CROP_RE = re.compile(r"^\d{1,4}(,\d{1,4}){3}$")
@@ -127,10 +130,10 @@ class _Cleaner(HTMLParser):
                 written.append(("a", f' href="{html.escape(href)}" target="_blank" rel="noopener noreferrer"'))
         elif tag == "font":
             face = attrs.get("face", "")
-            if face in FONTS:
-                written.append(("font", f' face="{face}"'))
-            elif face_from := font_from_family(face):
-                written.append(("font", f' face="{face_from}"'))
+            face = face if face in FONTS else font_from_family(face)
+            size = attrs.get("size") if attrs.get("size") in SIZES else None
+            if face or size:
+                written.append(("font", (f' face="{face}"' if face else "") + (f' size="{size}"' if size else "")))
         elif tag in INLINE and tag != "span":
             written.append(({"strong": "b", "em": "i", "strike": "s", "del": "s"}.get(tag, tag), ""))
         written += _style_tags(attrs.get("style"))

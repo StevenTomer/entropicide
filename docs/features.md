@@ -64,7 +64,7 @@ In brief:
   `nov 5`, `5 nov`, `11/5`, `2026-11-05`; times `3pm`, `3:30 pm`, `15:00`, `noon`, `at 3`.
   A line under the box shows how it was read before you press Enter.
 - **Formatted notes** on tasks and projects, in the same editor as notes: bold, italic, underline,
-  strike, headings, lists, tickable checklists (in the details, on the row, in Focus mode), quotes,
+  strike, sizes, headings, lists, tickable checklists (in the details, on the row, in Focus mode), quotes,
   links and pictures placed in the text; or edit the HTML directly. Titles take a little Markdown.
 - **Vim keys** (Settings → Notes editor, per device), editing the text's HTML, with `:check` to
   tick a checklist item and `:item` to add one: CodeMirror 5.65.21 with its Vim

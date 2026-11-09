@@ -58,6 +58,10 @@ Settings → Troubleshooting.
   a task now keeps it the same item, so links to it, and what waited on it, simply stay.
 - Moving a task into a project that waits on it, or a project into one it waits on, is refused (it
   could never finish).
+- **Weekly review:** *Review* in the sidebar walks you through GTD's weekly review: empty the
+  Inbox and loose notes, look over what's overdue, waited for and coming up, then each project due
+  for a look (stalled ones flagged), and Someday and Later. Projects come up every week by default
+  (or every 2 or 4 weeks, or never), and a weekly reminder can be set in Settings.
 - **A project's completed tasks and subprojects** are listed at the bottom of its page, under
   *Completed* (folded away until opened; it stays open on that device). Untick one to reopen it.
 - **Timelines:** mark tasks, projects, notes and journal entries as **waypoints** (⚑) and see them

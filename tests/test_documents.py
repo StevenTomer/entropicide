@@ -358,3 +358,28 @@ def test_a_projects_completed_tasks_and_subprojects(app, user_client):
     done = client.get(f"/api/projects/{house}/completed").get_json()
     assert sorted(t["title"] for t in done["tasks"]) == ["Paint", "Sweep"] and [x["name"] for x in done["projects"]] == ["Shed"]
     assert user_client("bob").get(f"/api/projects/{house}/completed").status_code == 404
+
+
+def test_weekly_review_of_projects(app, user_client):
+    client = user_client("ann")
+    project = lambda **p: client.post("/api/projects?now=2026-11-09T09:00", json=p, headers=H).get_json()  # noqa: E731
+    house = project(name="House")
+    assert house["review_due"] and house["stalled"]  # (never reviewed; nothing to do next)
+    client.post("/api/tasks", json={"title": "Paint", "state": "next", "project_id": house["id"]}, headers=H)
+    garden = project(name="Garden", review_every=14)
+    client.post("/api/tasks", json={"title": "Some day: a pond", "state": "someday", "project_id": garden["id"]}, headers=H)
+    data = lambda now: {p["name"]: p for p in client.get(f"/api/data?now={now}").get_json()["projects"]}  # noqa: E731
+    assert not data("2026-11-09T09:00")["House"]["stalled"] and data("2026-11-09T09:00")["Garden"]["stalled"]
+    # Reviewed: not due again until its interval has passed.
+    for p in (house, garden):
+        client.patch(f"/api/projects/{p['id']}?now=2026-11-09T09:00", json={"reviewed": True}, headers=H)
+    assert not data("2026-11-15T09:00")["House"]["review_due"]
+    assert data("2026-11-16T09:00")["House"]["review_due"] and not data("2026-11-16T09:00")["Garden"]["review_due"]
+    assert data("2026-11-23T09:00")["Garden"]["review_due"]
+    # Never reviewed, or not active: not due.
+    client.patch(f"/api/projects/{house['id']}", json={"review_every": 0}, headers=H)
+    client.patch(f"/api/projects/{garden['id']}", json={"state": "someday"}, headers=H)
+    assert not any(p["review_due"] for p in data("2026-12-30T09:00").values())
+    # When the whole review was last done.
+    assert client.patch("/api/me/settings", json={"last_review": "2026-11-09"}, headers=H).get_json()["last_review"] == "2026-11-09"
+    assert client.patch("/api/me/settings", json={"review_day": "9"}, headers=H).status_code == 400

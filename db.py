@@ -100,6 +100,9 @@ KINDS = {
             ("completed_at", "TEXT"),
             # The template it was made from (or saved as), to update it from the project.
             ("template_id", "INTEGER REFERENCES templates(id) ON DELETE SET NULL"),
+            # The weekly review: how often it's looked over (days; 0 never), and when it last was.
+            ("review_every", "INTEGER NOT NULL DEFAULT 7"),
+            ("last_reviewed", "TEXT"),
         ],
     },
     "note": {
@@ -521,6 +524,10 @@ def migrate(conn):
         conn.execute("ALTER TABLE documents ADD COLUMN waypoint INTEGER NOT NULL DEFAULT 0")
     if "archived_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(note_data)")}:
         conn.execute("ALTER TABLE note_data ADD COLUMN archived_at TEXT")
+    project_cols = {r["name"] for r in conn.execute("PRAGMA table_info(project_data)")}
+    if "review_every" not in project_cols:
+        conn.execute("ALTER TABLE project_data ADD COLUMN review_every INTEGER NOT NULL DEFAULT 7")
+        conn.execute("ALTER TABLE project_data ADD COLUMN last_reviewed TEXT")
     if not legacy and "step" not in {r["name"] for r in conn.execute("PRAGMA table_info(project_data)")}:
         # Subprojects take a place among their parent's tasks (after them, to begin with).
         conn.execute("ALTER TABLE project_data ADD COLUMN step REAL")
@@ -637,6 +644,10 @@ def to_documents(conn):
         n = p + (conn.execute("SELECT COALESCE(MAX(id), 0) FROM projects").fetchone()[0] if has("projects") else 0)
         own = lambda kind: [c for c, _ in KINDS[kind]["columns"]]  # noqa: E731
 
+        def taken(kind, had):  # each column from the old table, or (one that came after) its default
+            return ", ".join(c if c in had else (m[1] if (m := re.search(r"DEFAULT (\S+)", ddl)) else "NULL")
+                             for c, ddl in KINDS[kind]["columns"])
+
         conn.execute("INSERT INTO documents (id, user_id, kind, title, body, area_id, created_at, updated_at, deleted_at) "
                      "SELECT id, user_id, 'task', title, notes, area_id, created_at, updated_at, deleted_at FROM tasks")
         conn.execute(f"INSERT INTO task_data (id, {', '.join(own('task'))}) SELECT id, "
@@ -647,16 +658,14 @@ def to_documents(conn):
             conn.execute(f"INSERT INTO documents (id, user_id, kind, title, body, area_id, created_at, updated_at, "
                          f"deleted_at) SELECT id + {p}, user_id, 'project', name, notes, area_id, created_at, created_at, "
                          "deleted_at FROM projects")
-            had = columns("projects")  # (columns that came after: empty)
             conn.execute(f"INSERT INTO project_data (id, {', '.join(own('project'))}) SELECT id + {p}, "
-                         + ", ".join(c if c in had else "NULL" for c in own("project")) + " FROM projects")
+                         + taken("project", columns("projects")) + " FROM projects")
         if has("notes"):
             conn.execute(f"INSERT INTO documents (id, user_id, kind, title, body, font, area_id, created_at, updated_at, "
                          f"deleted_at) SELECT id + {n}, user_id, 'note', title, body, font, area_id, created_at, updated_at, "
                          "deleted_at FROM notes")
-            had = columns("notes")
             conn.execute(f"INSERT INTO note_data (id, {', '.join(own('note'))}) SELECT id + {n}, "
-                         + ", ".join(c if c in had else "NULL" for c in own("note")) + " FROM notes")
+                         + taken("note", columns("notes")) + " FROM notes")
 
         # Tags, waits ("Blocked by") and links ("Related to", a note's "Linked to").
         for table, owner in (("task_tags", "task_id"), ("project_tags", f"project_id + {p}"),

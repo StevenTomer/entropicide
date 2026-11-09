@@ -86,7 +86,10 @@ DEFAULT_SETTINGS = {"defer_options": ["1h", "2h", "6h", "24h", "3d", "1w"], "tim
                     "quiet_hours": "",
                     # Where the phone's Share menu puts things: inbox (a task), note,
                     # journal:<id> (a new entry in that journal), or ask (each time)
-                    "share_to": "inbox"}
+                    "share_to": "inbox",
+                    # The weekly review: a reminder on a day (0 Monday … 6 Sunday; "" none) at a
+                    # time, the day it was last sent, and the day the last review was done.
+                    "review_day": "", "review_time": "16:00", "review_reminded": "", "last_review": ""}
 # Reminders before a due date: the days a task can choose, and the time of day they come.
 REMIND_BEFORE_DAYS = (1, 2, 3, 7, 14, 30, 60, 90)
 REMIND_BEFORE_TIME = "09:00"
@@ -857,8 +860,22 @@ def projects_json(rows):
                 f"SELECT parent_id, COUNT(*) FROM projects WHERE parent_id IN ({marks_for(ids)}) AND state = 'done' "
                 "AND deleted_at IS NULL GROUP BY parent_id", ids * 2):
             done[r["id"]] = done.get(r["id"], 0) + r["n"]
-    return with_shared(rows, "project", lambda r: dict(r) | {"focus": bool(r["focus"]), "sequential": bool(r["sequential"]),
-                                                              "done": done.get(r["id"], 0)})
+    # The weekly review: due when it's active and its interval has passed since it was last
+    # looked at (or it never has been); stalled when it has nothing to do next (no Queue,
+    # Soon, Waiting or Scheduled task, and no active subproject).
+    today, moving = user_today(), set()
+    if ids:
+        moving = {r[0] for r in db.get_db().execute(
+            f"SELECT project_id FROM tasks WHERE project_id IN ({marks_for(ids)}) AND completed_at IS NULL "
+            "AND deleted_at IS NULL AND state IN ('next', 'soon', 'waiting', 'scheduled') UNION "
+            f"SELECT parent_id FROM projects WHERE parent_id IN ({marks_for(ids)}) AND state = 'active' "
+            "AND deleted_at IS NULL", ids * 2)}
+    def shape(r):
+        due = r["state"] == "active" and r["review_every"] > 0 and (
+            not r["last_reviewed"] or date.fromisoformat(r["last_reviewed"]) + timedelta(days=r["review_every"]) <= date.fromisoformat(today))
+        return dict(r) | {"focus": bool(r["focus"]), "sequential": bool(r["sequential"]), "done": done.get(r["id"], 0),
+                          "review_due": due, "stalled": r["state"] == "active" and r["id"] not in moving}
+    return with_shared(rows, "project", shape)
 
 
 @app.get("/api/projects/<int:project_id>/completed")
@@ -887,6 +904,13 @@ def clean_date(value):
 
 def client_today():
     return client_now()[0]
+
+
+def user_today():
+    """The user's date: their device's, if the request says (?now=), else in their time zone."""
+    if request.args.get("now") or request.args.get("today"):
+        return client_today()
+    return datetime.now(ZoneInfo(user_tz(g.user))).date().isoformat()
 
 
 def client_now():
@@ -2977,6 +3001,13 @@ def project_fields(data):
             out[key] = check_ref("projects", value)
         elif key == "step":
             out[key] = None if value in (None, "") else float(value)
+        elif key == "review_every":
+            value = int(value or 0)
+            if not 0 <= value <= 365:
+                raise ValueError("review_every is a number of days, up to 365 (0: never)")
+            out[key] = value
+        elif key == "reviewed":
+            out["last_reviewed"] = client_today() if value else None
     return out
 
 
@@ -3218,6 +3249,16 @@ def update_settings():
         if data["digest_time"] not in ("", None) and not TIME_RE.match(str(data["digest_time"])):
             return bad("The summary time must be HH:MM.")
         settings["digest_time"] = data["digest_time"] or ""
+    if "review_day" in data:
+        if str(data["review_day"] or "") not in ("", *map(str, range(7))):
+            return bad("The review day is 0 (Monday) to 6 (Sunday), or none.")
+        settings["review_day"] = str(data["review_day"] or "")
+    if "review_time" in data:
+        if not TIME_RE.match(str(data["review_time"] or "")):
+            return bad("The review time must be HH:MM.")
+        settings["review_time"] = data["review_time"]
+    if "last_review" in data:
+        settings["last_review"] = clean_date(data["last_review"]) or ""
     if "share_to" in data:
         where = str(data["share_to"] or "inbox")
         if where.startswith("journal:"):
@@ -3638,6 +3679,17 @@ def send_reminders(now=None):
                 head += (" · " if head and starred else "") + (f"{starred} starred" if starred else "")
                 notify(uid, {"title": "Today: " + head, "tag": "digest",
                              "body": ", ".join(d["title"] for d in due[:5]) + (" …" if len(due) > 5 else "")})
+        # The weekly review's reminder, on its day, at (or within 3 hours after) its time.
+        when = settings["review_time"]
+        if (settings["review_day"] != "" and local.weekday() == int(settings["review_day"])
+                and settings["review_reminded"] != today and when <= local.strftime("%H:%M")
+                and local - local.replace(hour=int(when[:2]), minute=int(when[3:])) < timedelta(hours=3)):
+            saved = json.loads(user["settings"] or "{}") | {"review_reminded": today}
+            conn.execute("UPDATE users SET settings = ? WHERE id = ?", (json.dumps(saved), uid))
+            conn.commit()
+            last = settings["last_review"]
+            notify(uid, {"title": "Time for your weekly review", "tag": "review",
+                         "body": f"Last one {last}." if last else "Open Review in Entropicide to begin."})
 
 
 @app.before_request

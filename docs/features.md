@@ -45,6 +45,8 @@ In brief:
   and linked tasks, with `"phrases"`, `-word`, `#tag`, `cat:`, `journal:`, `area:`, `has:`,
   `is:pinned`, `before:` / `after:` / `on:`. Saved as you type, and offline too. A task can
   become a note. Stored as cleaned HTML (`richtext.py`).
+- **Weekly review:** a guided GTD review (get clear, get current, each project due, Someday and
+  Later), with a review interval per project, stalled projects flagged, and a weekly reminder.
 - **Timelines:** tasks, projects, notes and entries marked as waypoints (⚑) on a line through
   today (done behind, coming ahead): for everything, a project, or a journal; or everything dated.
   Waypoints also make a strip across the Notes and Journal pages to jump to.

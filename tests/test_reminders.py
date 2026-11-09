@@ -95,3 +95,20 @@ def test_reminder_before_due_says_when(app, make_user, monkeypatch):
         assert sent == []
         entropicide.send_reminders(local("2026-11-01T09:01"))
         assert sent == ["⏰ Due in 30 days: Renew passport"]
+
+
+def test_weekly_review_reminder(app, make_user, monkeypatch):
+    sent = []
+    monkeypatch.setattr(entropicide, "notify", lambda uid, message: sent.append(message["title"]) or 1)
+    user = make_user("ann", settings=json.dumps({"timezone": "America/Denver", "digest_time": "",
+                                                 "review_day": "4", "review_time": "16:00"}))  # Fridays
+    with app.app_context():
+        conn = entropicide.db.get_db()
+        conn.execute("INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES (?, 'https://x', 'k', 'a')",
+                     (user["id"],))
+        conn.commit()
+    for t in ("2026-11-12T16:30", "2026-11-13T15:59", "2026-11-13T16:05", "2026-11-13T17:00", "2026-11-20T20:00"):
+        with app.app_context():
+            entropicide.send_reminders(local(t))
+    # Once, on Friday at 4; not again that day, nor a week later more than 3 hours after.
+    assert sent == ["Time for your weekly review"]

@@ -264,7 +264,8 @@ const OFFLINE_NEW = {
     missed: false, completed_at: null, repeat: null, on_miss: null, series_latest: null, blocked_by: [], people: [],
     spent: 0, remind_at: null, remind_before: null }),
   projects: () => ({ name: "", notes: "", sequential: false, state: "active", focus: false, due_date: null,
-    completed_at: null, priority: 0, blocked_by: [], parent_id: null, step: null }),
+    completed_at: null, priority: 0, blocked_by: [], parent_id: null, step: null, review_every: 7, last_reviewed: null,
+    review_due: false, stalled: true }),
   notes: () => ({ title: "", body: "", font: "", category_id: null, journal_id: null, entry_date: null, entry_time: null,
     pinned: false, archived_at: null }),
 };
@@ -735,7 +736,7 @@ function setAreas(ids) {
 
 function navItem(view, label, count, extraClass = "") {
   const active = S.view === view ? " active" : "";
-  return `<a href="#" class="nav-item${active} ${extraClass}" data-view="${h(view)}"${["recurring", "all", "calendar", "links", "notes", "journal", "timeline"].includes(view) ? "" : ` data-drop="${h(view)}"`}>
+  return `<a href="#" class="nav-item${active} ${extraClass}" data-view="${h(view)}"${["recurring", "all", "calendar", "links", "notes", "journal", "timeline", "review"].includes(view) ? "" : ` data-drop="${h(view)}"`}>
     <span class="nav-label">${label}</span>${count ? `<span class="count">${count}</span>` : ""}</a>`;
 }
 
@@ -750,7 +751,7 @@ function renderNav() {
   $("#nav").innerHTML =
     // Inbox, then Focus, then the other lists; the Calendar is an icon in the toolbar.
     STATES.map(([s, label]) => navItem(s, label, counts[s]) +
-      (s === "inbox" ? navItem("focus", "★ Focus", counts.focus, "focus") : "") +
+      (s === "inbox" ? navItem("focus", "★ Focus", counts.focus, "focus") + navItem("review", "Review", reviewDue().length) : "") +
       (s === "scheduled" ? navItem("recurring", "Recurring", counts.recurring) : "")).join("") +
     navItem("all", "All", counts.all) +
     `<div class="nav-section">
@@ -779,6 +780,7 @@ function viewTitle() {
   if (S.view === "trash") return "Trash";
   if (S.view.startsWith("project:")) return projectById(Number(S.view.slice(8)))?.name ?? "Project";
   if (S.view === "timeline") return "Timeline";
+  if (S.view === "review") return "Weekly review";
   if (S.view.startsWith("timeline:")) {
     const [, kind, id] = S.view.split(":");
     return `${(kind === "project" ? projectById(Number(id))?.name : journalById(Number(id))?.name) ?? ""} · timeline`;
@@ -962,7 +964,7 @@ function renderList() {
   document.title = viewTitle() + " · Entropicide";
   const el = $("#list");
   const readOnly = S.view === "logbook" || S.view === "trash";
-  $("#quick-add").hidden = readOnly || ["projects", "links", "notes", "journal", "timeline"].includes(S.view) || S.view.startsWith("timeline:");
+  $("#quick-add").hidden = readOnly || ["projects", "links", "notes", "journal", "timeline", "review"].includes(S.view) || S.view.startsWith("timeline:");
   if (S.view === "notes" || S.view === "journal") {
     $("#main").append($("#detail"));  // (as for links)
     renderNotes(el);
@@ -972,6 +974,12 @@ function renderList() {
   if (S.view === "links") {
     $("#main").append($("#detail"));  // out of the way of the links page, which redraws the list
     renderLinks(el);
+    renderSelectBar();
+    return;
+  }
+  if (S.view === "review") {
+    $("#tag-bar").innerHTML = "";
+    fillList(el, reviewHtml());
     renderSelectBar();
     return;
   }
@@ -1624,6 +1632,10 @@ function renderDetail() {
           Sequential (only the first action shows in Queue)</label>
         <label class="check"><input type="checkbox" data-field="focus" ${p.focus ? "checked" : ""}> Focus</label>
         <label class="check" title="Shown on timelines"><input type="checkbox" data-field="waypoint" ${p.waypoint ? "checked" : ""}> ⚑ Waypoint</label>
+        <label title="How often the weekly review brings it up">Review every <select data-field="review_every">${options(
+          [[7, "week"], [14, "2 weeks"], [28, "4 weeks"], [0, "never"]], p.review_every ?? 7)}</select></label>
+        <p class="muted small">${p.last_reviewed ? `Last reviewed ${h(fmtDate(p.last_reviewed))}.` : "Not reviewed yet."}${
+          p.review_due ? ' <button type="button" class="link mark-reviewed">Mark reviewed</button>' : ""}${p.stalled ? " ⚠ No next action." : ""}</p>
       </section>
       <section class="d-group" aria-label="Blocked by and related">
         ${blockersField(p, "project")}
@@ -1769,6 +1781,147 @@ function focusNotes() {
   r.collapse(false);
   getSelection().removeAllRanges();
   getSelection().addRange(r);
+}
+
+// ---- the weekly review ------------------------------------------------------------
+// GTD's weekly sit-down, a step at a time: get clear (empty the Inbox and loose notes, and
+// anything on your mind), get current (what's coming, what's overdue, what you're waiting
+// for, then each project due for a look), get creative (Someday and Later), and done (the
+// day's kept, in settings.last_review). A project is due for review after its review_every
+// days (app.py's projects_json works out review_due and stalled).
+
+const REVIEW_STEPS = ["Get clear", "Get current", "Projects", "Get creative", "Done"];
+const review = { step: Number(load("reviewStep", "0")) || 0, seen: new Set() };
+
+const reviewDue = () => S.data.projects.filter((p) => p.review_due && inArea(p.area_id));
+
+function reviewHtml() {
+  const last = S.data.user.settings?.last_review;
+  const ago = last ? Math.round((new Date(today() + "T12:00:00") - new Date(last + "T12:00:00")) / 86400000) : null;
+  let html = `<div class="review-head">
+    <p class="muted small">${last ? `Last review: ${h(fmtDate(last))}${ago > 1 ? ` (${ago} days ago)` : ""}.` : "No review yet: a good time for the first."}</p>
+    <ol class="review-steps">${REVIEW_STEPS.map((name, i) => `<li><button type="button" class="link review-go${i === review.step ? " on" : ""}"
+      data-step="${i}">${i + 1}. ${name}${i === 2 && reviewDue().length ? ` (${reviewDue().length})` : ""}</button></li>`).join("")}</ol>
+  </div>`;
+  const step = review.step;
+  const capture = `<form class="review-capture"><input placeholder="Anything else on your mind? Type it and press Enter: it goes to the Inbox"
+    aria-label="Add to the Inbox" autocomplete="off"></form>`;
+  if (step === 0) {
+    const inbox = viewTasks("inbox");
+    const since = last ? last + " 00:00:00" : "";
+    const loose = S.data.notes.filter((n) => !n.journal_id && !n.category_id && !n.archived_at && (n.created_at || "") >= since);
+    html += `<h2 class="group">Inbox · ${inbox.length}</h2>` + (inbox.length
+      ? `<p class="muted small">Give each a list or a project, do it if it takes two minutes, or trash it.</p>` + inbox.map((t) => taskRow(t, {})).join("")
+      : '<p class="empty small">Empty. 👍</p>');
+    html += `<h2 class="group">Loose notes · ${loose.length}</h2>` + (loose.length
+      ? `<p class="muted small">Notes written ${last ? "since the last review" : "lately"} with no category: anything in them to do?</p>` +
+        loose.map((n) => `<p class="review-note"><button type="button" class="link open-note" data-note="${n.id}">📝 ${h(noteLabel(n))}</button></p>`).join("")
+      : '<p class="empty small">None.</p>');
+    html += '<h2 class="group">Mind sweep</h2>' + capture;
+  } else if (step === 1) {
+    const t0 = today(), end = addDays(t0, CALENDAR_DAYS);
+    const overdue = S.data.tasks.filter((t) => t.due_date && t.due_date < t0 && !t.completed_at);
+    const coming = viewTasks("all").filter((t) => { const d = taskDay(t); return d && d >= t0 && d < end; });
+    const waiting = viewTasks("waiting");
+    html += `<h2 class="group">Overdue · ${overdue.length}</h2>` + (overdue.length
+      ? '<p class="muted small">Do it, give it a new date, or let it go.</p>' + overdue.map((t) => taskRow(t, { showState: true })).join("")
+      : '<p class="empty small">Nothing overdue.</p>');
+    html += `<h2 class="group">Waiting for · ${waiting.length}</h2>` + (waiting.length
+      ? '<p class="muted small">Anyone to chase?</p>' + waiting.map((t) => taskRow(t, {})).join("") : '<p class="empty small">Nothing.</p>');
+    html += `<h2 class="group">The next ${CALENDAR_DAYS} days</h2>` + calendarAgenda(coming);
+  } else if (step === 2) {
+    const due = reviewDue().filter((p) => !review.seen.has(p.id));
+    const p = due[0];
+    if (!p) {
+      html += `<p class="empty">${review.seen.size ? `All ${review.seen.size} reviewed.` : "No projects are due for a review."}
+        A project comes up again after its interval (in its details, or below when it's up).</p>`;
+    } else {
+      const tasks = S.data.tasks.filter((t) => t.project_id === p.id);
+      const subs = subprojects(p).filter((q) => q.state !== "done");
+      html += `<p class="muted small">${due.length} to review${review.seen.size ? `, ${review.seen.size} done` : ""}. Is it still worth doing?
+        Does it have a next action? Anything to add, drop or move?</p>
+      <h2 class="group review-project">▤ ${h(p.name)}</h2>
+      ${p.stalled ? '<p class="review-stalled">⚠ Stalled: nothing in the Queue (or waiting, soon or scheduled) and no active subproject. What\'s the next action?</p>' : ""}
+      ${subs.map((q) => projectRow(q, null, { onPage: true })).join("")}
+      ${tasks.map((t) => taskRow(t, { showState: true })).join("") || (subs.length ? "" : '<p class="empty small">No open tasks.</p>')}
+      <form class="review-add" data-project="${p.id}"><input placeholder="Add a next action to “${h(p.name)}”, and press Enter" aria-label="Add a task to the project" autocomplete="off"></form>
+      <div class="review-actions" data-project="${p.id}">
+        <button type="button" class="primary review-done-project">✓ Reviewed${due.length > 1 ? ": next" : ""}</button>
+        <button type="button" class="review-state" data-state="someday">Someday</button>
+        <button type="button" class="review-state" data-state="later">Later</button>
+        <button type="button" class="review-state" data-state="done">Complete</button>
+        <button type="button" class="link review-open">Open it</button>
+        <label class="review-every">Review every <select class="review-interval">${options(
+          [[7, "week"], [14, "2 weeks"], [28, "4 weeks"], [0, "never"]], p.review_every ?? 7)}</select></label>
+      </div>`;
+    }
+  } else if (step === 3) {
+    const tasks = S.data.tasks.filter((t) => ["someday", "later"].includes(t.state) && inArea(taskArea(t)));
+    const projects = S.data.projects.filter((p) => ["someday", "later"].includes(p.state) && inArea(p.area_id));
+    html += `<p class="muted small">Anything here to start now? Anything to let go of?</p>
+      <h2 class="group">Someday and Later projects · ${projects.length}</h2>` +
+      (projects.map((p) => promoteRow(p.name, "project", p.id, p.state, "Make active")).join("") || '<p class="empty small">None.</p>') +
+      `<h2 class="group">Someday and Later tasks · ${tasks.length}</h2>` +
+      (tasks.map((t) => promoteRow(t.title, "task", t.id, t.state, "To the Queue")).join("") || '<p class="empty small">None.</p>') +
+      '<h2 class="group">New ideas</h2>' + capture;
+  } else {
+    html += `<p class="review-finish">${last === today() ? "Review done today. 🎉" : "That's the week reviewed: your lists are current again."}</p>
+      ${last === today() ? "" : '<p><button type="button" class="primary review-finish-btn">Finish the review</button></p>'}
+      <p class="muted small">A reminder each week (in Settings → Notifications) helps make it a habit.</p>`;
+  }
+  html += `<div class="review-nav">${step > 0 ? '<button type="button" class="review-go" data-step="' + (step - 1) + '">‹ Back</button>' : ""}
+    ${step < 4 ? `<button type="button" class="primary review-go" data-step="${step + 1}">Next: ${REVIEW_STEPS[step + 1]} ›</button>` : ""}</div>`;
+  return html;
+}
+
+function promoteRow(title, kind, id, state, label) {
+  return `<div class="review-promote" data-kind="${kind}" data-id="${id}">
+    <button type="button" class="link review-open-item">${kind === "project" ? "▤ " : ""}${mdInline(title)}</button>
+    <span class="muted small">${STATE_LABEL[state] || state}</span>
+    <button type="button" class="review-promote-btn">${label}</button></div>`;
+}
+
+function setReviewStep(step) {
+  review.step = Math.max(0, Math.min(REVIEW_STEPS.length - 1, step));
+  save("reviewStep", String(review.step));
+  renderList();
+  $("#list").scrollTop = 0;
+}
+
+async function reviewClick(b) {
+  const box = b.closest("[data-project]");
+  if (b.classList.contains("review-go")) return setReviewStep(Number(b.dataset.step));
+  if (b.classList.contains("review-done-project")) {
+    const id = Number(box.dataset.project);
+    review.seen.add(id);
+    await patchProject(id, { reviewed: true });
+    return;
+  }
+  if (b.classList.contains("review-state")) {
+    const id = Number(box.dataset.project), state = b.dataset.state;
+    review.seen.add(id);
+    await patchProject(id, { state, reviewed: true });
+    return toast(`“${projectById(id)?.name || "It"}” is ${{ someday: "in Someday", later: "in Later", done: "completed" }[state]} now.`);
+  }
+  if (b.classList.contains("review-open")) {
+    const id = Number(box.dataset.project);
+    setView(`project:${id}`);
+    return select("project", id);
+  }
+  const item = b.closest(".review-promote");
+  if (item && b.classList.contains("review-open-item")) return openRef(item.dataset.id);
+  if (item && b.classList.contains("review-promote-btn")) {
+    const id = Number(item.dataset.id);
+    if (item.dataset.kind === "project") await patchProject(id, { state: "active" });
+    else await patchTask(id, { state: "next" });
+    return toast(item.dataset.kind === "project" ? "Active again." : "In the Queue.");
+  }
+  if (b.classList.contains("review-finish-btn")) {
+    S.data.user.settings = await api("PATCH", "/me/settings", { last_review: today() });
+    review.seen.clear();
+    renderList();
+    renderNav();
+  }
 }
 
 // ---- timelines ---------------------------------------------------------------
@@ -2400,7 +2553,7 @@ function fieldValue(input) {
   const v = input.value;
   const f = input.dataset.field;
   if (f === "tags") return v.split(",").map((s) => s.trim()).filter(Boolean);
-  if (["project_id", "parent_id", "area_id", "minutes"].includes(f)) return v === "" ? null : Number(v);
+  if (["project_id", "parent_id", "area_id", "minutes", "review_every"].includes(f)) return v === "" ? null : Number(v);
   if (f === "priority") return clampPriority(Number(v));
   if (f === "remind_at") return v ? localInputToUtc(v) : null;
   return v;
@@ -3499,6 +3652,7 @@ function bindDetail() {
     else if (b.classList.contains("open-project")) setView(`project:${sel.id}`);
     else if (b.classList.contains("open-subproject")) { setView(`project:${b.dataset.project}`); select("project", Number(b.dataset.project)); }
     else if (b.classList.contains("new-subproject")) newProject(projectById(sel.id));
+    else if (b.classList.contains("mark-reviewed")) { $("#detail").dataset.key = ""; patchProject(sel.id, { reviewed: true }); }
     else if (b.classList.contains("convert-to")) convertTo(sel.id, b.dataset.to);
     else if (b.classList.contains("delete-project")) {
       if (!confirm("Move this project and everything in it to the trash?")) return;
@@ -3607,6 +3761,11 @@ async function openSettings() {
       <label class="check"><input type="checkbox" class="digest-on" ${me.settings.digest_time ? "checked" : ""}>
         A morning summary of what's due, at
         <input type="time" class="digest-time" value="${h(me.settings.digest_time || "08:00")}" aria-label="Summary time"></label>
+      <label class="check"><input type="checkbox" class="review-on" ${me.settings.review_day !== "" ? "checked" : ""}>
+        A weekly review reminder, on <select class="review-day" aria-label="Review day">${options(
+          ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((d, i) => [String(i), d]),
+          me.settings.review_day !== "" ? me.settings.review_day : "4")}</select> at
+        <input type="time" class="review-time" value="${h(me.settings.review_time || "16:00")}" aria-label="Review time"></label>
       <label class="check"><input type="checkbox" class="quiet-on" ${me.settings.quiet_hours ? "checked" : ""}>
         Quiet hours: none from
         <input type="time" class="quiet-from" value="${h(me.settings.quiet_hours.split("-")[0] || "22:00")}" aria-label="Quiet from">
@@ -3901,6 +4060,12 @@ function bindSettings() {
       const on = $("#dialog .quiet-on").checked, from = $("#dialog .quiet-from").value, to = $("#dialog .quiet-to").value;
       if (on && (!from || !to || from === to)) return toast("Quiet hours need two different times.");
       S.data.user.settings = await api("PATCH", "/me/settings", { quiet_hours: on ? `${from}-${to}` : "" });
+      return;
+    }
+    if (t.matches(".review-on, .review-day, .review-time")) {
+      const on = $("#dialog .review-on").checked;
+      S.data.user.settings = await api("PATCH", "/me/settings", { review_day: on ? $("#dialog .review-day").value : "",
+        review_time: $("#dialog .review-time").value || "16:00" });
       return;
     }
     if (t.classList.contains("digest-on") || t.classList.contains("digest-time")) {
@@ -4430,6 +4595,7 @@ function projectMenuItems(p) {
     ] },
     { label: p.focus ? "Unstar" : "Star", run: () => changeProject(p, { focus: !p.focus }) },
     { label: "Waypoint", toggle: true, checked: !!p.waypoint, run: () => changeProject(p, { waypoint: !p.waypoint }) },
+    ...(p.state === "active" ? [{ label: "Mark reviewed", hint: p.review_due ? "due" : "", run: () => changeProject(p, { reviewed: true }, `“${p.name}” is reviewed.`) }] : []),
     { label: "Sequential", toggle: true, checked: p.sequential, run: () => changeProject(p, { sequential: !p.sequential }) },
     ...(projectEmpty(p) ? [{ sep: true }, { label: "Make it a task", run: () => convertTo(p.id, "task") },
       { label: "Make it a note", run: () => convertTo(p.id, "note") }] : []),
@@ -4667,6 +4833,9 @@ function bind() {
       return renderList();
     }
     if (b?.dataset.timeline) return setView(`timeline:${b.dataset.timeline}`);
+    if (b && S.view === "review" && b.closest(".review-head, .review-nav, .review-actions, .review-promote, .review-finish-btn, p")) {
+      if (!b.classList.contains("open-note")) return reviewClick(b);
+    }
     if (b?.classList.contains("back-from-timeline")) return setView(b.dataset.back);
     if (b?.dataset.open) { const [kind, id] = b.dataset.open.split(":"); return openTimelineItem(kind, Number(id)); }
     if (b?.classList.contains("complete-project") || b?.classList.contains("reopen-project")) {
@@ -4717,6 +4886,25 @@ function bind() {
     }
   });
 
+  // The review's boxes: a thought to the Inbox, or a next action to the project being reviewed.
+  $("#list").addEventListener("submit", async (e) => {
+    const form = e.target.closest(".review-capture, .review-add");
+    if (!form) return;
+    e.preventDefault();
+    const input = $("input", form), title = input.value.trim();
+    if (!title) return;
+    const project = Number(form.dataset.project) || null;
+    await api("POST", "/tasks", { title, state: project ? "next" : "inbox", project_id: project });
+    input.value = "";
+    await refresh();
+    toast(project ? "Added to the project." : "In the Inbox.");
+    $(project ? ".review-add input" : ".review-capture input")?.focus();
+  });
+  $("#list").addEventListener("change", async (e) => {
+    if (!e.target.matches(".review-interval")) return;
+    const id = Number(e.target.closest("[data-project]").dataset.project);
+    await patchProject(id, { review_every: Number(e.target.value) }, { quiet: true });
+  });
   // The timeline's "Show": waypoints, or everything dated.
   $("#list").addEventListener("change", (e) => {
     if (!e.target.matches(".timeline-all")) return;

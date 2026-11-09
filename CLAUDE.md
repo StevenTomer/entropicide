@@ -47,11 +47,13 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
   triggers), so most SQL looks as it did. **New rows must go through `db.insert(conn, view,
   fields)`** (an insert straight into a view raises). Tags, files, links and Blocked by are
   shared (`document_tags`, `attachments.document_id`, `document_links`, `document_deps`).
-  Changing kind keeps the id: `become()` in app.py swaps the `*_data` row.
+  Changing kind keeps the id: `become()` in app.py swaps the `*_data` row. Trash and delete
+  through `trashed()` / `purge()`, which take a project's contents along.
 - **Text is HTML everywhere**: a task's `notes`, a project's `notes` and a note's `body` are
   cleaned HTML (checklists are `<ul data-check><li data-done="1">`). Anything plain that comes
   in (`/api/add`, sharing, Google) goes through `richtext.from_text`; anything going out as
-  plain text (Google, exports, notifications) through `richtext.plain`.
+  plain text (Google, exports, notifications) through `richtext.plain`. Uploads in the browser go
+  through `uploadTo()` and file deletes through `deleteAttachment()` (app.js).
 - **Offline outbox** (app.js, "offline changes"): task/project changes made offline are
   queued and replayed, and `applyOffline` mirrors server behaviour on `S.data`. New task or
   project fields/endpoints must work through it; offline-created items have negative ids.

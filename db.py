@@ -696,6 +696,20 @@ def format_text(conn):
     conn.commit()
 
 
+def untangle_trash(conn):
+    """Once (PRAGMA user_version 3): until now a project went to the trash without what was in
+    it, which stayed in the lists. Anything like that is taken out of the project, so it stays
+    where it's been seen; from now on a project's contents go to the trash with it."""
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= 3:
+        return
+    gone = "(SELECT id FROM documents WHERE kind = 'project' AND deleted_at IS NOT NULL)"
+    live = "(SELECT id FROM documents WHERE deleted_at IS NULL)"
+    conn.execute(f"UPDATE task_data SET project_id = NULL WHERE project_id IN {gone} AND id IN {live}")
+    conn.execute(f"UPDATE project_data SET parent_id = NULL, step = NULL WHERE parent_id IN {gone} AND id IN {live}")
+    conn.execute("PRAGMA user_version = 3")
+    conn.commit()
+
+
 def connect(path):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
@@ -724,5 +738,6 @@ def init_db(path):
     conn.executescript(VIEWS)
     conn.executescript(INDEXES)
     format_text(conn)
+    untangle_trash(conn)
     conn.commit()
     conn.close()

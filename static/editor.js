@@ -113,7 +113,7 @@ function textOf(html) {
   if (text === undefined) {
     const tpl = document.createElement("template");
     tpl.innerHTML = html.replace(/<br>|<\/(p|div|li|h[1-3]|blockquote|pre)>/g, "$&\n");
-    text = tpl.content.textContent.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+    text = tpl.content.textContent.replace(/[ \t\u00a0]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
     if (textsOf.size > 2000) textsOf.clear();
     textsOf.set(html, text);
   }
@@ -626,21 +626,10 @@ function caretRangeAt(x, y) {
 async function addFiles(files, { place = true, range = null } = {}) {
   files = [...files];
   if (!files.length) return;
-  if (files.some((f) => f.size > 25 * 1048576)) return toast("Files can be up to 25 MB each.");
-  const host = ed, n = host.item;
+  const host = ed;
   await host.save({ force: true });
-  if (!n.id || n.id < 0) return toast(`Wait until this ${host.kind} has been saved (when you're back online), then add files.`);
-  const form = new FormData();
-  for (const f of files) form.append("file", f, f.name || "pasted.png");
-  toast(files.length > 1 ? `Uploading ${files.length} files…` : `Uploading ${files[0].name || "the picture"}…`);
-  let res;
-  try {
-    res = await fetch(`${BASE}/api/${host.kind}s/${n.id}/attachments`, { method: "POST", body: form, headers: { "X-Requested-With": "entropicide" } });
-  } catch {
-    return toast("You're offline. Pictures and files need a connection.");
-  }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) return toast(data.error || "Couldn't upload that.");
+  const data = await uploadTo(host.kind, host.item.id, files);
+  if (!data) return;
   host.uploaded(data);
   const pics = data.added.filter((id) => IMAGE_TYPES.includes(data.attachments.find((f) => f.id === id)?.mime));
   if (place && pics.length && host.root.isConnected && !host.source) {
@@ -650,7 +639,6 @@ async function addFiles(files, { place = true, range = null } = {}) {
     host.save();
   }
   if (host.root.isConnected) host.filesChanged();
-  toast(files.length > 1 ? `Added ${files.length} files.` : pics.length ? "Picture added." : "File added.");
 }
 
 function insertPictures(ids, range) {
@@ -882,9 +870,9 @@ function filesInText(skip) {
 async function dropPictureCopy(id) {
   const host = ed, n = host?.item;
   if (!n || filesInText().has(id) || !n.attachments.some((f) => f.id === id)) return;
-  try {
-    host.uploaded(await api("DELETE", `/attachments/${id}`, undefined, { quiet: true }));
-  } catch { return; }
+  const owner = await deleteAttachment(n, id, { ask: false, quiet: true });
+  if (!owner) return;
+  host.uploaded(owner);
   if (host.root.isConnected) host.filesChanged();
 }
 
@@ -903,16 +891,9 @@ async function editPicture(img, turn, crop) {
       const blob = await drawPicture(await loadPicture(picSrc(origId)), turn, crop, original.mime).catch(() => null);
       if (!blob) return toast("Couldn't edit that picture (it may be too big for this device).");
       const ext = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" }[blob.type] || "png";
-      const form = new FormData();
-      form.append("file", blob, `${original.name.replace(/\.[^.]+$/, "")} (edited).${ext}`);
-      let res;
-      try {
-        res = await fetch(`${BASE}/api/${host.kind}s/${n.id}/attachments`, { method: "POST", body: form, headers: { "X-Requested-With": "entropicide" } });
-      } catch {
-        return toast("You're offline. Editing a picture needs a connection.");
-      }
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) return toast(data.error || "Couldn't save the edited picture.");
+      const file = new File([blob], `${original.name.replace(/\.[^.]+$/, "")} (edited).${ext}`, { type: blob.type });
+      const data = await uploadTo(host.kind, n.id, [file], { quiet: true });
+      if (!data) return;
       host.uploaded(data);
       id = data.added[0];
     } finally {

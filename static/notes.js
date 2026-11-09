@@ -46,17 +46,8 @@ function notesViewTitle() {
 
 // ---- formatted text (editor.js has the editor and cleaning; this is a note's words) ----
 
-// A note's words without the formatting (for search and previews), worked out once per version.
-const noteTexts = new Map();
-function noteText(n) {
-  const hit = noteTexts.get(n.id);
-  if (hit && hit.body === n.body) return hit.text;
-  const tpl = document.createElement("template");
-  tpl.innerHTML = String(n.body || "").replace(/<br>|<\/(p|div|li|h[1-3]|blockquote|pre)>/g, "$&\n");
-  const text = tpl.content.textContent.replace(/[ \t ]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-  noteTexts.set(n.id, { body: n.body, text });
-  return text;
-}
+// A note's words without the formatting (for search and previews).
+const noteText = (n) => textOf(n.body);
 
 // ---- search: words (all of them), "a phrase", -word to leave out, and field:value ----
 
@@ -724,10 +715,8 @@ function bindNoteDialog(dlg) {
       return;
     }
     if (b.classList.contains("del-file")) {
-      const id = Number(b.closest("[data-file]").dataset.file);
-      const f = n.attachments.find((x) => x.id === id);
-      if (!f || !confirm(`Delete ${f.name}?`)) return;
-      const owner = await api("DELETE", `/attachments/${id}`);
+      const owner = await deleteAttachment(n, Number(b.closest("[data-file]").dataset.file));
+      if (!owner) return;
       n.attachments = owner.attachments;
       return renderNoteFiles();
     }
@@ -811,13 +800,8 @@ function fillCategories(dlg) {
 }
 
 async function taskToNote(t) {
-  if (!t || !confirm(`Make “${t.title}” a note? The task goes; its notes, tags, files and links go with the note.`)) return;
-  const n = await api("POST", `/tasks/${t.id}/to-note`);
-  S.selected = null;
-  await refresh();
-  setView("notes");
-  toast("It's a note now.");
-  openNote(noteById(n.id) || n);
+  if (!t || !confirm(`Make “${t.title}” a note? Its notes, tags, files and links stay with it.`)) return;
+  convertTo(t.id, "note");
 }
 
 // Settings → Sharing to Entropicide → Ask each time: what was shared is already an Inbox task
@@ -873,7 +857,7 @@ function bindNotes() {
       if (b.classList.contains("restore-note")) await api("PATCH", `/notes/${id}`, { deleted: false });
       else if (b.classList.contains("purge-note")) {
         if (!confirm("Delete this note forever? It can't be undone.")) return;
-        await api("DELETE", `/notes/${id}`);
+        await api("DELETE", `/documents/${id}`);
       }
       return refresh();
     }

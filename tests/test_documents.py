@@ -239,3 +239,67 @@ def test_a_step_keeps_its_place_when_it_changes_kind(app, user_client):
     moved = client.patch(f"/api/projects/{other}", json={"parent_id": house}, headers=H).get_json()
     assert moved["step"] > second["position"]
     assert client.patch(f"/api/projects/{other}", json={"parent_id": None}, headers=H).get_json()["step"] is None
+
+
+def test_a_project_goes_to_the_trash_with_everything_in_it(app, user_client):
+    client = user_client("ann")
+    project = lambda **p: client.post("/api/projects", json=p, headers=H).get_json()["id"]  # noqa: E731
+    add = lambda **t: client.post("/api/tasks", json=t, headers=H).get_json()["id"]  # noqa: E731
+    key = client.post("/api/devices", json={"kind": "api", "name": "t", "can_read": True}, headers=H).get_json()["key"]
+    queue = lambda: [t["title"] for t in client.get("/api/read/queue", headers={"Authorization": "Bearer " + key}).get_json()["tasks"]]  # noqa: E731
+    house = project(name="House")
+    shed = project(name="Shed", parent_id=house)
+    paint = add(title="Paint", state="next", project_id=house)
+    add(title="Roof", state="next", project_id=shed)
+    old = add(title="Old idea", state="next", project_id=house)
+    client.patch(f"/api/tasks/{old}", json={"deleted": True}, headers=H)  # (trashed before the project)
+    with app.app_context():
+        conn = db.get_db()
+        conn.execute("UPDATE documents SET deleted_at = '2026-01-01 00:00:00' WHERE id = ?", (old,))
+        conn.commit()
+    client.patch(f"/api/projects/{house}", json={"deleted": True}, headers=H)
+    assert queue() == []
+    data = client.get("/api/data").get_json()
+    assert not data["tasks"] and not data["projects"]
+    # The Trash lists the project (and the task trashed before it), not what went with it.
+    trash = client.get("/api/trash").get_json()
+    assert [(p["name"], p["inside"]) for p in trash["projects"]] == [("House", 3)]
+    assert [t["title"] for t in trash["tasks"]] == ["Old idea"]
+    # Back again, with what went with it; the task trashed before stays there.
+    client.patch(f"/api/projects/{house}", json={"deleted": False}, headers=H)
+    assert sorted(queue()) == ["Paint", "Roof"]
+    assert [t["title"] for t in client.get("/api/trash").get_json()["tasks"]] == ["Old idea"]
+    # Brought back on its own while its project is in the trash, a task is out of the project.
+    client.patch(f"/api/projects/{house}", json={"deleted": True}, headers=H)
+    client.patch(f"/api/tasks/{paint}", json={"deleted": False}, headers=H)
+    assert rows(app, "SELECT project_id FROM tasks WHERE id = ?", paint) == [{"project_id": None}]
+    # Deleted for good: everything in it goes too.
+    assert client.delete(f"/api/documents/{house}", headers=H).status_code == 204
+    assert rows(app, "SELECT title FROM documents ORDER BY id") == [{"title": "Paint"}]
+    assert client.delete(f"/api/documents/{paint}", headers=H).status_code == 204
+    assert user_client("bob").delete(f"/api/documents/{house}", headers=H).status_code == 404
+
+
+def test_emptying_the_trash(app, user_client):
+    client = user_client("ann")
+    house = client.post("/api/projects", json={"name": "House"}, headers=H).get_json()["id"]
+    client.post("/api/tasks", json={"title": "Paint", "project_id": house}, headers=H)
+    keep = client.post("/api/tasks", json={"title": "Keep"}, headers=H).get_json()["id"]
+    client.patch(f"/api/projects/{house}", json={"deleted": True}, headers=H)
+    client.post("/api/trash/empty", headers=H)
+    assert rows(app, "SELECT id FROM documents") == [{"id": keep}]
+
+
+def test_items_left_in_trashed_projects_are_untangled(tmp_path):
+    path = str(tmp_path / "db.db")
+    db.init_db(path)
+    conn = db.connect(path)
+    uid = conn.execute("INSERT INTO users (username, password_hash) VALUES ('ann', 'x')").lastrowid
+    house = db.insert(conn, "projects", {"user_id": uid, "name": "House", "deleted_at": "2026-11-01 00:00:00"})
+    paint = db.insert(conn, "tasks", {"user_id": uid, "title": "Paint", "project_id": house})
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+    conn.close()
+    db.init_db(path)
+    conn = db.connect(path)
+    assert conn.execute("SELECT project_id, deleted_at FROM tasks WHERE id = ?", (paint,)).fetchone()[:] == (None, None)

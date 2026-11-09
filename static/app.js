@@ -921,7 +921,8 @@ function renderList() {
     if (S.extraProjects.length) {
       html += '<h2 class="group">Projects</h2>' + S.extraProjects.map((p) =>
         `<div class="row project trashed" data-project="${p.id}"><div class="row-body">
-          <div class="title">${h(p.name)}</div></div>
+          <div class="title">${h(p.name)}</div>
+          ${p.inside ? `<div class="meta"><span>with ${p.inside} thing${p.inside > 1 ? "s" : ""} in it, back with it when it's restored</span></div>` : ""}</div>
           <button class="link restore-project">Restore</button></div>`).join("");
     }
     html += trashedNotes();
@@ -1793,8 +1794,8 @@ function subprojectsField(p) {
 
 // Makes a task, project or note into another kind: the same item, so it keeps its title,
 // text, tags, files and links (app.py's convert_document). Then opens it.
-async function convertTo(id, to) {
-  const x = await api("POST", `/documents/${id}/convert`, { to });
+async function convertTo(id, to, options = {}) {
+  const x = await api("POST", `/documents/${id}/convert`, { to, ...options });
   S.selected = null;
   await refresh();
   if (to === "note") { setView(x.journal_id ? "journal" : "notes"); openNote(noteById(id) || x); }
@@ -2102,12 +2103,8 @@ function openConvert(t) {
   $(".close-dlg", dlg).onclick = () => dlg.close();
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const p = await api("POST", `/tasks/${t.id}/convert`, { checklist: !!f.checklist?.checked });
     dlg.close();
-    S.selected = null;
-    await refresh();
-    setView(`project:${p.id}`);
-    toast("It's a project now.");
+    convertTo(t.id, "project", { checklist: !!f.checklist?.checked });
   });
   dlg.showModal();
   $("button.primary", dlg).focus();
@@ -2863,32 +2860,52 @@ function attachmentsSection(x, kind, placed = placedIds(x.notes)) {
 }
 
 // Uploads files to the task or project sel ({kind, id}).
-async function uploadFiles(sel, files) {
-  if (!files.length || !sel) return;
-  const { kind, id } = sel;
-  if (id < 0) return toast(`Wait until this ${kind} has been saved (when you're back online), then add files.`);
-  if (files.some((f) => f.size > 25 * 1048576)) return toast("Files can be up to 25 MB each.");
+// Uploads files (File or Blob, each with a name) to a task, project or note (kind, id): the
+// server's reply (it, with "added", the new files' ids), or null after saying what went wrong.
+// quiet: no "Uploading…" or "Added" messages.
+async function uploadTo(kind, id, files, { quiet = false } = {}) {
+  if (!files.length) return null;
+  if (!id || id < 0) { toast(`Wait until this ${kind} has been saved (when you're back online), then add files.`); return null; }
+  if (files.some((f) => f.size > 25 * 1048576)) { toast("Files can be up to 25 MB each."); return null; }
   const form = new FormData();
   for (const f of files) form.append("file", f, f.name || "pasted.png");
-  toast(files.length > 1 ? `Uploading ${files.length} files…` : `Uploading ${files[0].name || "image"}…`);
+  if (!quiet) toast(files.length > 1 ? `Uploading ${files.length} files…` : `Uploading ${files[0].name || "the picture"}…`);
   let res;
   try {
     res = await fetch(`${BASE}/api/${kind}s/${id}/attachments`, { method: "POST", body: form, headers: { "X-Requested-With": "entropicide" } });
   } catch {
-    return toast("You're offline. Attachments need a connection.");
+    toast("You're offline. Pictures and files need a connection.");
+    return null;
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) return toast(data.error || "Couldn't upload that.");
-  if (kind === "project") replaceProject(data); else replaceTask(data);
+  if (!res.ok) { toast(data.error || "Couldn't upload that."); return null; }
+  if (!quiet) {
+    const pics = data.added.filter((x) => IMAGE_TYPES.includes(data.attachments.find((f) => f.id === x)?.mime)).length;
+    toast(files.length > 1 ? `Added ${files.length} files.` : pics ? "Picture added." : "File added.");
+  }
+  return data;
+}
+
+// Deletes one of x's files (asking first, unless ask is false): the server's reply (x as it is
+// now), or null.
+async function deleteAttachment(x, fileId, { ask = true, quiet = false } = {}) {
+  const f = x?.attachments.find((y) => y.id === fileId);
+  if (!f || (ask && !confirm(`Delete ${f.name}?`))) return null;
+  return api("DELETE", `/attachments/${fileId}`, undefined, { quiet }).catch(() => null);
+}
+
+// The attachments section's files, for the task or project sel ({kind, id}).
+async function uploadFiles(sel, files) {
+  const data = sel && await uploadTo(sel.kind, sel.id, files);
+  if (!data) return;
+  if (sel.kind === "project") replaceProject(data); else replaceTask(data);
   $("#detail").dataset.key = "";
   render();
-  toast(files.length > 1 ? `Added ${files.length} files.` : "File added.");
 }
 
 async function deleteFile(fileId) {
-  const f = selItem()?.attachments.find((x) => x.id === fileId);
-  if (!f || !confirm(`Delete ${f.name}?`)) return;
-  const owner = await api("DELETE", `/attachments/${fileId}`);
+  const owner = await deleteAttachment(selItem(), fileId);
+  if (!owner) return;
   if (S.selected.kind === "project") replaceProject(owner); else replaceTask(owner);
   $("#detail").dataset.key = "";
   render();
@@ -3256,14 +3273,14 @@ function bindDetail() {
     }
     else if (b.classList.contains("purge-task")) {
       if (!confirm("Delete this task forever?")) return;
-      await api("DELETE", `/tasks/${sel.id}`); S.selected = null; await refresh();
+      await api("DELETE", `/documents/${sel.id}`); S.selected = null; await refresh();
     }
     else if (b.classList.contains("open-project")) setView(`project:${sel.id}`);
     else if (b.classList.contains("open-subproject")) { setView(`project:${b.dataset.project}`); select("project", Number(b.dataset.project)); }
     else if (b.classList.contains("new-subproject")) newProject(projectById(sel.id));
     else if (b.classList.contains("convert-to")) convertTo(sel.id, b.dataset.to);
     else if (b.classList.contains("delete-project")) {
-      if (!confirm("Move this project and its tasks to the trash?")) return;
+      if (!confirm("Move this project and everything in it to the trash?")) return;
       const id = sel.id;
       S.selected = null;
       if (S.view === `project:${id}`) S.view = "projects";
@@ -3953,31 +3970,44 @@ function areaItem(ts) {
 
 // Tag items toggle and keep the submenu open, so several can be set in a row.
 // A tag is ticked when every task has it; choosing it then takes it off them all.
-function tagItems(ts) {
-  const reopen = (at) => {
-    const fresh = tasksOf(ts.map((t) => t.id));
-    showSub(menuItems(fresh), tagItems(fresh), at);
-  };
+// The Tag submenu for items (the tasks picked, or a project): each tag toggles on all of them,
+// and the menu stays open. change(fn) saves fn(item) ({tags}) for each; reopen(at) shows the
+// menu again, as things are now, with the focus at that row.
+function tagMenu(items, change, reopen) {
+  const has = (x) => x.tags || [];
   return [
     ...S.data.tags.map((tag, i) => {
-      const on = ts.every((t) => t.tags.includes(tag.name));
-      return {
-        label: tag.name, toggle: true, checked: on, stay: true,
-        run: async () => {
-          await changeTasks(ts, (t) => ({
-            tags: on ? t.tags.filter((x) => x !== tag.name) : [...new Set([...t.tags, tag.name])] }));
-          reopen(i + 2);  // +2: after Back and the divider
-        },
-      };
+      const on = items.every((x) => has(x).includes(tag.name));
+      return { label: tag.name, toggle: true, checked: on, stay: true, run: async () => {
+        await change((x) => ({ tags: on ? has(x).filter((y) => y !== tag.name) : [...new Set([...has(x), tag.name])] }));
+        reopen(i + 2);  // +2: after Back and the divider
+      } };
     }),
     ...(S.data.tags.length ? [{ sep: true }] : []),
     { label: "New tag…", run: async () => {
       const name = prompt("New tag")?.trim().replace(/^#/, "");
       if (!name) return;
-      await changeTasks(ts, (t) => ({ tags: [...new Set([...t.tags, name])] }));
+      await change((x) => ({ tags: [...new Set([...has(x), name])] }));
       await refresh();  // picks up the new tag in the tag list
     } },
   ];
+}
+
+// The Priority submenu: bump(by) raises or lowers them, bump(0, 0) resets; reopen as above.
+function priorityMenu(items, bump, reopen) {
+  return [
+    { label: "Increase", hint: items.length === 1 ? `now ${items[0].priority || 0}` : "", stay: true,
+      run: async () => { await bump(1); reopen(2); } },
+    { label: "Decrease", stay: true, run: async () => { await bump(-1); reopen(3); } },
+    ...(items.some((x) => x.priority) ? [{ label: "Reset to 0", run: () => bump(0, 0) }] : []),
+  ];
+}
+
+function tagItems(ts) {
+  return tagMenu(ts, (fn) => changeTasks(ts, fn), (at) => {
+    const fresh = tasksOf(ts.map((t) => t.id));
+    showSub(menuItems(fresh), tagItems(fresh), at);
+  });
 }
 
 // Raise or lower each task's priority by step (or set it to an exact number).
@@ -4047,16 +4077,10 @@ function bindPriorityDrag(list) {
 
 // These stay open, so the priority can be stepped several times.
 function priorityItems(ts) {
-  const reopen = (at) => {
+  return priorityMenu(ts, (by, to) => bumpPriority(ts, by, to), (at) => {
     const fresh = tasksOf(ts.map((t) => t.id));
     showSub(menuItems(fresh), priorityItems(fresh), at);
-  };
-  const now = ts.length === 1 ? `now ${ts[0].priority}` : "";
-  return [
-    { label: "Increase", hint: now, stay: true, run: async () => { await bumpPriority(ts, 1); reopen(2); } },
-    { label: "Decrease", stay: true, run: async () => { await bumpPriority(ts, -1); reopen(3); } },
-    ...(ts.some((t) => t.priority) ? [{ label: "Reset to 0", run: () => bumpPriority(ts, 0, 0) }] : []),
-  ];
+  });
 }
 
 function deferItems(ts) {
@@ -4186,7 +4210,7 @@ function projectMenuItems(p) {
       { label: "Make it a note", run: () => convertTo(p.id, "note") }] : []),
     { sep: true },
     { label: "Move to trash", danger: true, run: async () => {
-      if (!confirm(`Move “${p.name}” and its tasks to the trash?`)) return;
+      if (!confirm(`Move “${p.name}” and everything in it to the trash?`)) return;
       if (S.selected?.kind === "project" && S.selected.id === p.id) S.selected = null;
       await changeProject(p, { deleted: true });
       toast("Project moved to trash.", () => patchProject(p.id, { deleted: false }));
@@ -4195,36 +4219,12 @@ function projectMenuItems(p) {
 }
 
 function projectPriorityItems(p, reopen) {
-  const set = async (priority, at) => {
-    await patchProject(p.id, { priority: clampPriority(priority) });
-    reopen((fresh) => projectPriorityItems(fresh, reopen), at);
-  };
-  return [
-    { label: "Increase", hint: `now ${p.priority || 0}`, stay: true, run: () => set((p.priority || 0) + 1, 2) },
-    { label: "Decrease", stay: true, run: () => set((p.priority || 0) - 1, 3) },
-    ...(p.priority ? [{ label: "Reset to 0", run: () => patchProject(p.id, { priority: 0 }) }] : []),
-  ];
+  return priorityMenu([p], (by, to) => patchProject(p.id, { priority: clampPriority(to ?? (p.priority || 0) + by) }),
+    (at) => reopen((fresh) => projectPriorityItems(fresh, reopen), at));
 }
 
-// As for tasks' Tag menu: each toggles and keeps the menu open.
 function projectTagItems(p, reopen) {
-  const tags = p.tags || [];
-  return [
-    ...S.data.tags.map((tag, i) => {
-      const on = tags.includes(tag.name);
-      return { label: tag.name, toggle: true, checked: on, stay: true, run: async () => {
-        await patchProject(p.id, { tags: on ? tags.filter((x) => x !== tag.name) : [...tags, tag.name] });
-        reopen((fresh) => projectTagItems(fresh, reopen), i + 2);  // +2: after Back and the divider
-      } };
-    }),
-    ...(S.data.tags.length ? [{ sep: true }] : []),
-    { label: "New tag…", run: async () => {
-      const name = prompt("New tag")?.trim().replace(/^#/, "");
-      if (!name) return;
-      await patchProject(p.id, { tags: [...new Set([...tags, name])] });
-      await refresh();  // picks up the new tag in the tag list
-    } },
-  ];
+  return tagMenu([p], (fn) => patchProject(p.id, fn(p)), (at) => reopen((fresh) => projectTagItems(fresh, reopen), at));
 }
 
 function showSub(parent, items, focusAt) {

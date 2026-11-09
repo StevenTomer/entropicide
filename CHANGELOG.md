@@ -57,6 +57,9 @@ Settings → Troubleshooting.
   a task now keeps it the same item, so links to it, and what waited on it, simply stay.
 - Moving a task into a project that waits on it, or a project into one it waits on, is refused (it
   could never finish).
+- **Fixed:** a project moved to the trash took only itself, leaving its tasks in the Queue; now
+  everything in it goes too (listed under it in the Trash) and comes back with it. Deleting a
+  project for good no longer leaves its subprojects behind.
 
 - **Priority by dragging:** each task's ▲/▼ is now one ↕: press and drag up to raise the
   priority, down to lower it, and let go to set it. The row stays put until then, so it no

@@ -639,29 +639,21 @@ def set_blockers(kind, item_id, ids):
     """Replace what a task or project (kind "task" or "project") is blocked by: ids, tasks and
     projects (None leaves them). ValueError for one that isn't the user's, the item itself, or
     a wait that could never end (one that, in turn, waits on this, or a project and something
-    in it)."""
+    in it); the change is then not to be committed."""
     if ids is None:
         return
     conn = db.get_db()
     blockers = checked_ids(ids, ("task", "project"), "blocked by")
-    # Waiting on b is a loop if b (through what it waits on) waits on this, or on anything in
-    # this project (which would wait on b in turn).
-    targets = {item_id} | (project_contents(item_id) if kind == "project" else set())
+    inside = project_contents(item_id) if kind == "project" else set()
     for b in blockers:
         if b == item_id:
             raise ValueError(f"A {kind} can't wait on itself.")
-        seen, pending = set(), [b]
-        while pending:
-            node = pending.pop()
-            if node in targets:
-                raise ValueError("That would make them wait on each other in a loop, so neither could start."
-                                 if node != b else "A project can't wait on something in it.")
-            if node not in seen:
-                seen.add(node)
-                pending += waits_on(node)
+        if b in inside:
+            raise ValueError("A project can't wait on something in it.")
     conn.execute("DELETE FROM document_deps WHERE document_id = ?", (item_id,))
     conn.executemany("INSERT INTO document_deps (document_id, blocker_id) VALUES (?, ?)",
                      [(item_id, b) for b in blockers])
+    check_no_loops(item_id)  # (one that, through what it waits on, waits on this; the caller undoes it)
 
 
 def links_for(ids):
@@ -1245,6 +1237,7 @@ def create_task():
     try:
         task_id = insert_task(body(), client_today())
     except (ValueError, TypeError) as e:
+        db.get_db().rollback()
         return bad(str(e))
     return jsonify(tasks_json([owned("tasks", task_id)])[0]), 201
 
@@ -1281,6 +1274,7 @@ def update_task(task_id):
     try:
         apply_task_update(task, body(), client_today())
     except (ValueError, TypeError) as e:
+        db.get_db().rollback()
         return bad(str(e))
     return jsonify(tasks_json([owned("tasks", task_id)])[0])
 
@@ -1445,6 +1439,7 @@ def update_tasks():
         try:
             apply_task_update(task, {k: v for k, v in data.items() if k != "id"}, today)
         except (ValueError, TypeError) as e:
+            db.get_db().rollback()
             return bad(str(e))
     return jsonify(tasks_json([owned("tasks", x["id"]) for x in items]))
 
@@ -1466,12 +1461,13 @@ def apply_task_update(task, data, today):
                 # Reopening a replaced copy makes it a one-off; the series has moved on.
                 fields.update(missed=0, series_id=None, series_index=None)
     if "deleted" in data:
-        fields["deleted_at"] = (time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-                                if data["deleted"] else None)
+        fields["deleted_at"] = utcnow() if data["deleted"] else None
     if fields:
         sets = ", ".join(f"{k} = ?" for k in fields)
         conn.execute(f"UPDATE tasks SET {sets}, updated_at = datetime('now') WHERE id = ?",
                      (*fields.values(), task_id))
+    if "deleted_at" in fields:
+        trashed(task_id, fields["deleted_at"], task["deleted_at"])
     if isinstance(data.get("tags"), list):
         set_tags(task_id, data["tags"])
 
@@ -1940,14 +1936,9 @@ def share_to_note(where, title, text, link, files):
     words = richtext.from_text("\n\n".join(x for x in (text, link) if x))
     if journal:
         today = datetime.now(ZoneInfo(user_tz(g.user))).date().isoformat()
-        note_id = journal_entry_today(journal["id"], today)
-        if title and not conn.execute("SELECT title FROM notes WHERE id = ?", (note_id,)).fetchone()[0]:
-            conn.execute("UPDATE notes SET title = ? WHERE id = ?", (title[:500], note_id))
-        elif title:
-            words = f"<p><b>{html.escape(title, quote=False)}</b></p>" + words
+        note_id = add_to_entry(journal["id"], today, title[:500], words)
     else:
-        note_id = db.insert(conn, "notes", {"user_id": g.user["id"], "title": title[:500]})
-    conn.execute("UPDATE notes SET body = body || ?, updated_at = datetime('now') WHERE id = ?", (words, note_id))
+        note_id = db.insert(conn, "notes", {"user_id": g.user["id"], "title": title[:500], "body": words})
     if files:
         before = conn.execute("SELECT COALESCE(MAX(id), 0) FROM attachments").fetchone()[0]
         save_files(note_id, files, "note")
@@ -2382,25 +2373,59 @@ def too_large(_e):
     return "Too large", 413
 
 
-@app.delete("/api/tasks/<int:task_id>")
-@login_required
-def purge_task(task_id):
-    owned("tasks", task_id)
+# --- the trash: the same for tasks, projects and notes --------------------------
+# A project goes to the trash with everything in it (its tasks and subprojects, at any depth),
+# comes back with what went with it, and is deleted for good with all of it.
+
+def trashed(doc_id, deleted_at, was):
+    """After a task, project or note went to the trash (deleted_at) or came back (deleted_at
+    None; was: when it had gone): what's in a project goes too, or comes back if it went with
+    it; and something brought back out of a project that's still in the trash is taken out of
+    it, to be on its own. Not committed."""
     conn = db.get_db()
-    conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-    conn.commit()
+    inside = list(project_contents(doc_id)) if kind_of(doc_id) == "project" else []
+    if inside and deleted_at:
+        conn.execute(f"UPDATE documents SET deleted_at = ? WHERE deleted_at IS NULL AND id IN ({marks_for(inside)})",
+                     (deleted_at, *inside))
+    elif inside and was:
+        conn.execute(f"UPDATE documents SET deleted_at = NULL WHERE deleted_at = ? AND id IN ({marks_for(inside)})",
+                     (was, *inside))
+    if not deleted_at:
+        gone = "(SELECT id FROM documents WHERE deleted_at IS NOT NULL)"
+        conn.execute(f"UPDATE task_data SET project_id = NULL WHERE id = ? AND project_id IN {gone}", (doc_id,))
+        conn.execute(f"UPDATE project_data SET parent_id = NULL, step = NULL WHERE id = ? AND parent_id IN {gone}", (doc_id,))
+
+
+def purge(doc_id):
+    """Delete a task, project or note for good, and everything in a project. Not committed."""
+    conn = db.get_db()
+    for i in [doc_id, *(project_contents(doc_id) if kind_of(doc_id) == "project" else ())]:
+        # (through its view, so a task's calendar event is noted for removal)
+        conn.execute(f"DELETE FROM {db.KINDS[kind_of(i)]['view']} WHERE id = ?", (i,))
+
+
+@app.delete("/api/documents/<int:doc_id>")
+@login_required
+def purge_document(doc_id):
+    owned("documents", doc_id)
+    purge(doc_id)
+    db.get_db().commit()
     return "", 204
+
+
+# (What older apps call.)
+app.add_url_rule("/api/tasks/<int:doc_id>", "purge_task", purge_document, methods=["DELETE"])
+app.add_url_rule("/api/projects/<int:doc_id>", "purge_project", purge_document, methods=["DELETE"])
+app.add_url_rule("/api/notes/<int:doc_id>", "purge_note", purge_document, methods=["DELETE"])
 
 
 @app.post("/api/trash/empty")
 @login_required
 def empty_trash():
     conn = db.get_db()
-    conn.execute("DELETE FROM tasks WHERE user_id = ? AND deleted_at IS NOT NULL",
-                 (g.user["id"],))
-    conn.execute("DELETE FROM projects WHERE user_id = ? AND deleted_at IS NOT NULL",
-                 (g.user["id"],))
-    conn.execute("DELETE FROM notes WHERE user_id = ? AND deleted_at IS NOT NULL", (g.user["id"],))
+    for r in conn.execute("SELECT id FROM documents WHERE user_id = ? AND deleted_at IS NOT NULL", (g.user["id"],)).fetchall():
+        if kind_of(r["id"]):  # (not one already gone with its project)
+            purge(r["id"])
     conn.commit()
     return "", 204
 
@@ -2419,15 +2444,24 @@ def logbook():
 @login_required
 def trash():
     conn = db.get_db()
+    # What went to the trash with its project (at the same moment) is listed with it, as it
+    # comes back with it; something trashed on its own before is listed apart.
+    went_with = "IN (SELECT o.id FROM documents o WHERE o.deleted_at = {}.deleted_at)"
     rows = conn.execute(
         "SELECT * FROM tasks WHERE user_id = ? AND deleted_at IS NOT NULL "
-        "ORDER BY deleted_at DESC", (g.user["id"],)).fetchall()
+        f"AND (project_id IS NULL OR project_id NOT {went_with.format('tasks')}) ORDER BY deleted_at DESC",
+        (g.user["id"],)).fetchall()
     projects = conn.execute(
         "SELECT * FROM projects WHERE user_id = ? AND deleted_at IS NOT NULL "
-        "ORDER BY deleted_at DESC", (g.user["id"],)).fetchall()
+        f"AND (parent_id IS NULL OR parent_id NOT {went_with.format('projects')}) ORDER BY deleted_at DESC",
+        (g.user["id"],)).fetchall()
+    with_it = lambda p: conn.execute(  # noqa: E731
+        f"SELECT COUNT(*) FROM documents WHERE deleted_at = ? AND id IN ({marks_for(list(project_contents(p['id'])) or [0])})",
+        (p["deleted_at"], *(project_contents(p["id"]) or [0]))).fetchone()[0]
     notes = conn.execute("SELECT * FROM notes WHERE user_id = ? AND deleted_at IS NOT NULL "
                          "ORDER BY deleted_at DESC", (g.user["id"],)).fetchall()
-    return jsonify(tasks=tasks_json(rows), projects=projects_json(projects), notes=notes_json(notes))
+    return jsonify(tasks=tasks_json(rows), notes=notes_json(notes),
+                   projects=[p | {"inside": with_it(p)} for p in projects_json(projects)])
 
 
 # --- notes and journals --------------------------------------------------------
@@ -2546,16 +2580,6 @@ def update_note(note_id):
     return jsonify(note_dict(note_id))
 
 
-@app.delete("/api/notes/<int:note_id>")
-@login_required
-def purge_note(note_id):
-    owned("notes", note_id)
-    conn = db.get_db()
-    conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
-    conn.commit()
-    return "", 204
-
-
 def category_fields(data, table):
     out = {}
     if "name" in data:
@@ -2634,13 +2658,7 @@ def note_from_task(t, journal_id=None, today=None):
     words = t["notes"]  # (formatted text already, as a note's is)
     files = {r[0] for r in conn.execute("SELECT id FROM attachments WHERE document_id = ?", (t["id"],))}
     if journal_id:
-        note_id = journal_entry_today(journal_id, today or client_today())
-        if title and not conn.execute("SELECT title FROM notes WHERE id = ?", (note_id,)).fetchone()[0]:
-            conn.execute("UPDATE notes SET title = ? WHERE id = ?", (title, note_id))
-        elif title:
-            words = f"<p><b>{html.escape(title, quote=False)}</b></p>" + words
-        conn.execute("UPDATE notes SET body = body || ?, area_id = COALESCE(area_id, ?), updated_at = datetime('now') "
-                     "WHERE id = ?", (words, area, note_id))
+        note_id = add_to_entry(journal_id, today or client_today(), title, words, area)
         conn.execute("INSERT OR IGNORE INTO document_tags SELECT ?, tag_id FROM document_tags WHERE document_id = ?",
                      (note_id, t["id"]))
         conn.execute("UPDATE attachments SET document_id = ? WHERE document_id = ?", (note_id, t["id"]))
@@ -2673,13 +2691,28 @@ def task_to_note(task_id):
     t = owned("tasks", task_id)
     data = request.get_json(silent=True) or {}
     journal = data.get("journal_id") and owned("journals", int(data["journal_id"]))
-    if t["deleted_at"] or t["completed_at"]:
-        return bad("Only an open task can become a note.")
-    if t["series_id"]:
-        return bad("A repeating task can't become a note. Stop it repeating first.")
+    try:
+        check_task_can_change(t, "a note")
+    except ValueError as e:
+        return bad(str(e))
     note_id = note_from_task(t, journal["id"] if journal else None)
     db.get_db().commit()
     return jsonify(note_dict(note_id)), 201
+
+
+def add_to_entry(journal_id, today, title, words, area=None):
+    """Adds formatted words to the end of today's entry in a journal (made if need be), with
+    title as the entry's title if it has none, else as a bold line before them. Returns the
+    entry's id; not committed."""
+    conn = db.get_db()
+    note_id = journal_entry_today(journal_id, today)
+    if title and not conn.execute("SELECT title FROM notes WHERE id = ?", (note_id,)).fetchone()[0]:
+        conn.execute("UPDATE notes SET title = ? WHERE id = ?", (title, note_id))
+    elif title:
+        words = f"<p><b>{html.escape(title, quote=False)}</b></p>" + words
+    conn.execute("UPDATE notes SET body = body || ?, area_id = COALESCE(area_id, ?), updated_at = datetime('now') "
+                 "WHERE id = ?", (words, area, note_id))
+    return note_id
 
 
 def journal_entry_today(journal_id, today):
@@ -2846,8 +2879,7 @@ def project_fields(data):
             if value not in PROJECT_STATES:
                 raise ValueError("bad state")
             out[key] = value
-            out["completed_at"] = (time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-                                   if value == "done" else None)
+            out["completed_at"] = utcnow() if value == "done" else None
         elif key == "due_date":
             out[key] = clean_date(value)
         elif key == "area_id":
@@ -2857,8 +2889,7 @@ def project_fields(data):
         elif key == "step":
             out[key] = None if value in (None, "") else float(value)
         elif key == "deleted":
-            out["deleted_at"] = (time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-                                 if value else None)
+            out["deleted_at"] = utcnow() if value else None
     return out
 
 
@@ -2949,6 +2980,8 @@ def update_project(project_id):
         if fields:
             sets = ", ".join(f"{k} = ?" for k in fields)
             conn.execute(f"UPDATE projects SET {sets} WHERE id = ?", (*fields.values(), project_id))
+        if "deleted_at" in fields:
+            trashed(project_id, fields["deleted_at"], old["deleted_at"])
         project_links_and_tags(project_id, data)
         if "parent_id" in fields:
             check_no_loops(project_id)
@@ -2957,17 +2990,6 @@ def update_project(project_id):
         return bad(str(e))
     conn.commit()
     return jsonify(project_dict(owned("projects", project_id)))
-
-
-@app.delete("/api/projects/<int:project_id>")
-@login_required
-def purge_project(project_id):
-    owned("projects", project_id)
-    conn = db.get_db()
-    conn.execute("DELETE FROM tasks WHERE project_id = ?", (project_id,))
-    conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-    conn.commit()
-    return "", 204
 
 
 @app.post("/api/areas")

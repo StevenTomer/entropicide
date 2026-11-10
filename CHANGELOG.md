@@ -62,6 +62,8 @@ Settings → Troubleshooting.
   **Sketch** (pen and ink, in six colours and three sizes, with an eraser and undo; it follows a
   stylus's pressure) or a **Diagram** (boxes, arrows, shapes and words, with Excalidraw built in).
   They're placed like any picture, and *Edit drawing* opens them again to carry on.
+- **Focus's calendar:** today's and tomorrow's events side by side, one line each, the time first
+  (which calendar each is from only when there's more than one).
 - **Inventory:** keep track of food storage, supplies and things around the house, alone or
   shared with a group. Each thing has a name and brand (looked up from its barcode), a category,
   where it's bought and a link to it there. Count things in and out by scanning their barcodes (type 12, scan: 12

@@ -1287,9 +1287,8 @@ function renderList() {
   let subs = 0;
   if (S.view === "calendar") {
     html += calendarAgenda(list);
-  } else if (S.view === "focus" && eventsLeftToday().length) {
-    html += '<h2 class="group">Today\'s calendar</h2>' + eventsLeftToday().map(eventRow).join("") +
-      (list.length ? '<h2 class="group">Tasks</h2>' : "");
+  } else if (S.view === "focus" && (eventsLeftToday().length || eventsOn(addDays(today(), 1)).length)) {
+    html += focusCalendar() + (list.length ? '<h2 class="group">Tasks</h2>' : "");
     html += list.map((t) => taskRow(t, { showState })).join("");
   } else if (S.view === "logbook") {
     // Newest first, under a heading per day completed.
@@ -1705,6 +1704,24 @@ function eventRow(e) {
       <div class="title">${h(e.title)}</div>
       <div class="meta"><span>${time}</span>${e.calendar ? `<span>${h(e.calendar)}</span>` : ""}</div>
     </div></${tag}>`;
+}
+
+// Focus's calendar: today's events still to come beside tomorrow's, one line each, the time
+// first. (Which calendar each is from only when there's more than one.)
+function focusCalendar() {
+  const named = new Set((S.data.events || []).map((e) => e.calendar).filter(Boolean)).size > 1;
+  const line = (e) => {
+    const tag = e.link ? "a" : "div";
+    const span = e.time ? fmtTime(e.time) + (e.end_time ? "–" + fmtTime(e.end_time) : "") : "All day";
+    return `<${tag} class="ev-line" ${e.link ? `href="${h(e.link)}" target="_blank" rel="noopener"` : ""}
+        title="${h(`${e.title} · ${span}${e.calendar ? ` · ${e.calendar}` : ""}`)}">
+      <span class="ev-time">${e.time ? fmtTime(e.time) : "All day"}</span>
+      <span class="ev-dot" style="background:${e.color || "var(--accent)"}"></span>
+      <span class="ev-title">${h(e.title)}</span>${named && e.calendar ? `<span class="ev-cal">${h(e.calendar)}</span>` : ""}</${tag}>`;
+  };
+  const day = (label, evs) => `<section class="cal-day"><h2 class="group">${label}</h2>${
+    evs.map(line).join("") || '<p class="empty small">Nothing.</p>'}</section>`;
+  return `<div class="cal-pair">${day("Today", eventsLeftToday())}${day("Tomorrow", eventsOn(addDays(today(), 1)))}</div>`;
 }
 
 function calendarAgenda(tasks) {

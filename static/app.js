@@ -1787,12 +1787,14 @@ function weatherBit(which) {
   if (!w || Date.now() - weather.at > 20 * 60000) loadWeather();
   if (!w?.now) return "";
   const deg = w.units === "celsius" ? "°C" : "°";
+  // "30% chance of snow" (said whenever the forecast gives one, even 0%).
+  const chance = (d) => (d.chance == null ? "" : `, ${d.chance}% chance of ${d.falls || "rain"}`);
   if (which === "today") {
     const look = weatherLook(w.now.code, w.now.is_day);
-    return `<span class="ev-weather" title="${h(`${look.words}, ${w.now.temp}${deg} now in ${w.place.name} (today ${w.today.high}° / ${w.today.low}°)`)}">${look.icon} ${w.now.temp}${deg}</span>`;
+    return `<span class="ev-weather" title="${h(`${look.words}, ${w.now.temp}${deg} now in ${w.place.name} (today ${w.today.high}° / ${w.today.low}°${chance(w.today)})`)}">${look.icon} ${w.now.temp}${deg}</span>`;
   }
   const look = weatherLook(w.tomorrow.code);
-  return `<span class="ev-weather" title="${h(`${look.words} tomorrow in ${w.place.name}: high ${w.tomorrow.high}°, low ${w.tomorrow.low}°`)}">${look.icon} ${w.tomorrow.high}°<span class="ev-low">/${w.tomorrow.low}°</span></span>`;
+  return `<span class="ev-weather" title="${h(`${look.words} tomorrow in ${w.place.name}: high ${w.tomorrow.high}°, low ${w.tomorrow.low}°${chance(w.tomorrow)}`)}">${look.icon} ${w.tomorrow.high}°<span class="ev-low">/${w.tomorrow.low}°</span></span>`;
 }
 
 function focusCalendar() {

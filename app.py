@@ -2064,12 +2064,17 @@ def weather():
             r = outside_json("https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({
                 "latitude": place["lat"], "longitude": place["lon"], "timezone": "auto", "forecast_days": 2,
                 "current": "temperature_2m,weather_code,is_day",
-                "daily": "weather_code,temperature_2m_max,temperature_2m_min", "temperature_unit": units}))
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,snowfall_sum",
+                "temperature_unit": units}))
             day = r["daily"]
+            # (A day's chance of rain or snow: snow if any's forecast to fall, else rain.)
+            at = lambda key, i: (day.get(key) or [None, None])[i]  # noqa: E731
             data = {"now": {"temp": round(r["current"]["temperature_2m"]), "code": r["current"]["weather_code"],
                             "is_day": bool(r["current"].get("is_day", 1))},
                     **{name: {"code": day["weather_code"][i], "high": round(day["temperature_2m_max"][i]),
-                              "low": round(day["temperature_2m_min"][i])} for i, name in enumerate(("today", "tomorrow"))}}
+                              "low": round(day["temperature_2m_min"][i]), "chance": at("precipitation_probability_max", i),
+                              "falls": "snow" if (at("snowfall_sum", i) or 0) > 0 else "rain"}
+                       for i, name in enumerate(("today", "tomorrow"))}}
         except (OSError, ValueError, KeyError, IndexError, TypeError):
             if not hit:
                 return jsonify(place=place, units=units, error="The weather isn't answering just now.")

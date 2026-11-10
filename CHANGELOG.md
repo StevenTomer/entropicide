@@ -63,7 +63,7 @@ Settings → Troubleshooting.
   stylus's pressure) or a **Diagram** (boxes, arrows, shapes and words, with Excalidraw built in).
   They're placed like any picture, and *Edit drawing* opens them again to carry on.
 - **Weather on Focus:** beside Today, an icon and the temperature now; beside Tomorrow, its
-  forecast and high/low. Settings → Weather says where (a town, or your location), in °F or °C;
+  forecast and high/low; pointing at either says the chance of rain or snow. Settings → Weather says where (a town, or your location), in °F or °C;
   from Open-Meteo, asked by the server.
 - **Adding from the phone feels quicker:** an open Entropicide shows a task added from the phone's
   notification or tile (or Alexa, or another app) within half a minute, and at once when you switch

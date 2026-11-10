@@ -5459,37 +5459,39 @@ function bind() {
     }
     if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
     if (document.querySelector("dialog[open]")) return;
+    // (Letters either way: N works as n, with Shift or Caps Lock.)
+    const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
     // h / l (or ← / →) move between the lists on the left and the tasks; on the left,
     // j / k (or ↓ / ↑) go from list to list, showing each.
     if (S.navFocus) {
-      if (NAV_KEYS[e.key]) { e.preventDefault(); return moveNav(NAV_KEYS[e.key]); }
-      if (["l", "ArrowRight", "Enter"].includes(e.key)) { e.preventDefault(); return leaveNav(); }
-      if (["h", "ArrowLeft", "x", "s", "t"].includes(e.key)) { e.preventDefault(); return; }
-    } else if (e.key === "h" || e.key === "ArrowLeft") {
+      if (NAV_KEYS[key]) { e.preventDefault(); return moveNav(NAV_KEYS[key]); }
+      if (["l", "ArrowRight", "Enter"].includes(key)) { e.preventDefault(); return leaveNav(); }
+      if (["h", "ArrowLeft", "x", "s", "t"].includes(key)) { e.preventDefault(); return; }
+    } else if (key === "h" || key === "ArrowLeft") {
       e.preventDefault();
       return enterNav();
     }
-    if (e.key === "n" || e.key === "q") {
+    if (key === "n" || key === "q") {
       e.preventDefault();
       // On Links, N adds a link; other lists without a quick-add bar hand off to the Inbox.
       if (S.view === "links") return $("#link-add")?.elements.url.focus();
       if (S.view === "notes" || S.view === "journal") return newNote();
       focusQuickAdd();
     }
-    else if (e.key === "/") { e.preventDefault(); $("#search").focus(); }
-    else if (e.key === "?") { e.preventDefault(); location.href = BASE + "/help"; }
-    else if (NAV_KEYS[e.key] && shownTaskIds().length) { e.preventDefault(); moveCursor(NAV_KEYS[e.key]); }
-    else if (e.key === "Enter" && shownTaskIds().length && !e.target.closest("button, a")) {
+    else if (key === "/") { e.preventDefault(); $("#search").focus(); }
+    else if (key === "?") { e.preventDefault(); location.href = BASE + "/help"; }
+    else if (NAV_KEYS[key] && shownTaskIds().length) { e.preventDefault(); moveCursor(NAV_KEYS[key]); }
+    else if (key === "Enter" && shownTaskIds().length && !e.target.closest("button, a")) {
       e.preventDefault();
       if (!shownTaskIds().includes(S.cursor)) return moveCursor(1);
       if (S.selected?.kind === "task" && S.selected.id === S.cursor) { S.selected = null; render(); }
       else { select("task", S.cursor); focusNotes(); }
     }
-    else if (e.key === "t" && keyTargets().length === 1) { e.preventDefault(); openTimer(keyTargets()[0]); }
-    else if ((e.key === "x" || e.key === "s") && S.view !== "trash" && keyTargets().length) {
+    else if (key === "t" && keyTargets().length === 1) { e.preventDefault(); openTimer(keyTargets()[0]); }
+    else if ((key === "x" || key === "s") && S.view !== "trash" && keyTargets().length) {
       e.preventDefault();
       const ts = tasksOf(keyTargets());
-      if (e.key === "s") {
+      if (key === "s") {
         const star = !ts.every((t) => t.focus);
         changeTasks(ts, () => ({ focus: star }), ts.length > 1 ? `${star ? "Starred" : "Unstarred"} ${ts.length} tasks.` : null);
       } else {
@@ -5503,11 +5505,11 @@ function bind() {
         else dropOnNav(ts, "logbook");
       }
     }
-    else if (["+", "=", "-"].includes(e.key) && (S.picked.size || S.selected?.kind === "task")) {
+    else if (["+", "=", "-"].includes(key) && (S.picked.size || S.selected?.kind === "task")) {
       // Raise/lower the priority of the picked tasks, or of the one open in the editor.
       e.preventDefault();
       const ids = S.picked.size ? pickedIds() : [S.selected.id];
-      bumpPriority(tasksOf(ids), e.key === "-" ? -1 : 1);
+      bumpPriority(tasksOf(ids), key === "-" ? -1 : 1);
     }
   });
 

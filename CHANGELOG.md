@@ -62,6 +62,7 @@ Settings → Troubleshooting.
   **Sketch** (pen and ink, in six colours and three sizes, with an eraser and undo; it follows a
   stylus's pressure) or a **Diagram** (boxes, arrows, shapes and words, with Excalidraw built in).
   They're placed like any picture, and *Edit drawing* opens them again to carry on.
+- Keyboard shortcuts work with capitals too (N as well as n), so Shift or Caps Lock doesn't stop them.
 - **Go to a task's project:** the project's name on a task's line is a button to it, and the
   right-click menu has *Go to project*.
 - Settings → Weather finds places by ZIP or postcode (84081: West Jordan, Utah), and Settings no

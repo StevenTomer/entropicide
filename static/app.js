@@ -1296,7 +1296,8 @@ function renderList() {
   let subs = 0;
   if (S.view === "calendar") {
     html += calendarAgenda(list);
-  } else if (S.view === "focus" && (eventsLeftToday().length || eventsOn(addDays(today(), 1)).length || S.data.user.settings?.weather_place)) {
+  } else if (S.view === "focus") {
+    // (Today and Tomorrow always, for the weather, even with no events.)
     html += focusCalendar() + (list.length ? '<h2 class="group">Tasks</h2>' : "");
     html += list.map((t) => taskRow(t, { showState })).join("");
   } else if (S.view === "logbook") {
@@ -1808,15 +1809,16 @@ function focusCalendar() {
       <span class="ev-title">${h(e.title)}</span>${named && e.calendar && !small ? `<span class="ev-cal">${h(e.calendar)}</span>` : ""}</${tag}>
       ${small ? "" : `<button type="button" class="icon ev-shrink" data-shrink="${h(key)}" title="Not one to focus on: make it small" aria-label="Make it small">−</button>`}</div>`;
   };
+  const t = today(), m = addDays(t, 1);
+  const todays = eventsLeftToday(), tomorrows = eventsOn(m), none = !todays.length && !tomorrows.length;
   const day = (label, dayDate, evs) => {
     const some = evs.some((e) => shrunk.has(shrinkKey(e, dayDate)));
     return `<section class="cal-day"><h2 class="group">${label}
       <button type="button" class="icon ev-grow" data-grow="${dayDate}" ${some ? "" : "disabled"} title="Show them all full size again" aria-label="Show them all">+</button>
       ${weatherBit(label === "Today" ? "today" : "tomorrow")}</h2>${
-      evs.map((e) => line(e, dayDate)).join("") || '<p class="empty small">Nothing.</p>'}</section>`;
+      evs.map((e) => line(e, dayDate)).join("") || (none ? "" : '<p class="empty small">Nothing.</p>')}</section>`;
   };
-  const t = today(), m = addDays(t, 1);
-  return `<div class="cal-pair">${day("Today", t, eventsLeftToday())}${day("Tomorrow", m, eventsOn(m))}</div>`;
+  return `<div class="cal-pair${none ? " no-events" : ""}">${day("Today", t, todays)}${day("Tomorrow", m, tomorrows)}</div>`;
 }
 
 function calendarAgenda(tasks) {

@@ -96,7 +96,10 @@ DEFAULT_SETTINGS = {"defer_options": ["1h", "2h", "6h", "24h", "3d", "1w"], "tim
                     "review_day": "", "review_time": "16:00", "review_reminded": "", "last_review": "",
                     # Inventory: look up the names of new barcodes at Open Food Facts (only the
                     # barcode is sent; on unless turned off)
-                    "look_up_codes": True}
+                    "look_up_codes": True,
+                    # Focus's calendar: events made small, as "<event id>|<day>" (forgotten once
+                    # the day's gone)
+                    "focus_shrunk": []}
 # Reminders before a due date: the days a task can choose, and the time of day they come.
 REMIND_BEFORE_DAYS = (1, 2, 3, 7, 14, 30, 60, 90)
 REMIND_BEFORE_TIME = "09:00"
@@ -4241,6 +4244,13 @@ def update_settings():
         if not TIME_RE.match(str(data["review_time"] or "")):
             return bad("The review time must be HH:MM.")
         settings["review_time"] = data["review_time"]
+    if "focus_shrunk" in data:
+        keys = data["focus_shrunk"]
+        if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
+            return bad("focus_shrunk is a list of event|day.")
+        yesterday = (date.fromisoformat(client_today()) - timedelta(days=1)).isoformat()
+        settings["focus_shrunk"] = [k[:400] for k in dict.fromkeys(keys)
+                                    if re.search(r"\|\d{4}-\d\d-\d\d$", k) and k[-10:] >= yesterday][:500]
     if "look_up_codes" in data:
         settings["look_up_codes"] = bool(data["look_up_codes"])
     if "last_review" in data:

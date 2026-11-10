@@ -64,7 +64,7 @@ Settings → Troubleshooting.
   They're placed like any picture, and *Edit drawing* opens them again to carry on.
 - **Focus's calendar:** today's and tomorrow's events side by side, one line each, the time first
   (which calendar each is from only when there's more than one). − makes an event small, as not
-  one to focus on; + beside the day brings them all back.
+  one to focus on; + beside the day brings them all back. The same on every device.
 - **Inventory:** keep track of food storage, supplies and things around the house, alone or
   shared with a group. Each thing has a name and brand (looked up from its barcode), a category,
   where it's bought and a link to it there. Count things in and out by scanning their barcodes (type 12, scan: 12

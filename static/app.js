@@ -1708,17 +1708,41 @@ function eventRow(e) {
 
 // Focus's calendar: today's events still to come beside tomorrow's, one line each, the time
 // first. (Which calendar each is from only when there's more than one.) − on an event shrinks
-// it: not something to focus on; + beside the day brings them all back. Remembered on this
-// device, by event and day (and forgotten once the day's gone).
-const shrunk = new Set(JSON.parse(load("focusShrunk", "[]")));
+// it: not something to focus on; + beside the day brings them all back. Kept with the account
+// (settings.focus_shrunk), so every device agrees, by event and day (forgotten once the day's
+// gone). shrunk is this page's copy, taken afresh from each load.
+const shrunk = new Set();
+let shrunkFrom = null;
 const shrinkKey = (e, day) => `${e.id || e.title}|${day}`;
+function syncShrunk() {
+  const saved = S.data.user.settings?.focus_shrunk;
+  if (saved === shrunkFrom) return;
+  shrunkFrom = saved;
+  shrunk.clear();
+  for (const k of saved || []) shrunk.add(k);
+  // (Ones shrunk on this device before they were kept with the account come along once.)
+  const local = JSON.parse(load("focusShrunk", "[]") || "[]");
+  if (local.length) {
+    for (const k of local) shrunk.add(k);
+    save("focusShrunk", "[]");
+    saveShrunk();
+  }
+}
 function saveShrunk() {
   const t = today();
   for (const k of shrunk) if (k.slice(k.lastIndexOf("|") + 1) < t) shrunk.delete(k);
-  save("focusShrunk", JSON.stringify([...shrunk]));
+  api("PATCH", "/me/settings", { focus_shrunk: [...shrunk] }, { quiet: true })
+    .then((settings) => {
+      if (!settings) return;
+      S.data.user.settings = settings;
+      shrunkFrom = null;  // (what the server kept is what counts)
+      if (S.view === "focus") renderList();
+    })
+    .catch(() => {});
 }
 
 function focusCalendar() {
+  syncShrunk();
   const named = new Set((S.data.events || []).map((e) => e.calendar).filter(Boolean)).size > 1;
   const line = (e, dayDate) => {
     const key = shrinkKey(e, dayDate), small = shrunk.has(key);

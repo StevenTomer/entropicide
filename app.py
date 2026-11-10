@@ -95,8 +95,8 @@ DEFAULT_SETTINGS = {"defer_options": ["1h", "2h", "6h", "24h", "3d", "1w"], "tim
                     # time, the day it was last sent, and the day the last review was done.
                     "review_day": "", "review_time": "16:00", "review_reminded": "", "last_review": "",
                     # Inventory: look up the names of new barcodes at Open Food Facts (only the
-                    # barcode is sent; off unless chosen)
-                    "look_up_codes": False}
+                    # barcode is sent; on unless turned off)
+                    "look_up_codes": True}
 # Reminders before a due date: the days a task can choose, and the time of day they come.
 REMIND_BEFORE_DAYS = (1, 2, 3, 7, 14, 30, 60, 90)
 REMIND_BEFORE_TIME = "09:00"
@@ -1720,6 +1720,16 @@ def item_fields(data):
             out[key] = value
         elif key == "unit":
             out[key] = str(value or "").strip()[:40]
+        elif key in ("brand", "category", "store"):
+            out[key] = str(value or "").strip()[:200]
+        elif key == "url":
+            value = str(value or "").strip()[:2000]
+            if value and not re.match(r"https?://\S+$", value, re.I):
+                if re.match(r"[\w-]+(\.[\w-]+)+(/\S*)?$", value):
+                    value = "https://" + value  # (typed without its https://)
+                else:
+                    raise ValueError("A product link is a web address (https://…).")
+            out[key] = value or None
         elif key == "used_up":
             out[key] = 1 if value else 0
         elif key == "location_id":
@@ -1910,6 +1920,7 @@ def count_item():
             # A new one: what was counted is what there is.
             item_id = write_item({"name": data["name"], "inventory_id": inv["id"], "location_id": data.get("location_id"),
                                   "unit": data.get("unit", ""), "codes": [code] if code else [],
+                                  **{k: data[k] for k in ("brand", "category", "store", "url") if data.get(k)},
                                   **({"used_up": data["used_up"]} if "used_up" in data else {}),
                                   "quantity": max(delta, 0)})
             conn.commit()
@@ -1935,20 +1946,20 @@ def count_item():
 @app.get("/api/codes/<code>")
 @login_required
 def look_up_code(code):
-    """A product's name from Open Food Facts, if the user has turned that on (Settings →
-    Inventory); only the barcode is sent. {"name": …} or {"name": null}."""
+    """A product's name and brand from Open Food Facts, unless the user has turned that off
+    (Settings → Inventory); only the barcode is sent. {"name", "brand", "size"}, null if unknown."""
     if not user_settings(g.user).get("look_up_codes") or not re.fullmatch(r"\d{6,14}", code):
-        return jsonify(name=None)
+        return jsonify(name=None, brand=None, size=None)
     try:
         req = urllib.request.Request(f"https://world.openfoodfacts.org/api/v2/product/{code}.json?fields=product_name,brands,quantity",
                                      headers={"User-Agent": "Entropicide (self-hosted task manager)"})
         with urllib.request.urlopen(req, timeout=6) as r:
             product = json.load(r).get("product") or {}
     except (OSError, ValueError):
-        return jsonify(name=None)
-    name = " ".join(x for x in (product.get("brands", "").split(",")[0].strip(), product.get("product_name", "").strip(),
-                                product.get("quantity", "").strip()) if x)
-    return jsonify(name=name[:200] or None)
+        return jsonify(name=None, brand=None, size=None)
+    return jsonify(name=(product.get("product_name") or "").strip()[:200] or None,
+                   brand=(product.get("brands") or "").split(",")[0].strip()[:200] or None,
+                   size=(product.get("quantity") or "").strip()[:40] or None)
 
 
 # Locations: where things are in an inventory, nested.

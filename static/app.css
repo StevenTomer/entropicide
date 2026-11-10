@@ -1111,7 +1111,14 @@ dialog.item-dialog { width: min(34rem, calc(100vw - 2rem)); }
 .ii-pics { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin: 0.5rem 0; }
 .ii-pics img { width: 5rem; height: 5rem; object-fit: cover; border-radius: 0.375rem; }
 .ii-foot { margin-top: 1rem; text-align: right; }
-.iv-place-list li { display: flex; gap: 0.375rem; align-items: center; padding: 0.1875rem 0; }
-.iv-place-list .iv-indent { white-space: pre; }
-.iv-place-list input { flex: 1; }
-.iv-place-list select { width: auto; }
+/* Places, as a tree: each indented by its depth, a branch before it */
+.iv-place-list li { display: flex; gap: 0.375rem; align-items: center; padding: 0.1875rem 0;
+  padding-left: calc(var(--depth, 0) * 1.5rem); }
+.iv-place-list .pl-branch { color: var(--muted); width: 1rem; text-align: center; }
+.iv-place-list input { flex: 1; min-width: 6rem; }
+.iv-place-list select { width: 7.5rem; }
+.iv-ask .iv-brand-in, .iv-ask .iv-cat-in { width: 9rem; }
+.iv-new-item.looking span::after { content: " Looking it up…"; color: var(--muted); }
+.iv-brand { font-weight: 600; }
+.ii-path { margin: -0.25rem 0 0.5rem; }
+dialog.iv-new-place { width: min(24rem, calc(100vw - 2rem)); }

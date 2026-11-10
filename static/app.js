@@ -411,7 +411,13 @@ function renderOffline() {
 
 let toastTimer;
 function toast(msg, undo) {
-  const el = $("#toast");
+  let el = $("#toast");
+  // (A dialog redrawn while showing one takes it with it: make it again.)
+  if (!el) {
+    el = Object.assign(document.createElement("div"), { id: "toast", hidden: true });
+    el.setAttribute("role", "status");
+    document.body.append(el);
+  }
   // An open modal dialog covers the page, so show the toast inside it.
   (document.querySelector("dialog[open]") || document.body).append(el);
   el.innerHTML = h(msg) + (undo ? ' <button class="link" id="undo">Undo</button>' : "");

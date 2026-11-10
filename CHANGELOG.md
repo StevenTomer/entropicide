@@ -63,7 +63,8 @@ Settings → Troubleshooting.
   stylus's pressure) or a **Diagram** (boxes, arrows, shapes and words, with Excalidraw built in).
   They're placed like any picture, and *Edit drawing* opens them again to carry on.
 - **Inventory:** keep track of food storage, supplies and things around the house, alone or
-  shared with a group. Count things in and out by scanning their barcodes (type 12, scan: 12
+  shared with a group. Each thing has a name and brand (looked up from its barcode), a category,
+  where it's bought and a link to it there. Count things in and out by scanning their barcodes (type 12, scan: 12
   cans added), with the camera or a barcode scanner; a new barcode asks once what it is. Things
   used up get a minimum, and below it “Buy …” goes on the inventory's shopping list; things kept
   have a place (nested places, with printable QR labels that open them) and can be lent.

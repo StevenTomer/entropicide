@@ -124,3 +124,31 @@ def test_a_shared_inventory(app, user_client):
     assert bob.delete(f"/api/inventories/{inv}", headers=H).status_code == 403
     ann.delete(f"/api/inventories/{inv}", headers=H)
     assert rows(app, "SELECT COUNT(*) AS n FROM documents WHERE kind = 'item'") == [{"n": 0}]
+
+
+def test_brand_category_store_and_link(pantry):
+    ann, inv = pantry
+    r = count(ann, inv, code="0051000012616", delta=12, name="Tomato soup", brand="Campbell's", category="Canned goods")
+    sid = r.get_json()["item"]["id"]
+    it = ann.patch(f"/api/items/{sid}", json={"store": "Walmart", "url": "walmart.com/ip/10308169"}, headers=H).get_json()
+    assert (it["brand"], it["category"], it["store"], it["url"]) == ("Campbell's", "Canned goods", "Walmart", "https://walmart.com/ip/10308169")
+    assert ann.patch(f"/api/items/{sid}", json={"url": "javascript:alert(1)"}, headers=H).status_code == 400
+
+
+def test_looking_up_a_barcode(pantry, monkeypatch):
+    """On unless turned off: the name, brand and size, each on its own."""
+    import io
+    import json
+    from conftest import entropicide
+    asked = []
+
+    def fake(req, timeout):
+        asked.append(req.full_url)
+        return io.BytesIO(json.dumps({"product": {"product_name": "Tomato Soup", "brands": "Campbell's, Campbell Soup Co",
+                                                  "quantity": "10.75 oz"}}).encode())
+    monkeypatch.setattr(entropicide.urllib.request, "urlopen", fake)
+    ann, inv = pantry
+    assert ann.get("/api/codes/0051000012616").get_json() == {"name": "Tomato Soup", "brand": "Campbell's", "size": "10.75 oz"}
+    assert asked == ["https://world.openfoodfacts.org/api/v2/product/0051000012616.json?fields=product_name,brands,quantity"]
+    ann.patch("/api/me/settings", json={"look_up_codes": False}, headers=H)
+    assert ann.get("/api/codes/0051000012616").get_json()["name"] is None and len(asked) == 1

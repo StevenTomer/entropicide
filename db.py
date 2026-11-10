@@ -141,6 +141,12 @@ KINDS = {
             # how many there are (used up: what's left; kept: how many we have)
             ("quantity", "REAL NOT NULL DEFAULT 0"),
             ("unit", "TEXT NOT NULL DEFAULT ''"),
+            # who makes it (Campbell's), its kind (Condiments, Paper products), where it's usually
+            # bought (Walmart, Amazon), and its page there
+            ("brand", "TEXT NOT NULL DEFAULT ''"),
+            ("category", "TEXT NOT NULL DEFAULT ''"),
+            ("store", "TEXT NOT NULL DEFAULT ''"),
+            ("url", "TEXT"),
             # 1: used up and bought again (counted down, restocked when low); 0: kept
             ("used_up", "INTEGER NOT NULL DEFAULT 1"),
             # below this, a task to buy more (back up to restock_to, else to this)
@@ -672,6 +678,11 @@ def migrate(conn):
         conn.execute("ALTER TABLE journals ADD COLUMN group_id INTEGER REFERENCES user_groups(id) ON DELETE SET NULL")
     if "changed_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(user_groups)")}:
         conn.execute("ALTER TABLE user_groups ADD COLUMN changed_at TEXT NOT NULL DEFAULT ''")
+    item_cols = {r["name"] for r in conn.execute("PRAGMA table_info(item_data)")}
+    for col, ddl in (("brand", "TEXT NOT NULL DEFAULT ''"), ("category", "TEXT NOT NULL DEFAULT ''"),
+                     ("store", "TEXT NOT NULL DEFAULT ''"), ("url", "TEXT")):
+        if item_cols and col not in item_cols:
+            conn.execute(f"ALTER TABLE item_data ADD COLUMN {col} {ddl}")
     if not legacy and "assigned_to" not in {r["name"] for r in conn.execute("PRAGMA table_info(task_data)")}:
         conn.execute("ALTER TABLE task_data ADD COLUMN assigned_to INTEGER REFERENCES users(id) ON DELETE SET NULL")
     project_cols = {r["name"] for r in conn.execute("PRAGMA table_info(project_data)")}

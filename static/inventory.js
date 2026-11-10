@@ -37,18 +37,29 @@ function placePath(id) {
   return out.reverse().map((l) => l.name).join(" › ");
 }
 
-// An inventory's places as a tree, flattened: [[id, name indented]].
+// An inventory's places as a tree, flattened in order: [[id, name drawn as a branch, depth]].
+// (Spaces that don't collapse, so a list of choices shows the tree too.)
 function placeOptions(inv) {
   const out = [], places = (S.data.locations || []).filter((l) => l.inventory_id === inv.id);
   const walk = (parent, depth) => {
-    for (const l of places.filter((x) => (x.parent_id ?? null) === parent)) {
-      out.push([l.id, `${"   ".repeat(depth)}${l.name}`]);
+    for (const l of places.filter((x) => (x.parent_id ?? null) === parent).sort((a, b) => a.name.localeCompare(b.name))) {
+      out.push([l.id, `${"\u00a0\u00a0\u00a0\u00a0".repeat(depth)}${depth ? "└\u00a0" : ""}${l.name}`, depth]);
       walk(l.id, depth + 1);
     }
   };
   walk(null, 0);
   return out;
 }
+
+// Categories to choose from: the inventory's own, and (food storage) some to start with.
+const STOCK_CATEGORIES = ["Baking", "Breakfast", "Canned goods", "Cleaning", "Condiments", "Dairy", "Drinks", "Frozen",
+  "Fruit", "Grains and pasta", "Meat", "Medicine", "Paper products", "Personal care", "Pet supplies", "Snacks",
+  "Spices", "Vegetables"];
+function categoryList(inv) {
+  const own = invItems(inv).map((i) => i.category).filter(Boolean);
+  return [...new Set([...own, ...(inv.kind === "stock" ? STOCK_CATEGORIES : [])])].sort((a, b) => a.localeCompare(b));
+}
+const categoryDatalist = (inv) => `<datalist id="iv-categories">${categoryList(inv).map((c) => `<option value="${h(c)}">`).join("")}</datalist>`;
 
 function renderInventory(el) {
   const inv = currentInventory();
@@ -93,20 +104,21 @@ function renderInventory(el) {
   <div class="iv-filters">
     ${[["", `All · ${items.length}`], ["low", `Low · ${low}`], ["kept", "Kept"], ["lent", `Lent · ${lent}`]]
       .map(([f, label]) => `<button type="button" class="cat-chip${IV.filter === f ? " on" : ""}" data-filter="${f}">${label}</button>`).join("")}
-    <select class="iv-layout" aria-label="Order">${options([["places", "By place"], ["names", "A–Z"]], IV.layout)}</select>
+    <select class="iv-layout" aria-label="Order">${options([["places", "By place"], ["categories", "By category"], ["names", "A–Z"]], IV.layout)}</select>
     ${IV.place ? `<button type="button" class="link iv-all-places">All places (now: ${h(placePath(IV.place))}) ✕</button>` : ""}
   </div>`;
   if (!shown.length) {
     html += `<p class="empty">${items.length ? "Nothing here matches." : "Nothing in it yet. Type how many, then scan a barcode (or type a name) above."}</p>`;
-  } else if (IV.layout === "places") {
-    const byPlace = new Map();
+  } else if (IV.layout === "places" || IV.layout === "categories") {
+    const byPlace = IV.layout === "places", groups = new Map();
     for (const it of shown) {
-      const key = it.location_id && locationById(it.location_id) ? placePath(it.location_id) : "";
-      if (!byPlace.has(key)) byPlace.set(key, []);
-      byPlace.get(key).push(it);
+      const key = byPlace ? (it.location_id && locationById(it.location_id) ? placePath(it.location_id) : "") : it.category;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(it);
     }
-    for (const key of [...byPlace.keys()].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b))) {
-      html += `<h2 class="group">${h(key || "No place")}</h2>` + byPlace.get(key).map((it) => itemRow(it, false)).join("");
+    for (const key of [...groups.keys()].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b))) {
+      html += `<h2 class="group">${h(key || (byPlace ? "No place" : "No category"))}</h2>` +
+        groups.get(key).map((it) => itemRow(it, !byPlace)).join("");
     }
   } else {
     html += shown.map((it) => itemRow(it, true)).join("");
@@ -122,13 +134,16 @@ function shownItems(inv, items) {
   return items.filter((it) =>
     (!IV.filter || (IV.filter === "low" ? isLow(it) : IV.filter === "kept" ? !it.used_up : !!it.lent_to)) &&
     (!inPlace || inPlace.has(it.location_id)) &&
-    (!q || [it.name, ...it.codes, ...it.tags, placePath(it.location_id), it.lent_to || ""].some((t) => t.toLowerCase().includes(q))));
+    (!q || [it.name, it.brand, it.category, it.store, ...it.codes, ...it.tags, placePath(it.location_id), it.lent_to || ""]
+      .some((t) => (t || "").toLowerCase().includes(q))));
 }
 
 function itemRow(it, withPlace) {
   const pic = it.attachments.find((f) => IMAGE_TYPES.includes(f.mime));
   const meta = [
+    it.brand ? `<span class="iv-brand">${h(it.brand)}</span>` : "",
     withPlace && it.location_id ? `<span>${h(placePath(it.location_id))}</span>` : "",
+    !withPlace && it.category && IV.layout !== "categories" ? `<span>${h(it.category)}</span>` : "",
     it.lent_to ? `<span class="iv-lent">Lent to ${h(it.lent_to)}${it.lent_on ? `, ${h(fmtDate(it.lent_on))}` : ""}</span>` : "",
     isLow(it) ? `<span class="iv-low">Low: keep ${fmtQty(it.keep_at_least)}</span>` : "",
     it.group_id ? sharedMeta(it, "item") : "",
@@ -149,7 +164,7 @@ function itemRow(it, withPlace) {
 // A barcode (or name) not known yet: what is it?
 function pendingHtml(inv) {
   if (IV.choices) {
-    return `<div class="iv-ask">Which one? ${IV.choices.map((it) => `<button type="button" class="iv-choose" data-item="${it.id}">${h(it.name)}</button>`).join(" ")}
+    return `<div class="iv-ask">Which one? ${IV.choices.map((it) => `<button type="button" class="iv-choose" data-item="${it.id}">${h(it.brand ? `${it.brand} ${it.name}` : it.name)}</button>`).join(" ")}
       <button type="button" class="link iv-cancel">Cancel</button></div>`;
   }
   const p = IV.pending;
@@ -157,10 +172,13 @@ function pendingHtml(inv) {
   const last = Number(load(`inventoryPlace${inv.id}`, "")) || "";
   return `<form class="iv-ask iv-new-item" autocomplete="off">
     <span>${p.code ? `New barcode <code>${h(p.code)}</code>: what is it?` : "Something new:"}</span>
+    <input name="brand" value="${h(p.brand || "")}" placeholder="Brand" class="iv-brand-in" aria-label="Brand">
     <input name="name" value="${h(p.name || "")}" placeholder="Name (e.g. Tomato soup)" required aria-label="Name">
-    <input name="unit" placeholder="Unit (cans)" class="iv-unit" aria-label="Unit">
+    <input name="unit" value="${h(p.unit || "")}" placeholder="Unit (cans)" class="iv-unit" aria-label="Unit">
+    <input name="category" placeholder="Category" list="iv-categories" class="iv-cat-in" aria-label="Category" value="${h(load(`inventoryCategory${inv.id}`, ""))}">
+    ${categoryDatalist(inv)}
     <select name="location_id" aria-label="Place">${options([["", "No place"], ...placeOptions(inv)], last)}</select>
-    <label class="check"><input type="checkbox" name="used_up" ${inv.kind === "home" ? "" : "checked"}> Used up</label>
+    <label class="check"><input type="checkbox" name="used_up" ${inv.kind === "home" ? "" : "checked"}> Consumable</label>
     <button class="primary">${p.delta < 0 ? "Save" : `Add ${fmtQty(Math.abs(p.delta))}`}</button>
     <button type="button" class="link iv-cancel">Cancel</button>
   </form>`;
@@ -190,10 +208,18 @@ async function countIn(found, delta, extra = {}) {
   if (r.unknown !== undefined && !r.item) {
     IV.pending = { code: r.unknown, name: found.name || "", delta };
     renderList();
-    if (r.unknown && S.data.user.settings?.look_up_codes) {
-      const named = await api("GET", `/codes/${encodeURIComponent(r.unknown)}`, undefined, { quiet: true }).catch(() => null);
-      const box = $(".iv-new-item input[name=name]");
-      if (named?.name && box && !box.value) box.value = named.name;
+    if (r.unknown && S.data.user.settings?.look_up_codes !== false) {
+      const form = $(".iv-new-item");
+      form?.classList.add("looking");
+      const found = await api("GET", `/codes/${encodeURIComponent(r.unknown)}`, undefined, { quiet: true }).catch(() => null);
+      form?.classList.remove("looking");
+      // (Its size goes with its name: "Stuffing mix (12 oz)"; the unit is what it's counted in.)
+      const name = found?.name && (found.size ? `${found.name} (${found.size})` : found.name);
+      for (const [k, v] of [["name", name], ["brand", found?.brand]]) {
+        const box = $(`.iv-new-item input[name=${k}]`);
+        if (v && box && !box.value) box.value = v;
+      }
+      if (form && !found?.name) $(".iv-new-item span").textContent += " (not found online: type its name)";
     }
     $(".iv-new-item input[name=name]")?.focus();
     return r;
@@ -226,8 +252,9 @@ async function counterEntry(text) {
     return r;
   }
   const words = text.toLowerCase();
-  const exact = invItems(inv).filter((it) => it.name.toLowerCase() === words);
-  const matches = exact.length ? exact : invItems(inv).filter((it) => it.name.toLowerCase().includes(words));
+  const full = (it) => `${it.brand ? it.brand + " " : ""}${it.name}`.toLowerCase();
+  const exact = invItems(inv).filter((it) => it.name.toLowerCase() === words || full(it) === words);
+  const matches = exact.length ? exact : invItems(inv).filter((it) => full(it).includes(words));
   if (matches.length === 1) { resetCount(); return countIn({ item_id: matches[0].id }, delta); }
   if (matches.length > 1) { IV.choices = matches.slice(0, 12); IV.choiceDelta = delta; renderList(); return null; }
   IV.pending = { code: "", name: text, delta };
@@ -333,11 +360,19 @@ function openItem(id) {
     dlg.addEventListener("close", () => renderList());
   }
   dlg.dataset.item = id;
+  // (A message shown inside the dialog is kept out of the way of the redraw, and put back.)
+  const note = $("#toast"), noteInside = note && dlg.contains(note);
+  if (noteInside) document.body.append(note);
   const pics = it.attachments.filter((f) => IMAGE_TYPES.includes(f.mime));
   const files = it.attachments.filter((f) => !IMAGE_TYPES.includes(f.mime));
   dlg.innerHTML = `<form method="dialog" class="dlg-head"><input class="ii-name" data-f="name" value="${h(it.name)}" aria-label="Name">
       <button class="icon" aria-label="Close">✕</button></form>
-    <label class="check"><input type="checkbox" data-f="used_up" ${it.used_up ? "checked" : ""}> Used up, and bought again (else it's kept)</label>
+    <div class="two">
+      <label>Brand <input data-f="brand" value="${h(it.brand)}" placeholder="Campbell's"></label>
+      <label>Category <input data-f="category" value="${h(it.category)}" list="iv-categories" placeholder="Canned goods"></label>
+    </div>
+    ${categoryDatalist(inv)}
+    <label class="check" title="Used up and bought again (soup, batteries); else it's kept (shears, a ladder)"><input type="checkbox" data-f="used_up" ${it.used_up ? "checked" : ""}> Consumable</label>
     <div class="two">
       <label>${it.used_up ? "How many left" : "How many"} <input type="number" data-f="quantity" min="0" step="any" value="${fmtQty(it.quantity)}"></label>
       <label>Unit <input data-f="unit" value="${h(it.unit)}" placeholder="cans, lb, rolls"></label>
@@ -347,6 +382,13 @@ function openItem(id) {
       <label title="How many to buy back up to (else the minimum)">Buy back up to <input type="number" data-f="restock_to" min="0" step="any" value="${it.restock_to ?? ""}" placeholder="the minimum"></label>
     </div>` : ""}
     <label>Place <select data-f="location_id">${options([["", "No place"], ...placeOptions(inv), ["new", "New place…"]], it.location_id ?? "")}</select></label>
+    ${it.location_id && placePath(it.location_id).includes("›") ? `<p class="muted small ii-path">${h(placePath(it.location_id))}</p>` : ""}
+    <div class="two">
+      <label>Bought at <input data-f="store" value="${h(it.store)}" placeholder="Walmart, Amazon…" list="iv-stores"></label>
+      <label>Its page there <input data-f="url" type="url" value="${h(it.url || "")}" placeholder="https://…"></label>
+    </div>
+    <datalist id="iv-stores">${[...new Set((S.data.items || []).map((i) => i.store).filter(Boolean))].map((x) => `<option value="${h(x)}">`).join("")}</datalist>
+    ${it.url ? `<p class="small"><a href="${h(it.url)}" target="_blank" rel="noopener noreferrer">Open its page${it.store ? ` at ${h(it.store)}` : ""} ↗</a></p>` : ""}
     <div class="ii-codes"><span>Barcodes</span> ${it.codes.map((c) => `<span class="ii-code"><code>${h(c)}</code><button type="button" class="link ii-code-del" data-code="${h(c)}" aria-label="Remove">✕</button></span>`).join("") || '<span class="muted">none</span>'}
       <button type="button" class="link ii-code-scan">+ Scan one</button> <button type="button" class="link ii-code-type">+ Type one</button></div>
     <label>Tags <input data-f="tags" value="${h(it.tags.join(", "))}" placeholder="comma, separated"></label>
@@ -358,6 +400,7 @@ function openItem(id) {
     ${files.length ? `<p class="small">${files.map((f) => `<a href="${h(fileUrl(f))}" target="_blank" rel="noopener">📎 ${h(f.name)}</a>`).join(" ")}</p>` : ""}
     <label class="link ii-add-file small">+ Attach a receipt or manual<input type="file" hidden></label>
     <p class="ii-foot"><button type="button" class="danger ii-delete">Move to trash</button></p>`;
+  if (noteInside) dlg.append(note);
   dlg.classList.toggle("read-only", !canChange(it));
   if (!canChange(it)) for (const c of dlg.querySelectorAll("input, select, .ii-foot button, .ii-lend button")) c.disabled = true;
   if (!dlg.open) dlg.showModal();
@@ -386,16 +429,14 @@ async function itemChanged(e) {
   const f = t.dataset.f;
   if (!f) return;
   if (f === "location_id" && t.value === "new") {
-    const name = prompt("Name the new place (e.g. Basement shelf)")?.trim();
-    if (!name) { t.value = it.location_id ?? ""; return; }
-    const l = await api("POST", "/locations", { inventory_id: it.inventory_id, name });
-    if (!l) return;
-    S.data.locations.push(l);
-    return saveItem(id, { location_id: l.id });
+    t.value = it.location_id ?? "";
+    const l = await newPlace(inventoryById(it.inventory_id), it.location_id);
+    return l ? saveItem(id, { location_id: l.id }) : null;
   }
   const value = t.type === "checkbox" ? t.checked : f === "tags" ? t.value.split(",").map((x) => x.trim()).filter(Boolean)
     : ["quantity", "keep_at_least", "restock_to"].includes(f) ? (t.value === "" ? null : Number(t.value))
     : f === "location_id" ? (t.value ? Number(t.value) : null) : t.value;
+  if (f === "url" && value && !t.checkValidity() && !/^[\w-]+(\.[\w-]+)+/.test(value)) return toast("A product link is a web address (https://…).");
   if (f === "location_id" && value) save(`inventoryPlace${it.inventory_id}`, String(value));
   return saveItem(id, { [f]: value });
 }
@@ -435,31 +476,32 @@ function openPlaces() {
     dlg.innerHTML = `<form method="dialog" class="dlg-head"><h2>Places in ${h(inv.name)}</h2><button class="icon" aria-label="Close">✕</button></form>
       <p class="muted small">Where things are, inside one another: a room, a shelf in it, a bin on the shelf. Each can have a QR
         label (<em>Label</em>): scanning it with a phone shows what's there.</p>
-      <ul class="plain iv-place-list">${placeOptions(inv).map(([id, name]) => {
-        const l = locationById(id);
-        return `<li data-place="${id}"><span class="iv-indent">${h(name.match(/^ */)[0])}</span>
+      <ul class="plain iv-place-list">${placeOptions(inv).map(([id, , depth]) => {
+        const l = locationById(id), count = invItems(inv).filter((i) => i.location_id === id).length;
+        return `<li data-place="${id}" style="--depth: ${depth}">
+          <span class="pl-branch" aria-hidden="true">${depth ? "└" : "▪"}</span>
           <input class="pl-name" value="${h(l.name)}" aria-label="Name">
-          <select class="pl-parent" aria-label="Inside">${options([["", "(top)"], ...placeOptions(inv).filter(([x]) => x !== id)
-            .map(([x, n]) => [x, `in ${n.trim()}`])], l.parent_id ?? "")}</select>
+          <span class="muted small">${count || ""}</span>
+          <button type="button" class="link pl-inside" title="A place inside this one">+ Inside</button>
+          <select class="pl-parent" aria-label="Move it into" title="Move it into another place">${options([["", "Move into…"], ["top", "(the top)"],
+            ...placeOptions(inv).filter(([x]) => x !== id && !placePath(x).startsWith(placePath(id) + " ›")).map(([x, n]) => [x, n])], "")}</select>
           <button type="button" class="link pl-label">Label</button>
           <button type="button" class="link danger pl-del">Delete</button></li>`;
-      }).join("") || '<li class="muted">No places yet.</li>'}</ul>
-      <form class="inline pl-add"><input name="name" placeholder="New place" required>
-        <select name="parent" aria-label="Inside">${options([["", "(top)"], ...placeOptions(inv).map(([x, n]) => [x, `in ${n.trim()}`])], "")}</select>
-        <button>Add</button></form>
+      }).join("") || '<li class="muted">No places yet. Start with the rooms (Storage room, Master bedroom), then add what\'s inside each.</li>'}</ul>
+      <form class="inline pl-add"><input name="name" placeholder="New place at the top (a room)" required><button>Add</button></form>
       ${places.length ? '<p><button type="button" class="pl-all-labels">Print labels for every place</button></p>' : ""}`;
   };
   draw();
   dlg.onsubmit = async (e) => {
     if (!e.target.matches(".pl-add")) return;
     e.preventDefault();
-    const l = await api("POST", "/locations", { inventory_id: inv.id, name: e.target.elements.name.value.trim(),
-      parent_id: Number(e.target.elements.parent.value) || null });
+    const l = await api("POST", "/locations", { inventory_id: inv.id, name: e.target.elements.name.value.trim() });
     if (l) { S.data.locations.push(l); draw(); }
   };
   dlg.onchange = async (e) => {
     const li = e.target.closest("[data-place]");
     if (!li) return;
+    if (e.target.matches(".pl-parent") && !e.target.value) return;
     const id = Number(li.dataset.place), changes = e.target.matches(".pl-name") ? { name: e.target.value } : { parent_id: Number(e.target.value) || null };
     const l = await api("PATCH", `/locations/${id}`, changes);
     if (l) { Object.assign(locationById(id), l); draw(); }
@@ -467,7 +509,12 @@ function openPlaces() {
   };
   dlg.onclick = async (e) => {
     const b = e.target.closest("button"), id = Number(b?.closest("[data-place]")?.dataset.place);
-    if (b?.matches(".pl-label")) printLabels([id]);
+    if (b?.matches(".pl-inside")) {
+      const name = prompt(`A place inside “${locationById(id).name}” (e.g. Shelf 1, Drawer 6)`)?.trim();
+      if (!name) return;
+      const l = await api("POST", "/locations", { inventory_id: inv.id, name, parent_id: id });
+      if (l) { S.data.locations.push(l); draw(); }
+    } else if (b?.matches(".pl-label")) printLabels([id]);
     else if (b?.matches(".pl-all-labels")) printLabels(placeOptions(inv).map(([x]) => x));
     else if (b?.matches(".pl-del")) {
       if (!confirm(`Delete “${locationById(id).name}”, and the places in it? What's there stays, with no place.`)) return;
@@ -478,6 +525,31 @@ function openPlaces() {
   };
   dlg.addEventListener("close", () => { dlg.onsubmit = dlg.onchange = dlg.onclick = null; renderList(); }, { once: true });
   if (!dlg.open) dlg.showModal();
+}
+
+// A new place, from an item's details: its name, and where it is (inside the item's place, to
+// begin with). Resolves to it, or null.
+function newPlace(inv, inside) {
+  return new Promise((done) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "iv-new-place";
+    dlg.innerHTML = `<form method="dialog" class="stack"><h3>A new place</h3>
+      <label>Name <input name="name" required placeholder="Shelf 1, Drawer 6, Blue bin"></label>
+      <label>Inside <select name="parent">${options([["", "Nothing: it's a room, or the like"], ...placeOptions(inv)], inside ?? "")}</select></label>
+      <p><button class="primary" value="add">Add</button> <button value="" formnovalidate>Cancel</button></p></form>`;
+    document.body.append(dlg);
+    dlg.addEventListener("close", async () => {
+      const f = $("form", dlg).elements;
+      let l = null;
+      if (dlg.returnValue === "add" && f.name.value.trim()) {
+        l = await api("POST", "/locations", { inventory_id: inv.id, name: f.name.value.trim(), parent_id: Number(f.parent.value) || null }).catch(() => null);
+        if (l) S.data.locations.push(l);
+      }
+      dlg.remove();
+      done(l);
+    });
+    dlg.showModal();
+  });
 }
 
 // A sheet of QR labels, one for each place: its name, and an address that opens it here.
@@ -582,8 +654,10 @@ function bindInventory() {
     } else if (f.matches(".iv-new-item")) {
       const p = IV.pending, el = f.elements;
       if (el.location_id.value) save(`inventoryPlace${currentInventory().id}`, el.location_id.value);
+      if (el.category.value.trim()) save(`inventoryCategory${currentInventory().id}`, el.category.value.trim());
       await countIn({ ...(p.code ? { code: p.code } : {}), name: el.name.value.trim() }, Math.abs(p.delta),
-        { unit: el.unit.value.trim(), location_id: Number(el.location_id.value) || null, used_up: el.used_up.checked });
+        { unit: el.unit.value.trim(), brand: el.brand.value.trim(), category: el.category.value.trim(),
+          location_id: Number(el.location_id.value) || null, used_up: el.used_up.checked });
       const c = $(".iv-count"); if (c) c.value = "1";
     }
   });

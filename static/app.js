@@ -1707,21 +1707,38 @@ function eventRow(e) {
 }
 
 // Focus's calendar: today's events still to come beside tomorrow's, one line each, the time
-// first. (Which calendar each is from only when there's more than one.)
+// first. (Which calendar each is from only when there's more than one.) − on an event shrinks
+// it: not something to focus on; + beside the day brings them all back. Remembered on this
+// device, by event and day (and forgotten once the day's gone).
+const shrunk = new Set(JSON.parse(load("focusShrunk", "[]")));
+const shrinkKey = (e, day) => `${e.id || e.title}|${day}`;
+function saveShrunk() {
+  const t = today();
+  for (const k of shrunk) if (k.slice(k.lastIndexOf("|") + 1) < t) shrunk.delete(k);
+  save("focusShrunk", JSON.stringify([...shrunk]));
+}
+
 function focusCalendar() {
   const named = new Set((S.data.events || []).map((e) => e.calendar).filter(Boolean)).size > 1;
-  const line = (e) => {
+  const line = (e, dayDate) => {
+    const key = shrinkKey(e, dayDate), small = shrunk.has(key);
     const tag = e.link ? "a" : "div";
     const span = e.time ? fmtTime(e.time) + (e.end_time ? "–" + fmtTime(e.end_time) : "") : "All day";
-    return `<${tag} class="ev-line" ${e.link ? `href="${h(e.link)}" target="_blank" rel="noopener"` : ""}
+    return `<div class="ev-line${small ? " shrunk" : ""}"><${tag} class="ev-open" ${e.link ? `href="${h(e.link)}" target="_blank" rel="noopener"` : ""}
         title="${h(`${e.title} · ${span}${e.calendar ? ` · ${e.calendar}` : ""}`)}">
       <span class="ev-time">${e.time ? fmtTime(e.time) : "All day"}</span>
       <span class="ev-dot" style="background:${e.color || "var(--accent)"}"></span>
-      <span class="ev-title">${h(e.title)}</span>${named && e.calendar ? `<span class="ev-cal">${h(e.calendar)}</span>` : ""}</${tag}>`;
+      <span class="ev-title">${h(e.title)}</span>${named && e.calendar && !small ? `<span class="ev-cal">${h(e.calendar)}</span>` : ""}</${tag}>
+      ${small ? "" : `<button type="button" class="icon ev-shrink" data-shrink="${h(key)}" title="Not one to focus on: make it small" aria-label="Make it small">−</button>`}</div>`;
   };
-  const day = (label, evs) => `<section class="cal-day"><h2 class="group">${label}</h2>${
-    evs.map(line).join("") || '<p class="empty small">Nothing.</p>'}</section>`;
-  return `<div class="cal-pair">${day("Today", eventsLeftToday())}${day("Tomorrow", eventsOn(addDays(today(), 1)))}</div>`;
+  const day = (label, dayDate, evs) => {
+    const some = evs.some((e) => shrunk.has(shrinkKey(e, dayDate)));
+    return `<section class="cal-day"><h2 class="group">${label}
+      <button type="button" class="icon ev-grow" data-grow="${dayDate}" ${some ? "" : "disabled"} title="Show them all full size again" aria-label="Show them all">+</button></h2>${
+      evs.map((e) => line(e, dayDate)).join("") || '<p class="empty small">Nothing.</p>'}</section>`;
+  };
+  const t = today(), m = addDays(t, 1);
+  return `<div class="cal-pair">${day("Today", t, eventsLeftToday())}${day("Tomorrow", m, eventsOn(m))}</div>`;
 }
 
 function calendarAgenda(tasks) {
@@ -5120,6 +5137,13 @@ function bind() {
     if (e.target.closest("a[target]")) return;  // a link in a task: just open it
     const row = e.target.closest(".row");
     const b = e.target.closest("button");
+    // Focus's calendar: − makes an event small, + beside its day brings that day's back.
+    if (b?.dataset.shrink) { shrunk.add(b.dataset.shrink); saveShrunk(); return renderList(); }
+    if (b?.dataset.grow) {
+      for (const k of [...shrunk]) if (k.endsWith("|" + b.dataset.grow)) shrunk.delete(k);
+      saveShrunk();
+      return renderList();
+    }
     if (b?.classList.contains("empty-trash")) {
       if (!confirm("Permanently delete everything in the trash?")) return;
       await api("POST", "/trash/empty");

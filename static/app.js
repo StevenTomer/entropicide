@@ -1813,9 +1813,10 @@ function focusCalendar() {
   const todays = eventsLeftToday(), tomorrows = eventsOn(m), none = !todays.length && !tomorrows.length;
   const day = (label, dayDate, evs) => {
     const some = evs.some((e) => shrunk.has(shrinkKey(e, dayDate)));
-    return `<section class="cal-day"><h2 class="group">${label}
-      <button type="button" class="icon ev-grow" data-grow="${dayDate}" ${some ? "" : "disabled"} title="Show them all full size again" aria-label="Show them all">+</button>
-      ${weatherBit(label === "Today" ? "today" : "tomorrow")}</h2>${
+    // (The weather, then +, at the heading's right.)
+    return `<section class="cal-day"><h2 class="group cal-head"><span class="cal-label">${label}</span>
+      ${weatherBit(label === "Today" ? "today" : "tomorrow")}
+      <button type="button" class="icon ev-grow" data-grow="${dayDate}" ${some ? "" : "disabled"} title="Show them all full size again" aria-label="Show them all">+</button></h2>${
       evs.map((e) => line(e, dayDate)).join("") || (none ? "" : '<p class="empty small">Nothing.</p>')}</section>`;
   };
   return `<div class="cal-pair${none ? " no-events" : ""}">${day("Today", t, todays)}${day("Tomorrow", m, tomorrows)}</div>`;

@@ -1134,7 +1134,9 @@ a.ev-open:hover { background: var(--accent-soft); }
 .ev-shrink { opacity: 0; }
 .ev-line:hover .ev-shrink, .ev-shrink:focus-visible { opacity: 1; }
 @media (hover: none) { .ev-shrink { opacity: 0.6; } }
-.ev-grow { margin-left: 0.25rem; vertical-align: middle; font-size: 0.9rem; }
+.cal-head { display: flex; align-items: center; gap: 0.375rem; }
+.cal-head .cal-label { flex: 1; }
+.ev-grow { font-size: 0.9rem; }
 .ev-grow:disabled { opacity: 0.3; }
 /* A shrunk event: still there, but small and faint */
 .ev-line.shrunk { font-size: 0.6875rem; opacity: 0.55; border-bottom-style: dotted; }
@@ -1145,7 +1147,7 @@ a.ev-open:hover { background: var(--accent-soft); }
 .ev-line .ev-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .ev-line .ev-cal { flex-shrink: 0; max-width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 0.75rem; }
 /* Weather beside Today and Tomorrow */
-.ev-weather { margin-left: 0.5rem; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--text); font-size: 0.875rem; }
+.ev-weather { font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--text); font-size: 0.875rem; }
 .ev-weather .ev-low { color: var(--muted); font-weight: 400; }
-.ev-weather-set { margin-left: 0.5rem; font-size: 0.75rem; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.ev-weather-set { font-size: 0.75rem; text-transform: none; letter-spacing: 0; font-weight: 400; }
 .weather-found { margin: 0.375rem 0; }

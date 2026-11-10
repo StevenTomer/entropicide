@@ -62,6 +62,9 @@ Settings → Troubleshooting.
   **Sketch** (pen and ink, in six colours and three sizes, with an eraser and undo; it follows a
   stylus's pressure) or a **Diagram** (boxes, arrows, shapes and words, with Excalidraw built in).
   They're placed like any picture, and *Edit drawing* opens them again to carry on.
+- **Weather on Focus:** beside Today, an icon and the temperature now; beside Tomorrow, its
+  forecast and high/low. Settings → Weather says where (a town, or your location), in °F or °C;
+  from Open-Meteo, asked by the server.
 - **Adding from the phone feels quicker:** an open Entropicide shows a task added from the phone's
   notification or tile (or Alexa, or another app) within half a minute, and at once when you switch
   to it. **Android app 1.0.9** says “Adding …” the moment you send it, keeps its connection for the

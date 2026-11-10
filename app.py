@@ -99,7 +99,10 @@ DEFAULT_SETTINGS = {"defer_options": ["1h", "2h", "6h", "24h", "3d", "1w"], "tim
                     "look_up_codes": True,
                     # Focus's calendar: events made small, as "<event id>|<day>" (forgotten once
                     # the day's gone)
-                    "focus_shrunk": []}
+                    "focus_shrunk": [],
+                    # Weather on Focus: where ({name, lat, lon}; none, none shown) and in what
+                    # (fahrenheit | celsius)
+                    "weather_place": None, "weather_units": ""}
 # Reminders before a due date: the days a task can choose, and the time of day they come.
 REMIND_BEFORE_DAYS = (1, 2, 3, 7, 14, 30, 60, 90)
 REMIND_BEFORE_TIME = "09:00"
@@ -2026,6 +2029,73 @@ def delete_location(location_id):
     conn.execute("DELETE FROM locations WHERE id = ?", (location_id,))
     conn.commit()
     return "", 204
+
+
+# --- weather ----------------------------------------------------------------------
+# Focus shows the weather beside Today and Tomorrow, from Open-Meteo (open-meteo.com: free, no
+# key, no account). Asked from here, so the browser never calls out, and kept 20 minutes per
+# place (one worker, so this dict is everyone's).
+
+_weather_cache = {}
+WEATHER_KEEP = 20 * 60
+
+
+def outside_json(url, timeout=6):
+    req = urllib.request.Request(url, headers={"User-Agent": "Entropicide (self-hosted task manager)"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+@app.get("/api/weather")
+@login_required
+def weather():
+    """Now and tomorrow where the user has said (Settings → Weather): {"place", "units", "now":
+    {temp, code, is_day}, "today": {code, high, low}, "tomorrow": {code, high, low}}, or
+    {"place": null} when they haven't said where."""
+    settings = user_settings(g.user)
+    place = settings["weather_place"]
+    if not place:
+        return jsonify(place=None)
+    units = settings["weather_units"] or "fahrenheit"
+    key = (place["lat"], place["lon"], units)
+    hit = _weather_cache.get(key)
+    if not hit or time.time() - hit[0] > WEATHER_KEEP:
+        try:
+            r = outside_json("https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({
+                "latitude": place["lat"], "longitude": place["lon"], "timezone": "auto", "forecast_days": 2,
+                "current": "temperature_2m,weather_code,is_day",
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min", "temperature_unit": units}))
+            day = r["daily"]
+            data = {"now": {"temp": round(r["current"]["temperature_2m"]), "code": r["current"]["weather_code"],
+                            "is_day": bool(r["current"].get("is_day", 1))},
+                    **{name: {"code": day["weather_code"][i], "high": round(day["temperature_2m_max"][i]),
+                              "low": round(day["temperature_2m_min"][i])} for i, name in enumerate(("today", "tomorrow"))}}
+        except (OSError, ValueError, KeyError, IndexError, TypeError):
+            if not hit:
+                return jsonify(place=place, units=units, error="The weather isn't answering just now.")
+            data = hit[1]  # (an older answer beats none)
+        else:
+            _weather_cache[key] = (time.time(), data)
+            if len(_weather_cache) > 500:
+                _weather_cache.pop(next(iter(_weather_cache)))
+    else:
+        data = hit[1]
+    return jsonify(place=place, units=units, **data)
+
+
+@app.get("/api/weather/places")
+@login_required
+def weather_places():
+    """Places called q (for Settings → Weather), from Open-Meteo's place search."""
+    q = request.args.get("q", "").strip()[:100]
+    if len(q) < 2:
+        return jsonify([])
+    try:
+        r = outside_json("https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode({"name": q, "count": 6}))
+    except (OSError, ValueError):
+        return bad("Couldn't look up places just now.")
+    return jsonify([{"name": ", ".join(x for x in (p.get("name"), p.get("admin1"), p.get("country_code")) if x),
+                     "lat": p["latitude"], "lon": p["longitude"]} for p in r.get("results") or []])
 
 
 @app.get("/api/changes")
@@ -4261,6 +4331,22 @@ def update_settings():
         yesterday = (date.fromisoformat(client_today()) - timedelta(days=1)).isoformat()
         settings["focus_shrunk"] = [k[:400] for k in dict.fromkeys(keys)
                                     if re.search(r"\|\d{4}-\d\d-\d\d$", k) and k[-10:] >= yesterday][:500]
+    if "weather_place" in data:
+        place = data["weather_place"]
+        if place is None:
+            settings["weather_place"] = None
+        else:
+            try:
+                lat, lon = float(place["lat"]), float(place["lon"])
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    raise ValueError
+            except (TypeError, KeyError, ValueError):
+                return bad("A place for the weather needs its latitude and longitude.")
+            settings["weather_place"] = {"name": str(place.get("name") or "Here")[:200], "lat": round(lat, 3), "lon": round(lon, 3)}
+    if "weather_units" in data:
+        if data["weather_units"] not in ("", "fahrenheit", "celsius"):
+            return bad("Weather is in fahrenheit or celsius.")
+        settings["weather_units"] = data["weather_units"]
     if "look_up_codes" in data:
         settings["look_up_codes"] = bool(data["look_up_codes"])
     if "last_review" in data:

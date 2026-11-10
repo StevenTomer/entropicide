@@ -1296,7 +1296,7 @@ function renderList() {
   let subs = 0;
   if (S.view === "calendar") {
     html += calendarAgenda(list);
-  } else if (S.view === "focus" && (eventsLeftToday().length || eventsOn(addDays(today(), 1)).length)) {
+  } else if (S.view === "focus" && (eventsLeftToday().length || eventsOn(addDays(today(), 1)).length || S.data.user.settings?.weather_place)) {
     html += focusCalendar() + (list.length ? '<h2 class="group">Tasks</h2>' : "");
     html += list.map((t) => taskRow(t, { showState })).join("");
   } else if (S.view === "logbook") {
@@ -1750,6 +1750,50 @@ function saveShrunk() {
     .catch(() => {});
 }
 
+// ---- weather (Focus) ----
+// Beside Today (what it's like now) and Tomorrow (its forecast, high and low): an icon and the
+// temperature, from GET /api/weather (Open-Meteo, asked by the server), for the place set in
+// Settings → Weather. Loaded when Focus shows, and again after 20 minutes.
+
+const weather = { data: null, at: 0, loading: false };
+// What the WMO weather codes mean: [icon by day, icon by night, words].
+function weatherLook(code, day = true) {
+  const looks = [[[0], "☀️", "🌙", "Clear"], [[1], "🌤️", "🌙", "Mostly clear"], [[2], "⛅", "☁️", "Partly cloudy"],
+    [[3], "☁️", "☁️", "Overcast"], [[45, 48], "🌫️", "🌫️", "Fog"], [[51, 53, 55, 56, 57], "🌦️", "🌧️", "Drizzle"],
+    [[61, 63, 65, 66, 67], "🌧️", "🌧️", "Rain"], [[71, 73, 75, 77], "🌨️", "🌨️", "Snow"], [[80, 81, 82], "🌦️", "🌧️", "Showers"],
+    [[85, 86], "🌨️", "🌨️", "Snow showers"], [[95, 96, 99], "⛈️", "⛈️", "Thunderstorms"]];
+  const hit = looks.find(([codes]) => codes.includes(code));
+  return hit ? { icon: day ? hit[1] : hit[2], words: hit[3] } : { icon: "🌡️", words: "" };
+}
+
+async function loadWeather() {
+  if (weather.loading || Date.now() - weather.at < 20 * 60000) return;
+  weather.loading = true;
+  try {
+    weather.data = await api("GET", "/weather", undefined, { quiet: true });
+    weather.at = Date.now();
+  } catch { /* (none shown) */ } finally {
+    weather.loading = false;
+  }
+  if (S.view === "focus") renderList();
+}
+
+function weatherBit(which) {
+  if (!S.data.user.settings?.weather_place) {
+    return which === "today" ? '<button type="button" class="link ev-weather-set" title="Show the weather here: say where (Settings)">Weather?</button>' : "";
+  }
+  const w = weather.data;
+  if (!w || Date.now() - weather.at > 20 * 60000) loadWeather();
+  if (!w?.now) return "";
+  const deg = w.units === "celsius" ? "°C" : "°";
+  if (which === "today") {
+    const look = weatherLook(w.now.code, w.now.is_day);
+    return `<span class="ev-weather" title="${h(`${look.words}, ${w.now.temp}${deg} now in ${w.place.name} (today ${w.today.high}° / ${w.today.low}°)`)}">${look.icon} ${w.now.temp}${deg}</span>`;
+  }
+  const look = weatherLook(w.tomorrow.code);
+  return `<span class="ev-weather" title="${h(`${look.words} tomorrow in ${w.place.name}: high ${w.tomorrow.high}°, low ${w.tomorrow.low}°`)}">${look.icon} ${w.tomorrow.high}°<span class="ev-low">/${w.tomorrow.low}°</span></span>`;
+}
+
 function focusCalendar() {
   syncShrunk();
   const named = new Set((S.data.events || []).map((e) => e.calendar).filter(Boolean)).size > 1;
@@ -1767,7 +1811,8 @@ function focusCalendar() {
   const day = (label, dayDate, evs) => {
     const some = evs.some((e) => shrunk.has(shrinkKey(e, dayDate)));
     return `<section class="cal-day"><h2 class="group">${label}
-      <button type="button" class="icon ev-grow" data-grow="${dayDate}" ${some ? "" : "disabled"} title="Show them all full size again" aria-label="Show them all">+</button></h2>${
+      <button type="button" class="icon ev-grow" data-grow="${dayDate}" ${some ? "" : "disabled"} title="Show them all full size again" aria-label="Show them all">+</button>
+      ${weatherBit(label === "Today" ? "today" : "tomorrow")}</h2>${
       evs.map((e) => line(e, dayDate)).join("") || '<p class="empty small">Nothing.</p>'}</section>`;
   };
   const t = today(), m = addDays(t, 1);
@@ -4026,6 +4071,19 @@ async function openSettings() {
       </form>
     </section>
 
+    <section class="weather">
+      <h3>Weather</h3>
+      <p class="muted small">Shown in Focus beside Today and Tomorrow, from Open-Meteo, a free weather service (only the place
+        is sent, by this server).</p>
+      <p class="weather-place small">${me.settings.weather_place ? `For <b>${h(me.settings.weather_place.name)}</b>
+        <button type="button" class="link danger weather-off">Don't show the weather</button>` : "Not shown: say where you are."}</p>
+      <form class="inline weather-search"><input name="q" placeholder="A town, city or postcode" autocomplete="off">
+        <button>Find</button> <button type="button" class="weather-here">Use my location</button></form>
+      <div class="weather-found"></div>
+      <label>In <select class="weather-units">${options([["fahrenheit", "°F"], ["celsius", "°C"]],
+        me.settings.weather_units || (/^en-(US|LR)|^my/.test(navigator.language) ? "fahrenheit" : "celsius"))}</select></label>
+    </section>
+
     <section>
       <h3>Inventory</h3>
       <label class="check"><input type="checkbox" class="look-up-codes" ${me.settings.look_up_codes ? "checked" : ""}>
@@ -4195,6 +4253,7 @@ async function openSettings() {
   fillDevices();
   fillApiKeys();
   fillGroups();
+  bindWeatherSettings();
   fillPushState();
   fillStorage();
 }
@@ -4384,6 +4443,11 @@ function bindSettings() {
   });
   dlg.addEventListener("change", async (e) => {
     const t = e.target;
+    if (t.classList.contains("weather-units")) {
+      S.data.user.settings = await api("PATCH", "/me/settings", { weather_units: t.value });
+      weather.at = 0;
+      return;
+    }
     if (t.classList.contains("look-up-codes")) {
       S.data.user.settings = await api("PATCH", "/me/settings", { look_up_codes: t.checked });
       return;
@@ -5170,6 +5234,7 @@ function bind() {
     if (e.target.closest("a[target]")) return;  // a link in a task: just open it
     const row = e.target.closest(".row");
     const b = e.target.closest("button");
+    if (b?.classList.contains("ev-weather-set")) { await openSettings(); return $("#dialog .weather")?.scrollIntoView(); }
     // Focus's calendar: − makes an event small, + beside its day brings that day's back.
     if (b?.dataset.shrink) { shrunk.add(b.dataset.shrink); saveShrunk(); return renderList(); }
     if (b?.dataset.grow) {
@@ -5539,6 +5604,40 @@ async function fillApiKeys(made) {
     await api("DELETE", `/devices/${b.closest("[data-device]").dataset.device}`);
     fillApiKeys();
   });
+}
+
+// Settings → Weather: find a place (Open-Meteo's place search, through the server), or use
+// this device's location; or stop showing it.
+function bindWeatherSettings() {
+  const el = $("#dialog .weather");
+  if (!el) return;
+  const setPlace = async (place) => {
+    const units = $(".weather-units", el).value;
+    S.data.user.settings = await api("PATCH", "/me/settings", { weather_place: place, weather_units: units });
+    weather.at = 0;
+    weather.data = null;
+    $(".weather-place", el).innerHTML = place ? `For <b>${h(place.name)}</b> ✓` : "Not shown.";
+    $(".weather-found", el).innerHTML = "";
+    if (S.view === "focus") renderList();
+  };
+  $(".weather-search", el).addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const q = e.target.elements.q.value.trim();
+    if (!q) return;
+    const found = await api("GET", `/weather/places?q=${encodeURIComponent(q)}`).catch(() => null);
+    const box = $(".weather-found", el);
+    box.innerHTML = found?.length ? found.map((p, i) => `<button type="button" class="link weather-pick" data-i="${i}">${h(p.name)}</button>`).join(" · ")
+      : '<span class="muted small">Nowhere by that name. Try a nearby town.</span>';
+    box.onclick = (ev) => { const b = ev.target.closest(".weather-pick"); if (b) setPlace(found[Number(b.dataset.i)]); };
+  });
+  $(".weather-here", el).addEventListener("click", () => {
+    if (!navigator.geolocation) return toast("This browser can't tell where it is: search for your town instead.");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => setPlace({ name: "Where I am", lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      () => toast("Couldn't find where you are (is location allowed for this site?): search for your town instead."),
+      { timeout: 10000, maximumAge: 3600000 });
+  });
+  el.addEventListener("click", (e) => { if (e.target.closest(".weather-off")) setPlace(null); });
 }
 
 // Settings → Groups: mine (with their people, and for an owner, invitations and roles) and

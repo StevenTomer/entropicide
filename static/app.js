@@ -1030,7 +1030,10 @@ function taskRow(t, { showState, grouped = false }) {
   const t0 = today();
   const meta = [];
   if (showState && t.state !== "next") meta.push(`<span class="badge">${STATE_LABEL[t.state]}</span>`);
-  if (p && !grouped && !S.view.startsWith("project:")) meta.push(`<span class="proj">${h(p.name)}</span>`);
+  // (Its project's name: a button to go to it.)
+  if (p && !grouped && !S.view.startsWith("project:")) {
+    meta.push(`<button type="button" class="link proj open-subproject" data-project="${p.id}" title="Go to the project">${h(p.name)}</button>`);
+  }
   if (t.group_id) meta.push(sharedMeta(t, "task"));
   if (t.state === "scheduled" && t.start_date) meta.push(`<span class="start">Starts ${fmtWhen(t.start_date, t.start_time)}</span>`);
   if (t.waiting_for) meta.push(`<span class="waiting">⧗ ${h(t.waiting_for)}</span>`);
@@ -4909,7 +4912,10 @@ function deferItems(ts) {
 function menuItems(ts) {
   const n = ts.length;
   const one = n === 1 && ts[0];
-  const head = one ? [{ label: "Open", run: () => select("task", one.id) }] : [{ heading: `${n} tasks` }];
+  const project = one && projectById(one.project_id);
+  const head = one ? [{ label: "Open", run: () => select("task", one.id) },
+    ...(project && S.view !== `project:${project.id}` ? [{ label: `Go to project “${project.name}”`, run: () => setView(`project:${project.id}`) }] : [])]
+    : [{ heading: `${n} tasks` }];
   const picking = [
     ...(one && S.view !== "trash" ? [{ label: "Select", run: () => pick(one.id) }] : []),
     ...(S.picked.size < shownTaskIds().length ? [{ label: "Select all", run: selectAll }] : []),

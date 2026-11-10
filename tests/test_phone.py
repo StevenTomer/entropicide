@@ -226,3 +226,15 @@ def test_the_app_reports_crashes(app, phone):
     assert r.status_code == 204
     logged = rows(app, "SELECT detail FROM app_log WHERE kind = 'app-crash'")
     assert "RuntimeException: boom" in logged[0]["detail"]
+
+
+def test_an_open_app_hears_of_a_phone_add(user_client):
+    """GET /api/changes (checked every 30 seconds) moves on when the phone adds something."""
+    import time
+    ann = user_client("ann")
+    key = ann.post("/api/devices", json={"name": "Android app"}, headers=H).get_json()["key"]
+    before = ann.get("/api/changes").get_json()["added"]
+    assert before == ann.get("/api/data").get_json()["added_stamp"]
+    time.sleep(1.1)  # (to the second)
+    ann.post("/api/app/add", json={"text": "buy milk"}, headers={"Authorization": f"Bearer {key}", **H})
+    assert ann.get("/api/changes").get_json()["added"] != before

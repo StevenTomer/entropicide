@@ -62,6 +62,10 @@ Settings → Troubleshooting.
   **Sketch** (pen and ink, in six colours and three sizes, with an eraser and undo; it follows a
   stylus's pressure) or a **Diagram** (boxes, arrows, shapes and words, with Excalidraw built in).
   They're placed like any picture, and *Edit drawing* opens them again to carry on.
+- **Adding from the phone feels quicker:** an open Entropicide shows a task added from the phone's
+  notification or tile (or Alexa, or another app) within half a minute, and at once when you switch
+  to it. **Android app 1.0.9** says “Adding …” the moment you send it, keeps its connection for the
+  next one, and sends tasks left waiting for a connection along with the next one that gets through.
 - **Focus's calendar:** today's and tomorrow's events side by side, one line each, the time first
   (which calendar each is from only when there's more than one). − makes an event small, as not
   one to focus on; + beside the day brings them all back. The same on every device (an open one

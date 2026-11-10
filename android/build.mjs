@@ -238,6 +238,9 @@ final class QuickAdd {
             scheduleSend(c);
             return "No connection: it'll be added when you're back online";
         }
+        // Through: anything still waiting from before goes now too (rather than whenever Android
+        // gets round to the job).
+        if (queue(c).length() > 0) sendQueue(c);
         return r.message;
     }
 
@@ -307,6 +310,7 @@ final class QuickAdd {
         String key = key(c);
         if (key == null) return new Result("Not connected: in ${NAME}, open Settings → Add from the phone", false);
         HttpURLConnection con = null;
+        boolean reuse = false;  // (a finished exchange leaves its connection for the next add: no new handshake)
         try {
             con = (HttpURLConnection) new URL(ADD_URL + "?now=" + typedAt).openConnection();
             con.setConnectTimeout(10000);
@@ -324,6 +328,7 @@ final class QuickAdd {
             int code = con.getResponseCode();
             if (code >= 500) return new Result("The server isn't answering", true);
             String reply = read(code < 400 ? con.getInputStream() : con.getErrorStream());
+            reuse = true;
             JSONObject res = new JSONObject();
             try {
                 res = new JSONObject(reply);
@@ -337,7 +342,7 @@ final class QuickAdd {
         } catch (java.io.IOException | org.json.JSONException e) {
             return new Result("No connection", true);
         } finally {
-            if (con != null) con.disconnect();
+            if (con != null && !reuse) con.disconnect();
         }
     }
 
@@ -370,6 +375,8 @@ public class ReplyReceiver extends BroadcastReceiver {
             QuickAdd.show(app, null);  // (ends the reply's spinner)
             return;
         }
+        // Straight away (which also ends the reply's spinner): it's on its way.
+        QuickAdd.show(app, "Adding “" + text + "”…");
         PendingResult pending = goAsync();
         new Thread(() -> {
             try {
@@ -547,6 +554,7 @@ public class QuickAddTile extends TileService {
         if (text.isEmpty()) return;
         Context app = getApplicationContext();
         Handler main = new Handler(Looper.getMainLooper());
+        QuickAdd.show(app, "Adding “" + text + "”…");  // (straight away: it's on its way)
         new Thread(() -> {
             String result = QuickAdd.submit(app, text);
             QuickAdd.show(app, result);

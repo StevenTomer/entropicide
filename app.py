@@ -1675,6 +1675,7 @@ def all_data():
             "WHERE m.user_id = ? ORDER BY g.name COLLATE NOCASE", (uid,))],
         people=people_of(uid),
         shared_stamp=shared_stamp(uid),
+        added_stamp=added_stamp(uid),
         **inventory_data(uid),
     )
 
@@ -2032,7 +2033,15 @@ def delete_location(location_id):
 def changes():
     """Where what's shared with g.user stands (shared_stamp: the app reloads when it moves on),
     and what of their settings another of their devices may have changed (Focus's shrunk events)."""
-    return jsonify(stamp=shared_stamp(g.user["id"]), focus_shrunk=user_settings(g.user)["focus_shrunk"])
+    return jsonify(stamp=shared_stamp(g.user["id"]), focus_shrunk=user_settings(g.user)["focus_shrunk"],
+                   added=added_stamp(g.user["id"]))
+
+
+def added_stamp(uid):
+    """When the user's phone, or another app with a key (Alexa, a script), last added or changed
+    something: the open app reloads when it moves on, so a task added from the phone shows."""
+    row = db.get_db().execute("SELECT MAX(used_at) FROM devices WHERE user_id = ?", (uid,)).fetchone()
+    return row[0] or ""
 
 
 @app.post("/api/tasks")

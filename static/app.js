@@ -701,7 +701,9 @@ async function checkShared() {
     S.data.user.settings = { ...settings, focus_shrunk: r.focus_shrunk };
     if (S.view === "focus") renderList();
   }
-  if (!myGroups().length || r.stamp === S.data.shared_stamp) return;
+  // (Added from the phone or another app since: reload, so it shows.)
+  const fromElsewhere = r.added !== undefined && r.added !== S.data.added_stamp;
+  if (!fromElsewhere && (!myGroups().length || r.stamp === S.data.shared_stamp)) return;
   const busy = document.querySelector("dialog[open]") || document.activeElement?.closest?.("input, textarea, select, [contenteditable='true']");
   if (!busy) await refresh();
 }

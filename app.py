@@ -2093,9 +2093,24 @@ def weather():
 @app.get("/api/weather/places")
 @login_required
 def weather_places():
-    """Places called q (for Settings → Weather), from Open-Meteo's place search."""
+    """Places called q (for Settings → Weather). A postcode (84081, SW1A) is looked up at
+    Zippopotam.us, in the country the browser's in (country=us); names at Open-Meteo, which
+    would take a postcode for a place's name (84081 for Avignon's 84000s)."""
     q = request.args.get("q", "").strip()[:100]
     if len(q) < 2:
+        return jsonify([])
+    if re.fullmatch(r"[A-Za-z0-9]{0,4}\d[A-Za-z0-9 -]{1,6}", q) and any(c.isdigit() for c in q):
+        country = re.sub(r"[^a-z]", "", request.args.get("country", "us").lower())[:2] or "us"
+        found = []
+        for where in dict.fromkeys((country, "us")):
+            try:
+                r = outside_json(f"https://api.zippopotam.us/{where}/{urllib.parse.quote(q.replace(' ', '').upper() if where == 'gb' else q)}")
+            except (OSError, ValueError):
+                continue
+            found = [{"name": f"{p['place name']}, {p.get('state abbreviation') or p.get('state') or ''} {r.get('post code', q)}".replace(" ,", ",").strip(),
+                      "lat": float(p["latitude"]), "lon": float(p["longitude"])} for p in r.get("places") or []]
+            if found:
+                return jsonify(found[:6])
         return jsonify([])
     try:
         r = outside_json("https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode({"name": q, "count": 6}))

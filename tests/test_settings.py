@@ -48,3 +48,22 @@ def test_weather(user_client, monkeypatch):
     ann.patch("/api/me/settings", json={"weather_units": "celsius"}, headers=H)
     ann.get("/api/weather")
     assert len(asked) == 2 and "temperature_unit=celsius" in asked[1]
+
+
+def test_finding_a_place_by_postcode(user_client, monkeypatch):
+    """A postcode goes to Zippopotam.us (Open-Meteo would take 84081 for somewhere in France)."""
+    from conftest import entropicide
+    asked = []
+
+    def fake(url, timeout=6):
+        asked.append(url)
+        if "zippopotam" in url:
+            return {"post code": "84081", "places": [{"place name": "West Jordan", "state abbreviation": "UT",
+                                                      "latitude": "40.6037", "longitude": "-112.0411"}]}
+        return {"results": [{"name": "Denver", "admin1": "Colorado", "country_code": "US", "latitude": 39.7, "longitude": -105.0}]}
+    monkeypatch.setattr(entropicide, "outside_json", fake)
+    ann = user_client("ann")
+    assert ann.get("/api/weather/places?q=84081&country=us").get_json() == [
+        {"name": "West Jordan, UT 84081", "lat": 40.6037, "lon": -112.0411}]
+    assert asked[-1] == "https://api.zippopotam.us/us/84081"
+    assert ann.get("/api/weather/places?q=Denver").get_json()[0]["name"] == "Denver, Colorado, US"

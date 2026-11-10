@@ -62,6 +62,8 @@ Settings → Troubleshooting.
   **Sketch** (pen and ink, in six colours and three sizes, with an eraser and undo; it follows a
   stylus's pressure) or a **Diagram** (boxes, arrows, shapes and words, with Excalidraw built in).
   They're placed like any picture, and *Edit drawing* opens them again to carry on.
+- Settings → Weather finds places by ZIP or postcode (84081: West Jordan, Utah), and Settings no
+  longer lists your largest attachments, just how much space they use.
 - **Weather on Focus:** beside Today, an icon and the temperature now; beside Tomorrow, its
   forecast and high/low; pointing at (or tapping) either shows the week, with each day's chance of
   rain or snow. Settings → Weather says where (a town, or your location), in °F or °C;

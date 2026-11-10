@@ -4092,7 +4092,7 @@ async function openSettings() {
         is sent, by this server).</p>
       <p class="weather-place small">${me.settings.weather_place ? `For <b>${h(me.settings.weather_place.name)}</b>
         <button type="button" class="link danger weather-off">Don't show the weather</button>` : "Not shown: say where you are."}</p>
-      <form class="inline weather-search"><input name="q" placeholder="A town, city or postcode" autocomplete="off">
+      <form class="inline weather-search"><input name="q" placeholder="A town, city or ZIP code" autocomplete="off">
         <button>Find</button> <button type="button" class="weather-here">Use my location</button></form>
       <div class="weather-found"></div>
       <label>In <select class="weather-units">${options([["fahrenheit", "°F"], ["celsius", "°C"]],
@@ -4185,7 +4185,6 @@ async function openSettings() {
       <h3>Attachments</h3>
       <p class="storage-state muted small">Checking…</p>
       <div class="storage-bar" hidden><div></div></div>
-      <ul class="plain storage-list"></ul>
     </section>
 
     ${me.is_admin ? `<section class="backups">
@@ -4342,18 +4341,12 @@ async function fillStorage() {
   const state = $("#dialog .storage-state");
   if (!state) return;
   try {
-    const { used, limit, largest } = await api("GET", "/storage", undefined, { quiet: true });
-    state.textContent = `Using ${fmtSize(used)} of ${fmtSize(limit)} (${(100 * used / limit).toFixed(used && used < limit / 1000 ? 2 : 0)}%).` +
-      (largest.length ? " The largest:" : " No attachments yet.");
+    const { used, limit } = await api("GET", "/storage", undefined, { quiet: true });
+    state.textContent = used ? `Using ${fmtSize(used)} of ${fmtSize(limit)} (${(100 * used / limit).toFixed(used < limit / 1000 ? 2 : 0)}%).`
+      : "No attachments yet.";
     const bar = $("#dialog .storage-bar");
     bar.hidden = false;
     bar.firstElementChild.style.width = `${Math.max(used ? 0.5 : 0, Math.min(100, 100 * used / limit))}%`;
-    $("#dialog .storage-list").innerHTML = largest.map((f) => `<li class="storage-file">
-      <a href="${h(fileUrl(f))}" target="_blank" rel="noopener">${h(f.name)}</a>
-      <span class="muted small">${fmtSize(f.size)}</span>
-      <button type="button" class="link open-task" ${f.project_id ? `data-project="${f.project_id}" title="Open the project"`
-        : f.note_id ? `data-note="${f.note_id}" title="Open the note"` : `data-task="${f.task_id}" title="Open the task"`}>${h(f.title)}${
-        f.deleted_at ? " (in trash)" : f.completed_at ? " (done)" : ""}</button></li>`).join("");
   } catch {
     state.textContent = "Couldn't check (you may be offline).";
   }
@@ -5639,7 +5632,8 @@ function bindWeatherSettings() {
     e.preventDefault();
     const q = e.target.elements.q.value.trim();
     if (!q) return;
-    const found = await api("GET", `/weather/places?q=${encodeURIComponent(q)}`).catch(() => null);
+    const country = (navigator.language.split("-")[1] || "US").toLowerCase();  // (for a postcode)
+    const found = await api("GET", `/weather/places?q=${encodeURIComponent(q)}&country=${country}`).catch(() => null);
     const box = $(".weather-found", el);
     box.innerHTML = found?.length ? found.map((p, i) => `<button type="button" class="link weather-pick" data-i="${i}">${h(p.name)}</button>`).join(" · ")
       : '<span class="muted small">Nowhere by that name. Try a nearby town.</span>';

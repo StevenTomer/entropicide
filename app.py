@@ -2030,8 +2030,9 @@ def delete_location(location_id):
 @app.get("/api/changes")
 @login_required
 def changes():
-    """Where what's shared with g.user stands (shared_stamp): the app reloads when it moves on."""
-    return jsonify(stamp=shared_stamp(g.user["id"]))
+    """Where what's shared with g.user stands (shared_stamp: the app reloads when it moves on),
+    and what of their settings another of their devices may have changed (Focus's shrunk events)."""
+    return jsonify(stamp=shared_stamp(g.user["id"]), focus_shrunk=user_settings(g.user)["focus_shrunk"])
 
 
 @app.post("/api/tasks")

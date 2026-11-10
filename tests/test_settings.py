@@ -10,3 +10,11 @@ def test_focus_shrunk_events(user_client):
     assert keep.get_json()["focus_shrunk"] == ["abc123|2026-11-10", "def|2026-11-11"]
     assert ann.get("/api/data").get_json()["user"]["settings"]["focus_shrunk"] == ["abc123|2026-11-10", "def|2026-11-11"]
     assert ann.patch("/api/me/settings", json={"focus_shrunk": "abc"}, headers=H).status_code == 400
+
+
+def test_other_devices_see_shrunk_events(user_client):
+    """GET /api/changes, which open apps check every 30 seconds, says which are shrunk now."""
+    ann = user_client("ann")
+    assert ann.get("/api/changes").get_json()["focus_shrunk"] == []
+    ann.patch("/api/me/settings", json={"focus_shrunk": ["abc|2099-01-01"]}, headers=H)
+    assert ann.get("/api/changes").get_json()["focus_shrunk"] == ["abc|2099-01-01"]

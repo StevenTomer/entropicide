@@ -687,14 +687,21 @@ function sharedListHtml(list) {
   return { html, rows };
 }
 
-// Checking for what others have changed: every 30 seconds while the app's in view (and when
-// it comes back into view), if I'm in a group. Not while I'm typing or a dialog's open: then
-// at the next check.
+// Checking for what's changed elsewhere: every 30 seconds while the app's in view (and when it
+// comes back into view). Focus's shrunk events, changed on another of my devices, just redraw;
+// what's shared with my groups, changed by anyone, reloads. Not while I'm typing or a dialog's
+// open: then at the next check.
 async function checkShared() {
-  if (!S.data || !myGroups().length || document.hidden || !navigator.onLine) return;
+  if (!S.data || document.hidden || !navigator.onLine) return;
   let r;
   try { r = await api("GET", "/changes", undefined, { quiet: true }); } catch { return; }
-  if (!r || r.stamp === S.data.shared_stamp) return;
+  if (!r) return;
+  const settings = S.data.user.settings;
+  if (r.focus_shrunk && JSON.stringify(r.focus_shrunk) !== JSON.stringify(settings?.focus_shrunk || [])) {
+    S.data.user.settings = { ...settings, focus_shrunk: r.focus_shrunk };
+    if (S.view === "focus") renderList();
+  }
+  if (!myGroups().length || r.stamp === S.data.shared_stamp) return;
   const busy = document.querySelector("dialog[open]") || document.activeElement?.closest?.("input, textarea, select, [contenteditable='true']");
   if (!busy) await refresh();
 }

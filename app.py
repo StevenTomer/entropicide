@@ -2049,8 +2049,9 @@ def outside_json(url, timeout=6):
 @app.get("/api/weather")
 @login_required
 def weather():
-    """Now and tomorrow where the user has said (Settings → Weather): {"place", "units", "now":
-    {temp, code, is_day}, "today": {code, high, low}, "tomorrow": {code, high, low}}, or
+    """Now and the week where the user has said (Settings → Weather): {"place", "units", "now":
+    {temp, code, is_day}, "today", "tomorrow" and "week" (7 days): {date, code, high, low, chance,
+    falls}}, or
     {"place": null} when they haven't said where."""
     settings = user_settings(g.user)
     place = settings["weather_place"]
@@ -2062,19 +2063,20 @@ def weather():
     if not hit or time.time() - hit[0] > WEATHER_KEEP:
         try:
             r = outside_json("https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({
-                "latitude": place["lat"], "longitude": place["lon"], "timezone": "auto", "forecast_days": 2,
+                "latitude": place["lat"], "longitude": place["lon"], "timezone": "auto", "forecast_days": 7,
                 "current": "temperature_2m,weather_code,is_day",
                 "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,snowfall_sum",
                 "temperature_unit": units}))
             day = r["daily"]
             # (A day's chance of rain or snow: snow if any's forecast to fall, else rain.)
-            at = lambda key, i: (day.get(key) or [None, None])[i]  # noqa: E731
+            at = lambda key, i: (day.get(key) or [])[i] if i < len(day.get(key) or []) else None  # noqa: E731
+            days = [{"date": day["time"][i] if "time" in day else None, "code": day["weather_code"][i],
+                     "high": round(day["temperature_2m_max"][i]), "low": round(day["temperature_2m_min"][i]),
+                     "chance": at("precipitation_probability_max", i),
+                     "falls": "snow" if (at("snowfall_sum", i) or 0) > 0 else "rain"} for i in range(len(day["weather_code"]))]
             data = {"now": {"temp": round(r["current"]["temperature_2m"]), "code": r["current"]["weather_code"],
                             "is_day": bool(r["current"].get("is_day", 1))},
-                    **{name: {"code": day["weather_code"][i], "high": round(day["temperature_2m_max"][i]),
-                              "low": round(day["temperature_2m_min"][i]), "chance": at("precipitation_probability_max", i),
-                              "falls": "snow" if (at("snowfall_sum", i) or 0) > 0 else "rain"}
-                       for i, name in enumerate(("today", "tomorrow"))}}
+                    "today": days[0], "tomorrow": days[1], "week": days}
         except (OSError, ValueError, KeyError, IndexError, TypeError):
             if not hit:
                 return jsonify(place=place, units=units, error="The weather isn't answering just now.")

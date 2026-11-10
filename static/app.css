@@ -1151,3 +1151,15 @@ a.ev-open:hover { background: var(--accent-soft); }
 .ev-weather .ev-low { color: var(--muted); font-weight: 400; }
 .ev-weather-set { font-size: 0.75rem; text-transform: none; letter-spacing: 0; font-weight: 400; }
 .weather-found { margin: 0.375rem 0; }
+
+/* The week's forecast, shown on pointing at (or tapping) the weather */
+.ev-weather { position: relative; cursor: default; outline: none; }
+.wx-pop { display: none; position: absolute; right: 0; top: calc(100% + 0.375rem); z-index: 30; width: 17rem;
+  padding: 0.5rem 0.625rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg);
+  box-shadow: 0 6px 24px rgb(0 0 0 / 0.16); font-size: 0.8125rem; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text); }
+.ev-weather:hover .wx-pop, .ev-weather:focus .wx-pop { display: block; }
+.wx-said { display: block; margin-bottom: 0.375rem; color: var(--muted); font-size: 0.75rem; line-height: 1.35; }
+.wx-day { display: grid; grid-template-columns: 1fr 1.5rem 4.5rem 3.5rem; align-items: center; gap: 0.25rem; padding: 0.125rem 0;
+  border-top: 1px solid var(--line); }
+.wx-temp { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.wx-wet { text-align: right; color: var(--muted); font-size: 0.75rem; }

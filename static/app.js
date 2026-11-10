@@ -1789,12 +1789,22 @@ function weatherBit(which) {
   const deg = w.units === "celsius" ? "°C" : "°";
   // "30% chance of snow" (said whenever the forecast gives one, even 0%).
   const chance = (d) => (d.chance == null ? "" : `, ${d.chance}% chance of ${d.falls || "rain"}`);
-  if (which === "today") {
-    const look = weatherLook(w.now.code, w.now.is_day);
-    return `<span class="ev-weather" title="${h(`${look.words}, ${w.now.temp}${deg} now in ${w.place.name} (today ${w.today.high}° / ${w.today.low}°${chance(w.today)})`)}">${look.icon} ${w.now.temp}${deg}</span>`;
-  }
-  const look = weatherLook(w.tomorrow.code);
-  return `<span class="ev-weather" title="${h(`${look.words} tomorrow in ${w.place.name}: high ${w.tomorrow.high}°, low ${w.tomorrow.low}°${chance(w.tomorrow)}`)}">${look.icon} ${w.tomorrow.high}°<span class="ev-low">/${w.tomorrow.low}°</span></span>`;
+  const look = which === "today" ? weatherLook(w.now.code, w.now.is_day) : weatherLook(w.tomorrow.code);
+  const said = which === "today"
+    ? `${look.words}, ${w.now.temp}${deg} now in ${w.place.name} (today ${w.today.high}° / ${w.today.low}°${chance(w.today)})`
+    : `${look.words} tomorrow in ${w.place.name}: high ${w.tomorrow.high}°, low ${w.tomorrow.low}°${chance(w.tomorrow)}`;
+  const shown = which === "today" ? `${look.icon} ${w.now.temp}${deg}` : `${look.icon} ${w.tomorrow.high}°<span class="ev-low">/${w.tomorrow.low}°</span>`;
+  // Pointing at it (or tapping it, on a phone) shows the week: a line a day.
+  const t0 = today(), dayName = (d, i) => (d.date === t0 || (!d.date && i === 0) ? "Today" : i === 1 ? "Tomorrow"
+    : new Date(`${d.date}T12:00:00`).toLocaleDateString(undefined, { weekday: "long" }));
+  const week = (w.week || []).map((d, i) => {
+    const l = weatherLook(d.code);
+    return `<div class="wx-day"><span class="wx-name">${h(dayName(d, i))}</span><span class="wx-icon" title="${h(l.words)}">${l.icon}</span>
+      <span class="wx-temp">${d.high}°<span class="ev-low">/${d.low}°</span></span>
+      <span class="wx-wet">${d.chance ? `${d.chance}% ${d.falls === "snow" ? "❄" : "💧"}` : ""}</span></div>`;
+  }).join("");
+  return `<span class="ev-weather" tabindex="0" aria-label="${h(said)}">${shown}
+    <span class="wx-pop" role="tooltip"><span class="wx-said">${h(said)}</span>${week}</span></span>`;
 }
 
 function focusCalendar() {

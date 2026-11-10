@@ -29,7 +29,7 @@ def test_weather(user_client, monkeypatch):
     def fake(url, timeout=6):
         asked.append(url)
         return {"current": {"temperature_2m": 63.4, "weather_code": 3, "is_day": 1},
-                "daily": {"weather_code": [3, 71], "temperature_2m_max": [66.2, 35.0], "temperature_2m_min": [40.1, 28.6],
+                "daily": {"time": ["2026-11-10", "2026-11-11"], "weather_code": [3, 71], "temperature_2m_max": [66.2, 35.0], "temperature_2m_min": [40.1, 28.6],
                           "precipitation_probability_max": [10, 70], "snowfall_sum": [0, 2.1]}}
     monkeypatch.setattr(entropicide, "outside_json", fake)
     ann = user_client("ann")
@@ -38,7 +38,9 @@ def test_weather(user_client, monkeypatch):
     ann.patch("/api/me/settings", json={"weather_place": {"name": "Denver, Colorado", "lat": 39.7392, "lon": -104.9847}}, headers=H)
     w = ann.get("/api/weather").get_json()
     assert (w["now"], w["tomorrow"], w["units"]) == ({"temp": 63, "code": 3, "is_day": True},
-                                                     {"code": 71, "high": 35, "low": 29, "chance": 70, "falls": "snow"}, "fahrenheit")
+                                                     {"date": "2026-11-11", "code": 71, "high": 35, "low": 29, "chance": 70, "falls": "snow"},
+                                                     "fahrenheit")
+    assert [d["date"] for d in w["week"]] == ["2026-11-10", "2026-11-11"]
     assert (w["today"]["chance"], w["today"]["falls"]) == (10, "rain")
     assert "latitude=39.739" in asked[0] and "temperature_unit=fahrenheit" in asked[0]
     ann.get("/api/weather")

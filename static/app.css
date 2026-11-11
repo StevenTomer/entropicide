@@ -1163,3 +1163,6 @@ a.ev-open:hover { background: var(--accent-soft); }
   border-top: 1px solid var(--line); }
 .wx-temp { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
 .wx-wet { text-align: right; color: var(--muted); font-size: 0.75rem; }
+/* (Its submit button is what makes Enter, or a barcode scanner's Enter, count: a form with two
+   boxes doesn't submit on Enter without one. Shown small, for touch screens.) */
+.iv-counter .iv-go { padding: 0.375rem 0.625rem; }

@@ -99,6 +99,7 @@ function renderInventory(el) {
     <input type="number" class="iv-count" value="1" min="0" step="any" inputmode="decimal" aria-label="How many">
     <input class="iv-code" placeholder="Scan or type a barcode, or a name, and press Enter" aria-label="Barcode or name">
     <button type="button" class="iv-scan" title="Scan barcodes with the camera">📷 Scan</button>
+    <button class="iv-go" title="Count it (Enter)">↵</button>
   </form>
   ${pendingHtml(inv)}
   <div class="iv-filters">

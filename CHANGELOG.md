@@ -15,11 +15,13 @@ Settings → Troubleshooting.
     scan a barcode nothing has.
 - **Looking up new barcodes, better:**
   - The lookup fills in the name, brand, size and a picture (taken automatically). Names that come
-    back in ALL CAPS are written normally ("Campbell's soup cream mushroom").
+    back in ALL CAPS are written normally, and the brand is taken out of the name wherever it appears:
+    "CAMPBELL'S SOUP CREAM MUSHROOM" becomes "Soup cream mushroom", brand "Campbell's".
   - **Paste a Walmart product link** (or share it from the phone) and its name, brand, size and
     picture fill in.
   - **With a Serper key** (Settings → Inventory, free at serper.dev) each new barcode's Walmart page
-    is found by itself. Without one, *Find it on Walmart* opens Google's first result for you.
+    is found by itself. Without one, *Find it on Walmart* searches Google for that barcode on walmart.com only.
+  - Settings → Inventory walks you through getting a Serper key, and **Test the key** checks it.
 - **Unit and category are choices** you tap (cans, boxes, bags …), not something to type each time.
 - **Fixed:** on the phone, choosing a category while adding something no longer blanks what you'd
   typed. The wizards keep what's typed, even if the app reloads.

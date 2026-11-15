@@ -227,9 +227,9 @@ def test_looking_up_finds_the_walmart_page(app, pantry, monkeypatch):
         "https://www.walmart.com/ip/": (WALMART_PAGE, "text/html"),
         "https://i5.walmartimages.com/": (b"\xff\xd8jpeg", "image/jpeg"),
     })
-    # Without a key: no searching, and so Google's first result, for the person to open.
+    # Without a key: no searching, and so a search of Walmart's pages, for the person to open.
     r = ann.get("/api/codes/010900577779").get_json()
-    assert r["name"] is None and r["find_url"] == "https://www.google.com/search?btnI=1&q=walmart%20010900577779"
+    assert r["name"] is None and r["find_url"] == "https://www.google.com/search?q=site%3Awalmart.com%20010900577779"
     ann.patch("/api/me/settings", json={"serper_key": " abc123 "}, headers=H)
     assert ann.get("/api/data").get_json()["user"]["settings"]["serper_key_set"] is True
     assert "abc123" not in ann.get("/api/data").get_data(as_text=True)
@@ -288,6 +288,15 @@ def test_tidying_names():
     assert e.brand_case("CAMPBELL'S") == "Campbell's" and e.brand_case("iPhone") == "iPhone"
     assert e.split_title("Benadryl Itch Stick, Rashes, .47 ounces HSA/FSA Eligible - Walmart.com", "Benadryl") == (
         "Itch Stick", ".47 ounces")
+    # The brand comes out of the name wherever it is, however it's written.
+    for name, brand, left in [("Campbells Tomato Soup", "Campbell's", "Tomato Soup"),
+                              ("Tomato Soup by Campbell's", "Campbell's", "Tomato Soup"),
+                              ("Kraft® Macaroni & Cheese", "Kraft", "Macaroni & Cheese"),
+                              ("Stuffing Mix - Stove Top", "Stove Top", "Stuffing Mix"),
+                              ("Krusteaz Wild Blueberry Muffin Mix", "KRUSTEAZ", "Wild Blueberry Muffin Mix"),
+                              ("Krafty Glue", "Kraft", "Krafty Glue"),  # (only the brand as a word)
+                              ("Kraft", "Kraft", "Kraft")]:                # (nothing else to call it)
+        assert e.without_brand(name, brand) == left
 
 
 def test_old_items_become_products(tmp_path):
@@ -327,3 +336,24 @@ def test_old_items_become_products(tmp_path):
 def json_text(x):
     import json
     return json.dumps(x)
+
+
+def test_testing_a_serper_key(pantry, monkeypatch):
+    """Settings' Test the key: one search, and a plain answer."""
+    import urllib.error
+    from conftest import entropicide
+    ann, _ = pantry
+    assert ann.post("/api/me/serper-test", headers=H).get_json()["ok"] is False  # (none saved)
+    ann.patch("/api/me/settings", json={"serper_key": "good"}, headers=H)
+    answers = {"good": (json_text({"organic": [{"link": "https://www.walmart.com/ip/Soup/123"}]}).encode(), "application/json", "")}
+
+    def fetch(url, data=None, headers=None, **_):
+        if headers["X-API-KEY"] not in answers:
+            raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+        return answers[headers["X-API-KEY"]]
+    monkeypatch.setattr(entropicide, "fetch_url", fetch)
+    r = ann.post("/api/me/serper-test", headers=H).get_json()
+    assert r["ok"] and "It works" in r["message"]
+    ann.patch("/api/me/settings", json={"serper_key": "bad"}, headers=H)
+    r = ann.post("/api/me/serper-test", headers=H).get_json()
+    assert not r["ok"] and "didn't accept" in r["message"]

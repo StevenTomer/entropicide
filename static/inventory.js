@@ -584,7 +584,7 @@ function drawProductWizard() {
       </div>
       <label>Its page at a shop <input data-w="url" class="pw-url" value="${h(s.url)}" type="url" placeholder="Paste a Walmart link (it fills in the rest)"></label>
       ${!s.url && s.find_url ? `<p class="small"><a href="${h(s.find_url)}" target="_blank" rel="noopener noreferrer" class="pw-find">Find it on Walmart ↗</a>
-        <span class="muted">then copy its link and paste it above${/Android/.test(navigator.userAgent) ? ", or Share it to Entropicide" : ""}.</span></p>` : ""}
+        <span class="muted">(Walmart's pages for this barcode): open the product, then copy its link and paste it above${/Android/.test(navigator.userAgent) ? ", or Share it to Entropicide" : ""}.</span></p>` : ""}
       <p class="pw-buttons"><button type="button" class="link pw-back">← Back</button> <button class="primary">Next →</button></p>`;
   } else {
     body = `<p class="pw-summary"><b>${h(s.brand ? `${s.brand} ${s.name}` : s.name)}</b>${s.size ? ` <span class="muted">${h(s.size)}</span>` : ""}</p>

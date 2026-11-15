@@ -4108,12 +4108,26 @@ async function openSettings() {
       <label class="check"><input type="checkbox" class="look-up-codes" ${me.settings.look_up_codes ? "checked" : ""}>
         Look up new barcodes online: their names, brands and pictures, from Open Food Facts and UPCitemdb (free product
         databases; only the barcode is sent)</label>
-      <label>Serper key, to find each barcode's Walmart page by itself
-        <input type="password" class="serper-key" autocomplete="off" placeholder="${me.settings.serper_key_set ? "Saved (type a new one to change it, or clear it)" : "None"}"></label>
-      <p class="muted small">Optional. Serper (<a href="https://serper.dev" target="_blank" rel="noopener noreferrer">serper.dev</a>)
-        searches Google for “walmart” and the barcode; its free key covers a few thousand products. Without one, Add a product
-        has a <em>Find it on Walmart</em> link to open, and you paste (or share) the page back.
-        ${me.settings.serper_key_set ? '<button type="button" class="link serper-clear">Remove the key</button>' : ""}</p>
+      <label>Serper key, to find each barcode's Walmart page by itself (optional)
+        <input type="password" class="serper-key" autocomplete="off" placeholder="${me.settings.serper_key_set ? "Saved (type a new one to change it)" : "Paste the key here"}"></label>
+      <p class="small"><button type="button" class="serper-test">Test the key</button>
+        ${me.settings.serper_key_set ? '<button type="button" class="link serper-clear">Remove the key</button>' : ""}
+        <span class="serper-said muted"></span></p>
+      <details class="serper-how"${me.settings.serper_key_set ? "" : " open"}>
+        <summary>How to get a key (free, about two minutes)</summary>
+        <ol>
+          <li>Open <a href="https://serper.dev" target="_blank" rel="noopener noreferrer">serper.dev ↗</a> and <b>sign up</b>, with
+            Google or an email address. The free searches don't need a card.</li>
+          <li>Once you're in, choose <b>API Key</b> in its menu.</li>
+          <li><b>Copy</b> the key (the copy button beside it).</li>
+          <li>Come back here, <b>paste</b> it in the box above, and tap outside the box: it's saved.</li>
+          <li>Press <b>Test the key</b>. “It works” means you're done.</li>
+        </ol>
+        <p class="muted small">What it does: when you add a product, the server asks Serper to search Google for the
+          barcode on walmart.com (only the barcode is sent), then reads that Walmart page for the name, brand, size and picture. Each new product
+          uses one search, and testing uses one; the free searches cover a few thousand products. Without a key, Add a product has
+          a <em>Find it on Walmart</em> link: it searches Walmart's pages for the barcode; open the product, copy its link, and paste it back.</p>
+      </details>
     </section>
 
     <section>
@@ -4474,8 +4488,8 @@ function bindSettings() {
     if (t.classList.contains("serper-key") && t.value.trim()) {
       S.data.user.settings = await api("PATCH", "/me/settings", { serper_key: t.value.trim() });
       t.value = "";
-      t.placeholder = "Saved (type a new one to change it, or clear it)";
-      toast("Saved. New barcodes will be looked up at Walmart.");
+      t.placeholder = "Saved (type a new one to change it)";
+      toast("Saved. Press Test the key to check it.");
       return;
     }
     if (t.classList.contains("projects-in-lists")) {
@@ -4555,6 +4569,17 @@ function bindSettings() {
     const area = b.closest("[data-area]");
     const tag = b.closest("[data-tag-id]");
     const user = b.closest("[data-user]");
+    if (b.classList.contains("serper-test")) {
+      const box = $(".serper-key"), said = $(".serper-said");
+      // (A key pasted but not saved yet, as the box hasn't been left: save it first.)
+      if (box.value.trim()) { S.data.user.settings = await api("PATCH", "/me/settings", { serper_key: box.value.trim() }); box.value = ""; }
+      said.textContent = "Testing…";
+      const r = await api("POST", "/me/serper-test").catch(() => null);
+      said.textContent = r ? `${r.ok ? "✓" : "✗"} ${r.message}` : "";
+      said.classList.toggle("muted", !r || r.ok);
+      if (r?.ok) { box.placeholder = "Saved (type a new one to change it)"; $(".serper-how")?.removeAttribute("open"); }
+      return;
+    }
     if (b.classList.contains("serper-clear")) {
       S.data.user.settings = await api("PATCH", "/me/settings", { serper_key: "" });
       b.remove();

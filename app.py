@@ -14,6 +14,7 @@ import subprocess
 import threading
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -2188,7 +2189,7 @@ def product_image(product_id):
 
 # --- looking a barcode up ---------------------------------------------------------
 # What a new barcode is, from the internet, so it needn't be typed. With a Serper key
-# (Settings → Inventory) the barcode is searched for on Google ("walmart <code>") and the
+# (Settings → Inventory) the barcode is searched for on Google ("site:walmart.com <code>") and the
 # first walmart.com product page read once; a Walmart link pasted or shared is read the same
 # way. Gaps are filled from Open Food Facts, then UPCitemdb (free, about 100 a day). Only the
 # barcode (or the link) is sent; it's all behind Settings → Look up barcodes online. Walmart's
@@ -2230,16 +2231,30 @@ def brand_case(text):
     return " ".join(w[:1].upper() + w[1:] for w in text.lower().split(" ")) if shouted(text) else text
 
 
+def without_brand(name, brand):
+    """A product's name with its brand taken out wherever it is ("CAMPBELL'S® Soup",
+    "Soup by Campbells", "Tomato Soup - Campbell's" are all "Soup" or "Tomato Soup"), however it's
+    capitalised, with or without its 's and a ® or ™. A name that's nothing but the brand stays."""
+    core = re.sub(r"(?:'|’)?s$", "", re.sub(r"[®™]", "", brand or "").strip(), flags=re.I)
+    if len(re.sub(r"\W", "", core)) < 2:
+        return name
+    # The brand's words, each apostrophe optional (Campbell's, Campbells), then any 's and ®/™.
+    words = r"\s+".join(re.sub(r"(?:\\'|’)", "['’]?", re.escape(w)) for w in core.split())
+    left = re.sub(rf"(?<!\w){words}(?:['’]?s)?(?!\w)[®™]*", " ", name, flags=re.I)
+    left = re.sub(r"\s*\bby\s*$|^\s*by\b", "", left.strip(), flags=re.I)  # ("Soup by …")
+    left = re.sub(r"\s+", " ", left).strip(" -–—|:,·/")
+    return left if re.search(r"\w", left) else name
+
+
 def split_title(title, brand=""):
     """A shop's title, "Reynolds Kitchens Slow Cooker Liners, Regular Size, 6 Count", as
-    (name, size): ("Slow Cooker Liners", "6 Count"), the brand left off the front, the size
+    (name, size): ("Slow Cooker Liners", "6 Count"), the brand taken out of the name, the size
     being the last part with a number in it."""
     title = re.sub(r"\s*[-|]\s*Walmart\.com\s*$", "", html.unescape(title or ""), flags=re.I)
     title = re.sub(r"\s*\bHSA/FSA Eligible\b", "", title, flags=re.I).strip(" ,")
     parts = [p.strip() for p in title.split(",") if p.strip()]
     name = parts[0] if parts else ""
-    if brand and name.lower().startswith(brand.lower() + " "):
-        name = name[len(brand):].strip()
+    name = without_brand(name, brand)
     size = next((p for p in reversed(parts[1:]) if re.search(r"\d", p)), "")
     return sentence_case(name), size
 
@@ -2267,12 +2282,40 @@ def read_walmart(url):
 def walmart_search(code, key):
     """The first walmart.com product page Google has for a barcode (through Serper), or None."""
     try:
-        data, _, _ = fetch_url("https://google.serper.dev/search", data=json.dumps({"q": f"walmart {code}"}).encode(),
+        data, _, _ = fetch_url("https://google.serper.dev/search", data=json.dumps({"q": f"site:walmart.com {code}"}).encode(),
                                headers={"X-API-KEY": key, "Content-Type": "application/json"})
         results = json.loads(data).get("organic") or []
     except (OSError, ValueError):
         return None
     return next((r["link"] for r in results if WALMART_PAGE_RE.match(str(r.get("link") or ""))), None)
+
+
+# A barcode to test a Serper key with (Campbell's cream of mushroom soup, sold at Walmart).
+SERPER_TEST_CODE = "051000012616"
+
+
+@app.post("/api/me/serper-test")
+@login_required
+def test_serper_key():
+    """Tries the saved Serper key with one search (which it uses up): {ok, message}."""
+    key = user_settings(g.user)["serper_key"]
+    if not key:
+        return jsonify(ok=False, message="There's no key saved yet: paste it in the box first.")
+    try:
+        data, _, _ = fetch_url("https://google.serper.dev/search", data=json.dumps({"q": f"site:walmart.com {SERPER_TEST_CODE}"}).encode(),
+                               headers={"X-API-KEY": key, "Content-Type": "application/json"})
+        results = json.loads(data).get("organic") or []
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return jsonify(ok=False, message="Serper didn't accept that key. Copy it again from serper.dev (API Key) and paste it in.")
+        if e.code == 429 or e.code == 402:
+            return jsonify(ok=False, message="The key works, but its searches have run out (serper.dev shows how many are left).")
+        return jsonify(ok=False, message=f"Serper answered with an error ({e.code}). Try again in a while.")
+    except (OSError, ValueError):
+        return jsonify(ok=False, message="Couldn't reach Serper from the server. Try again in a while.")
+    found = next((r["link"] for r in results if WALMART_PAGE_RE.match(str(r.get("link") or ""))), None)
+    return jsonify(ok=True, message="It works: new barcodes will be looked up at Walmart." if found
+                   else "The key works (though this test barcode's Walmart page wasn't found).")
 
 
 def open_food_facts(code):
@@ -2338,8 +2381,9 @@ def look_up(code, link=None):
             for k in ("name", "brand", "size", "picture"):
                 out[k] = out[k] or got.get("image" if k == "picture" else k) or None
     if not out["url"] and code:
-        # (Google's "I'm Feeling Lucky": usually straight to the product's page.)
-        out["find_url"] = "https://www.google.com/search?btnI=1&q=" + urllib.parse.quote(f"walmart {code}")
+        # A Google search of walmart.com alone, for the person to tap the product in. (Not "I'm
+        # Feeling Lucky": its first result is often another site, behind a "Redirect Notice".)
+        out["find_url"] = "https://www.google.com/search?q=" + urllib.parse.quote(f"site:walmart.com {code}")
     out["image"] = None
     if out["picture"] and str(out["picture"]).startswith("https://"):
         now = time.time()

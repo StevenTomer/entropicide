@@ -2246,6 +2246,19 @@ def without_brand(name, brand):
     return left if re.search(r"\w", left) else name
 
 
+def brand_from_catalog(name, user_id):
+    """(name, brand) for a name found with no brand: a brand of one of the user's products, in
+    it ("Stove Top Chicken Stuffing", with Stove Top a brand they have, is ("Chicken Stuffing",
+    "Stove Top")); else (name, "")."""
+    brands = [r[0] for r in db.get_db().execute(
+        "SELECT DISTINCT brand FROM products WHERE user_id = ? AND brand != ''", (user_id,))]
+    for brand in sorted(brands, key=len, reverse=True):  # (Stove Top Kids before Stove Top)
+        left = without_brand(name, brand)
+        if left != name:
+            return left[:1].upper() + left[1:], brand  # ("Stove top chicken stuffing": "Chicken stuffing")
+    return name, ""
+
+
 def split_title(title, brand=""):
     """A shop's title, "Reynolds Kitchens Slow Cooker Liners, Regular Size, 6 Count", as
     (name, size): ("Slow Cooker Liners", "6 Count"), the brand taken out of the name, the size
@@ -2380,6 +2393,9 @@ def look_up(code, link=None):
                 out["found_by"].append(source)
             for k in ("name", "brand", "size", "picture"):
                 out[k] = out[k] or got.get("image" if k == "picture" else k) or None
+    if out["name"] and not out["brand"]:
+        out["name"], out["brand"] = brand_from_catalog(out["name"], g.user["id"])
+        out["brand"] = out["brand"] or None
     if not out["url"] and code:
         # A Google search of walmart.com alone, for the person to tap the product in. (Not "I'm
         # Feeling Lucky": its first result is often another site, behind a "Redirect Notice".)

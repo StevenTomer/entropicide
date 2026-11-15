@@ -16,7 +16,9 @@ Settings → Troubleshooting.
 - **Looking up new barcodes, better:**
   - The lookup fills in the name, brand, size and a picture (taken automatically). Names that come
     back in ALL CAPS are written normally, and the brand is taken out of the name wherever it appears:
-    "CAMPBELL'S SOUP CREAM MUSHROOM" becomes "Soup cream mushroom", brand "Campbell's".
+    "CAMPBELL'S SOUP CREAM MUSHROOM" becomes "Soup cream mushroom", brand "Campbell's". A name found
+    with no brand gets one of your own brands when it's in the name ("Stove Top Chicken Stuffing",
+    with Stove Top a brand you have, is "Chicken stuffing", brand Stove Top).
   - **Paste a Walmart product link** (or share it from the phone) and its name, brand, size and
     picture fill in.
   - **With a Serper key** (Settings → Inventory, free at serper.dev) each new barcode's Walmart page

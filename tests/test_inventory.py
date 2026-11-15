@@ -357,3 +357,13 @@ def test_testing_a_serper_key(pantry, monkeypatch):
     ann.patch("/api/me/settings", json={"serper_key": "bad"}, headers=H)
     r = ann.post("/api/me/serper-test", headers=H).get_json()
     assert not r["ok"] and "didn't accept" in r["message"]
+
+
+def test_a_brand_you_have_is_found_in_a_name(pantry, monkeypatch):
+    """A lookup with no brand: one of your products' brands, in its name, is taken as its brand."""
+    ann, _ = pantry
+    ann.post("/api/products", json={"name": "Turkey Stuffing", "brand": "Stove Top"}, headers=H)
+    fake_web(monkeypatch, {"https://world.openfoodfacts.org/": (json_text({"product": {"product_name": "STOVE TOP CHICKEN STUFFING"}}),
+                                                                "application/json")})
+    r = ann.get("/api/codes/0043000287091").get_json()
+    assert (r["name"], r["brand"]) == ("Chicken stuffing", "Stove Top")

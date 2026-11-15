@@ -5,13 +5,13 @@
 // each. What a thing *is* (its name, barcodes, picture, link) is a product, in a catalog of
 // one's own (S.data.products); an item is a product in one inventory: how many, where, the
 // minimum, who has it. Two wizards, each a dialog of its own:
-// - Add to inventory / Use (openCountWizard): scan (or type), change the count, done. That's
-//   all it asks, but for a place the first time a product comes into an inventory.
+// - Add to inventory / Use (openCounter): the camera opens at once, and each barcode read
+//   counts one in (or out) straight away, can after can; a box takes a typed barcode or name.
 // - Add a product (openProductWizard): once for each product. Its barcode is looked up online
 //   (the name, brand, picture and Walmart page filled in), then its category, unit, and used
 //   up or kept. A barcode Add to inventory doesn't know comes here, and goes back after.
-// Each wizard keeps what's typed in a draft (localStorage) as it's typed, so nothing redrawing
-// the page (or the app reloading) can blank it.
+// Add a product keeps what's typed in a draft (localStorage) as it's typed, so nothing
+// redrawing the page (or the app reloading) can blank it.
 // Things used up (soup, batteries) are counted down and up; below their minimum the server
 // adds a "Buy …" task to the inventory's shopping project. Things kept (shears, a ladder) have
 // a place, and can be lent. Scanning uses the camera, with the browser's own barcode reader or
@@ -156,7 +156,6 @@ function renderInventory(el) {
   if (!IV.resumed) {
     IV.resumed = true;
     if (loadDraft("productDraft")) openProductWizard();
-    else if (loadDraft("countDraft")) openCountWizard();
   }
 }
 
@@ -334,189 +333,212 @@ function wizardDialog(id, title) {
   return dlg;
 }
 
-// ---- Add to inventory / Use ----
+// ---- Add to inventory / Use: the counter ----
+// One screen, the camera open from the start: each barcode read counts one in, or (Use) one
+// out, at once, and it keeps reading, so can after can needs no taps. The
+// same barcode counts again once it's been out of sight a moment (so a can held still counts
+// once). A box below takes a typed barcode or name (and a USB or Bluetooth scanner, which
+// types). A barcode nothing has pauses it for Add a product, and comes back to count it.
+// Something new to this inventory goes in the place chosen in Add a product, else the place
+// last used (its details can move it).
 
-const CW = { state: null };  // { mode: add|use, inv, step: scan|count|kept, product, n, location, camera, said, undo }
+const CT = { open: null };  // the counter, while it's open: { mode, inv, dlg, stream, stopped, busy, last, lastSeen, undo }
+const SAME_CODE_GAP = 800;  // ms a barcode must be out of sight to count again
 
-function openCountWizard(mode) {
-  const draft = loadDraft("countDraft");
+function openCounter(mode, then = null, place = undefined) {
   const inv = currentInventory();
   if (!inv) return;
-  CW.state = mode ? { mode, inv: inv.id, step: "scan", n: 1, location: Number(load(`inventoryPlace${inv.id}`, "")) || null }
-    : { ...draft, product: draft?.product ?? null };
-  if (!CW.state.mode) return;
-  delete CW.state.closing;
-  saveDraft("countDraft", CW.state);
-  const dlg = wizardDialog("count-wizard", "");
-  dlg.onclick = countWizardClicked;
-  dlg.oninput = countWizardTyped;
-  dlg.onsubmit = countWizardSubmitted;
-  dlg.onclose = () => { if (CW.state?.closing !== false) { CW.state = null; saveDraft("countDraft", null); } };
-  drawCountWizard();
-  if (!dlg.open) dlg.showModal();
-  $(".cw-code", dlg)?.focus();
+  const saved = loadDraft("countDraft");
+  mode = mode || saved?.mode || "add";
+  saveDraft("countDraft", null);
+  closeCounter();
+  const dlg = document.createElement("dialog");
+  dlg.className = "iv-counter";
+  document.body.append(dlg);
+  // (Back from Add a product, its barcode may well still be in front of the camera: it's been
+  // counted, so it counts again only once it's been out of sight.)
+  const c = CT.open = { mode, inv: inv.id, dlg, stream: null, stopped: false, busy: false,
+    last: saved?.code || "", lastSeen: saved?.code ? Date.now() + 1500 : 0, undo: null, said: "", saidKind: "" };
+  drawCounter();
+  dlg.addEventListener("close", () => { if (CT.open === c) closeCounter(); });
+  dlg.addEventListener("click", counterClicked);
+  dlg.addEventListener("input", counterTyped);
+  dlg.addEventListener("submit", counterSubmitted);
+  dlg.showModal();
+  startCamera(c);
+  if (then) counterCount(then, place);
 }
 
-function drawCountWizard() {
-  const s = CW.state, dlg = $("#count-wizard"), inv = inventoryById(s.inv) || currentInventory();
-  if (!dlg || !inv) return;
-  const adding = s.mode === "add";
-  const head = `<form method="dialog" class="dlg-head"><h2>${adding ? "＋ Add to" : "− Use from"} ${h(inv.name)}</h2>
+function closeCounter() {
+  const c = CT.open;
+  if (!c) return;
+  CT.open = null;
+  c.stopped = true;
+  c.stream?.getTracks().forEach((t) => t.stop());
+  if (c.dlg.open) c.dlg.close();
+  c.dlg.remove();
+  renderList();
+}
+
+function drawCounter() {
+  const c = CT.open, inv = inventoryById(c.inv);
+  const adding = c.mode === "add";
+  c.dlg.classList.toggle("use", !adding);
+  c.dlg.innerHTML = `<div class="ct-head">
       <span class="iv-mode" role="group" aria-label="Add or use">
         <button type="button" class="${adding ? "on" : ""}" data-mode="add">＋ Add</button>
         <button type="button" class="${adding ? "" : "on"}" data-mode="use">− Use</button></span>
-      <button class="icon" aria-label="Close">✕</button></form>`;
-  const said = s.said ? `<p class="cw-said">${h(s.said)}${s.undo ? ' <button type="button" class="link cw-undo">Undo</button>' : ""}</p>` : "";
-  if (s.step === "scan") {
-    const typed = s.typed || "";
-    const matches = typed && !looksLikeCode(typed) ? productsFor(inv, typed) : [];
-    dlg.innerHTML = `${head}${said}
-      <form class="cw-find" autocomplete="off">
-        <input class="cw-code" data-w="typed" value="${h(typed)}" placeholder="Scan or type a barcode, or a name" aria-label="Barcode or name" enterkeyhint="go">
-        <button type="button" class="primary cw-scan">📷 Scan</button>
+      <b class="ct-title">${adding ? "Adding to" : "Using from"} ${h(inv.name)}</b>
+      <button type="button" class="primary ct-done">Done</button></div>
+    <div class="ct-camera"><video playsinline muted></video><p class="ct-camera-said">Opening the camera…</p></div>
+    <div class="ct-panel">
+      <p class="ct-said ${c.saidKind}">${c.said ? h(c.said) : counterHint(c)}
+        ${c.undo ? '<button type="button" class="link ct-undo">Undo</button>' : ""}</p>
+      <form class="ct-type" autocomplete="off">
+        <input class="ct-code" placeholder="Or type a barcode or a name" aria-label="Barcode or name" enterkeyhint="go">
+        <button>${adding ? "Add" : "Use"}</button>
       </form>
-      <div class="cw-matches">${matchesHtml(inv, typed, matches)}</div>
-      <p class="muted small">A barcode scanner (USB or Bluetooth) types into the box: just scan.</p>`;
-    return;
+      <div class="ct-matches"></div>
+    </div>`;
+}
+
+const counterHint = (c) => `Scan barcodes: each one ${c.mode === "add" ? "adds one" : "takes one away"}.`;
+
+// What happened, at the bottom (and a buzz): kind "good", "new" or "bad".
+function counterSay(text, kind = "good", undo = null) {
+  const c = CT.open;
+  if (!c) return;
+  Object.assign(c, { said: text, saidKind: kind, undo });
+  const p = $(".ct-said", c.dlg);
+  p.className = `ct-said ${kind} flash`;
+  p.innerHTML = h(text) + (undo ? ' <button type="button" class="link ct-undo">Undo</button>' : "");
+  navigator.vibrate?.(kind === "bad" ? [60, 60, 60] : 60);
+}
+
+async function startCamera(c) {
+  const said = $(".ct-camera-said", c.dlg);
+  try {
+    const reader = await makeBarcodeReader();
+    c.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+    if (c.stopped) return c.stream.getTracks().forEach((t) => t.stop());
+    const video = $("video", c.dlg);
+    video.srcObject = c.stream;
+    await video.play();
+    said.hidden = true;
+    const tick = async () => {
+      if (c.stopped) return;
+      try {
+        const found = await reader.detect(video);
+        const code = found[0]?.rawValue;
+        if (code) {
+          const again = code === c.last && Date.now() - c.lastSeen < SAME_CODE_GAP;
+          c.lastSeen = Date.now();
+          if (!again && !c.busy) { c.last = code; await counterEntry(code); }
+        }
+      } catch { /* (a frame it couldn't read) */ }
+      setTimeout(tick, 150);
+    };
+    tick();
+  } catch (err) {
+    c.dlg.classList.add("no-camera");
+    said.textContent = err?.name === "NotAllowedError"
+      ? "The camera isn't allowed here: allow it for this site, or type below." : "No camera here: type a barcode or name below (a barcode scanner types there too).";
+    $(".ct-code", c.dlg)?.focus();
   }
-  const p = productById(s.product), it = p && itemHere(inv, p.id);
-  if (!p) { s.step = "scan"; return drawCountWizard(); }
-  const pic = p.image ? `<img class="cw-pic" src="${h(p.image)}" alt="">` : '<span class="cw-pic"></span>';
-  const now = it ? `Now: <b>${h(qtyText(it))}</b>${it.location_id ? ` · ${h(placePath(it.location_id))}` : ""}`
-    : `Not in ${h(inv.name)} yet.`;
-  if (s.step === "kept") {
-    dlg.innerHTML = `${head}<div class="cw-product">${pic}<div><b>${h(fullName(p))}</b><p class="muted">${now}</p></div></div>
-      <p>It's kept, not used up, so there's nothing to take. To lend it or move it, open it.</p>
-      <p class="cw-buttons"><button type="button" class="cw-open">Open it</button> <button type="button" class="primary cw-next">Scan another</button></p>`;
-    return;
-  }
-  const unit = shownUnit(p.unit);
-  dlg.innerHTML = `${head}
-    <div class="cw-product">${pic}<div><b>${h(fullName(p))}</b>${p.size ? ` <span class="muted">${h(p.size)}</span>` : ""}<p class="muted">${now}</p></div></div>
-    <form class="cw-count" autocomplete="off">
-      <div class="cw-stepper">
-        <button type="button" class="cw-less" aria-label="One less">−</button>
-        <input type="number" class="cw-n" data-w="n" value="${fmtQty(s.n)}" min="0" step="any" inputmode="decimal" aria-label="How many">
-        <button type="button" class="cw-more" aria-label="One more">+</button>
-      </div>
-      <p class="cw-unit muted">${h(unit)} ${adding ? "to add" : "used"}</p>
-      ${it ? "" : `<label>Where it goes <select class="cw-place" data-w="location">${options([["", "No place"], ...placeOptions(inv)], s.location ?? "")}</select></label>`}
-      <p class="cw-buttons"><button type="button" class="link cw-back">← Something else</button>
-        <button class="primary cw-done">${adding ? `Add ${fmtQty(s.n)}` : `Use ${fmtQty(s.n)}`}</button></p>
-    </form>`;
-  $(".cw-n", dlg)?.select();
+}
+
+// A barcode read or typed, or a name typed: count it, else find it, else make it.
+async function counterEntry(text) {
+  const c = CT.open, inv = c && inventoryById(c.inv);
+  text = (text || "").trim();
+  if (!c || !text) return;
+  const place = text.match(/#location:(\d+)/);
+  if (place) { closeCounter(); return showPlace(Number(place[1])); }
+  const found = productsFor(inv, text);
+  const isCode = looksLikeCode(text) || (S.data.products || []).some((p) => p.codes.includes(text));
+  $(".ct-matches", c.dlg).innerHTML = "";
+  if (isCode) return found.length ? counterCount(found[0]) : counterNewProduct({ code: text });
+  if (found.length === 1) return counterCount(found[0]);
+  $(".ct-matches", c.dlg).innerHTML = matchesHtml(inv, text, found);
 }
 
 function matchesHtml(inv, typed, matches) {
   if (!typed || looksLikeCode(typed)) return "";
-  return matches.map((p) => `<button type="button" class="cw-match" data-product="${p.id}">
+  return matches.map((p) => `<button type="button" class="ct-match" data-product="${p.id}">
       ${p.image ? `<img src="${h(p.image)}" alt="">` : "<span></span>"}${h(fullName(p))}${itemHere(inv, p.id) ? "" : ' <span class="muted small">(new here)</span>'}</button>`).join("") +
-    `<button type="button" class="link cw-new-product">+ “${h(typed)}” is a new product…</button>`;
+    `<button type="button" class="link ct-new-product" data-name="${h(typed)}">+ “${h(typed)}” is a new product…</button>`;
 }
 
-function countWizardTyped(e) {
-  const t = e.target, s = CW.state;
-  if (!t.dataset.w || !s) return;
-  s[t.dataset.w] = t.dataset.w === "n" ? Number(t.value) || 0 : t.dataset.w === "location" ? Number(t.value) || null : t.value;
-  saveDraft("countDraft", s);
-  if (t.dataset.w === "typed") {
-    const inv = inventoryById(s.inv);
-    $(".cw-matches").innerHTML = matchesHtml(inv, t.value.trim(), looksLikeCode(t.value.trim()) ? [] : productsFor(inv, t.value.trim()));
-  }
-  if (t.dataset.w === "n") { const b = $(".cw-done"); if (b) b.textContent = `${s.mode === "add" ? "Add" : "Use"} ${fmtQty(s.n)}`; }
+// Counts one of a product in or out; something new here goes in place (else the last used).
+async function counterCount(p, place = undefined) {
+  const c = CT.open, inv = c && inventoryById(c.inv);
+  if (!c || c.busy) return;
+  c.busy = true;
+  try {
+    const here = itemHere(inv, p.id);
+    if (here && !here.used_up && c.mode === "use") return counterSay(`${p.name} is kept, not used up: nothing taken.`, "bad");
+    if (place === undefined) place = Number(load(`inventoryPlace${inv.id}`, "")) || null;
+    const r = await countIn({ product_id: p.id }, c.mode === "use" ? -1 : 1, here ? {} : { location_id: place },
+      { quiet: true, inv }).catch(() => null);
+    if (!r?.item) return r?.kept ? counterSay(`${p.name} is kept, not used up: nothing taken.`, "bad") : null;
+    const where = r.made && r.item.location_id ? ` (in ${placePath(r.item.location_id)})` : "";
+    counterSay(r.made ? `＋ ${r.item.name}: ${qtyText(r.item)}, new here${where}` : `${c.mode === "use" ? "−" : "＋"} ${countSaid(r)}`,
+      r.made ? "new" : "good", { item: r.item.id, delta: r.before - r.after, made: r.made });
+  } finally { c.busy = false; }
 }
 
-// A barcode (or name, chosen) found: what it is, and how many.
-function countProduct(p) {
-  const s = CW.state, inv = inventoryById(s.inv);
-  const it = itemHere(inv, p.id);
-  Object.assign(s, { product: p.id, typed: "", n: 1, said: s.said, step: it && !it.used_up && s.mode === "use" ? "kept" : "count" });
-  saveDraft("countDraft", s);
-  drawCountWizard();
-}
-
-async function countWizardEntry(text) {
-  const s = CW.state, inv = inventoryById(s.inv);
-  text = text.trim();
-  if (!text) return;
-  const place = text.match(/#location:(\d+)/);
-  if (place) { $("#count-wizard").close(); return showPlace(Number(place[1])); }
-  const found = productsFor(inv, text);
-  if (looksLikeCode(text) || (S.data.products || []).some((p) => p.codes.includes(text))) {
-    if (found.length) return countProduct(found[0]);
-    return newProductFromCount({ code: text });  // (a barcode nothing has: what is it?)
-  }
-  if (found.length === 1) return countProduct(found[0]);
-  if (!found.length) return newProductFromCount({ name: text });
-  s.typed = text;
-  drawCountWizard();
-}
-
-// Off to Add a product, to come back here with it.
-function newProductFromCount(start) {
-  const s = CW.state;
-  s.closing = false;
-  saveDraft("countDraft", s);
-  $("#count-wizard").close();
+// Off to Add a product (the camera paused), to come back and count it.
+function counterNewProduct(start) {
+  const c = CT.open;
+  saveDraft("countDraft", { mode: c.mode, code: start.code || "" });
+  closeCounter();
   openProductWizard({ ...start, back: true });
 }
 
-async function countWizardSubmitted(e) {
-  if (e.target.method === "dialog") return;  // (✕)
+async function counterSubmitted(e) {
+  if (!e.target.matches(".ct-type")) return;
   e.preventDefault();
-  const s = CW.state;
-  if (e.target.matches(".cw-find")) {
-    const box = $(".cw-code"), text = box.value;
-    box.value = s.typed = "";
-    return countWizardEntry(text);
-  }
-  if (!e.target.matches(".cw-count")) return;
-  const inv = inventoryById(s.inv), p = productById(s.product), n = Number(s.n);
-  if (!p || !(n > 0)) return toast("How many? (More than none.)");
-  if (s.location) save(`inventoryPlace${inv.id}`, String(s.location));
-  const r = await countIn({ product_id: p.id }, s.mode === "use" ? -n : n, itemHere(inv, p.id) ? {} : { location_id: s.location || null },
-    { quiet: true, inv });
-  if (!r) return;
-  if (r.kept) { s.step = "kept"; return drawCountWizard(); }
-  Object.assign(s, { step: "scan", product: null, n: 1, said: countSaid(r), undo: r.made ? null : { item: r.item.id, delta: r.before - r.after } });
-  saveDraft("countDraft", s);
-  drawCountWizard();
-  if (s.camera) scanForCount(); else $(".cw-code")?.focus();
+  const box = $(".ct-code", e.target), text = box.value;
+  box.value = "";
+  await counterEntry(text);
 }
 
-async function scanForCount() {
-  const s = CW.state;
-  s.camera = true;
-  const code = await scanOne(s.mode === "use" ? "Scan what's used" : "Scan what's come in");
-  if (!CW.state) return;
-  if (!code) { s.camera = false; return $(".cw-code")?.focus(); }
-  countWizardEntry(code);
+function counterTyped(e) {
+  const c = CT.open, t = e.target;
+  if (!c) return;
+  if (t.matches(".ct-code")) {
+    const text = t.value.trim(), inv = inventoryById(c.inv);
+    $(".ct-matches", c.dlg).innerHTML = text && !looksLikeCode(text) ? matchesHtml(inv, text, productsFor(inv, text)) : "";
+  }
 }
 
-async function countWizardClicked(e) {
-  const b = e.target.closest("button"), s = CW.state;
-  if (!b || !s) return;
-  if (b.dataset.mode) { s.mode = b.dataset.mode; saveDraft("countDraft", s); return drawCountWizard(); }
-  if (b.classList.contains("cw-scan")) return scanForCount();
-  if (b.classList.contains("cw-match")) return countProduct(productById(Number(b.dataset.product)));
-  if (b.classList.contains("cw-new-product")) return newProductFromCount({ name: s.typed || "" });
-  if (b.classList.contains("cw-less") || b.classList.contains("cw-more")) {
-    s.n = Math.max(1, (Number(s.n) || 0) + (b.classList.contains("cw-more") ? 1 : -1));
-    $(".cw-n").value = fmtQty(s.n);
-    return countWizardTyped({ target: $(".cw-n") });
+async function counterClicked(e) {
+  const c = CT.open, b = e.target.closest("button");
+  if (!c || !b) return;
+  if (b.classList.contains("ct-done")) return closeCounter();
+  if (b.dataset.mode) {
+    // (Only what says add or use changes: the camera keeps running.)
+    c.mode = b.dataset.mode;
+    const adding = c.mode === "add";
+    c.dlg.classList.toggle("use", !adding);
+    c.dlg.querySelectorAll("[data-mode]").forEach((x) => x.classList.toggle("on", x.dataset.mode === c.mode));
+    $(".ct-title", c.dlg).textContent = `${adding ? "Adding to" : "Using from"} ${inventoryById(c.inv).name}`;
+    $(".ct-type button", c.dlg).textContent = adding ? "Add" : "Use";
+    if (!c.said) $(".ct-said", c.dlg).textContent = counterHint(c);
+    return;
   }
-  if (b.classList.contains("cw-back") || b.classList.contains("cw-next")) {
-    Object.assign(s, { step: "scan", product: null, n: 1 });
-    saveDraft("countDraft", s);
-    drawCountWizard();
-    return s.camera && b.classList.contains("cw-next") ? scanForCount() : $(".cw-code")?.focus();
-  }
-  if (b.classList.contains("cw-open")) { const it = itemHere(inventoryById(s.inv), s.product); $("#count-wizard").close(); return it && openItem(it.id); }
-  if (b.classList.contains("cw-undo") && s.undo) {
-    const r = await countIn({ item_id: s.undo.item }, s.undo.delta, {}, { quiet: true, inv: inventoryById(s.inv) });
-    Object.assign(s, { said: r?.item ? `Undone: ${r.item.name} is ${qtyText(r.item)} again.` : s.said, undo: null });
-    saveDraft("countDraft", s);
-    drawCountWizard();
+  if (b.classList.contains("ct-match")) { $(".ct-code", c.dlg).value = ""; $(".ct-matches", c.dlg).innerHTML = ""; return counterCount(productById(Number(b.dataset.product))); }
+  if (b.classList.contains("ct-new-product")) return counterNewProduct({ name: b.dataset.name || "" });
+  if (b.classList.contains("ct-undo") && c.undo) {
+    const u = c.undo;
+    c.undo = null;
+    if (u.made) {
+      // (Something new here: taken out again, as it was.)
+      await saveItem(u.item, { deleted: true });
+      return counterSay("Undone: taken out again.", "good");
+    }
+    const r = await countIn({ item_id: u.item }, u.delta, {}, { quiet: true, inv: inventoryById(c.inv) }).catch(() => null);
+    if (r?.item) counterSay(`Undone: ${r.item.name} is ${qtyText(r.item)} again.`, "good");
   }
 }
 
@@ -531,7 +553,7 @@ function openProductWizard(start = null) {
   const inv = currentInventory();
   const fresh = start && { step: start.code || start.name || start.link ? 2 : 1, code: start.code || "", name: start.name || "",
     brand: "", size: "", category: "", unit: "", used_up: inv?.kind !== "home", url: "", picture: "", image: "",
-    back: !!start.back, looked: false };
+    back: !!start.back, looked: false, location: inv ? Number(load(`inventoryPlace${inv.id}`, "")) || null : null };
   PW.state = fresh || loadDraft("productDraft");
   if (!PW.state) return;
   PW.photo = null;
@@ -546,7 +568,7 @@ function openProductWizard(start = null) {
     if (s?.saving) return;
     PW.state = null;
     saveDraft("productDraft", null);
-    if (s?.back) openCountWizard();  // (back to counting, with nothing new)
+    if (s?.back) openCounter();  // (back to counting, with nothing new)
   };
   drawProductWizard();
   if (!dlg.open) dlg.showModal();
@@ -593,8 +615,10 @@ function drawProductWizard() {
       <h3>It's</h3><div class="iv-chips" data-pick="used_up">
         <button type="button" class="cat-chip${s.used_up ? " on" : ""}" data-value="1">Used up, and bought again</button>
         <button type="button" class="cat-chip${s.used_up ? "" : " on"}" data-value="">Kept (a tool, a ladder)</button></div>
+      ${s.back && inv && placeOptions(inv).length ? `<h3>Where it goes in ${h(inv.name)}</h3>
+        <select class="pw-place" aria-label="Where it goes">${options([["", "No place"], ...placeOptions(inv)], s.location ?? "")}</select>` : ""}
       <p class="pw-buttons"><button type="button" class="link pw-back">← Back</button>
-        <button class="primary pw-save">${s.back ? "Save, and count it" : "Save"}</button></p>`;
+        <button class="primary pw-save">${s.back ? "Save, and add one" : "Save"}</button></p>`;
   }
   dlg.innerHTML = head + `<form class="pw-body" autocomplete="off">${body}</form>`;
 }
@@ -609,6 +633,11 @@ function productWizardTyped(e) {
 
 async function productWizardChanged(e) {
   const t = e.target;
+  if (t.classList.contains("pw-place")) {
+    PW.state.location = Number(t.value) || null;
+    if (PW.state.location) save(`inventoryPlace${currentInventory().id}`, t.value);
+    return saveDraft("productDraft", PW.state);
+  }
   if (t.classList.contains("pw-photo") && t.files[0]) { PW.photo = t.files[0]; PW.state.image = ""; drawProductWizard(); }
   // A Walmart link pasted: what it says fills in the rest.
   if (t.classList.contains("pw-url") && /walmart\.com\/ip\//i.test(t.value)) lookUpLink(t.value.trim());
@@ -680,16 +709,14 @@ async function productWizardNext() {
 
 // Saved (or found already): back to counting it, or just closed.
 function productSaved(p) {
-  const back = PW.state?.back;
+  const back = PW.state?.back, place = PW.state?.location ?? null;
   PW.state.saving = true;
   PW.state = null;
   saveDraft("productDraft", null);
   $("#product-wizard")?.close();
   renderList();
-  if (back) {
-    openCountWizard();
-    if (CW.state) countProduct(p);
-  } else toast(`${p.name} is in your products. ＋ Add to inventory counts some in.`);
+  if (back) openCounter(null, p, place);  // (and one's counted, as the scan that found it would have)
+  else toast(`${p.name} is in your products. ＋ Add to inventory counts some in.`);
 }
 
 async function productWizardClicked(e) {
@@ -1096,8 +1123,8 @@ function bindInventory() {
     if (b.classList.contains("iv-new")) {
       return newInventory(confirm("Is it for things used up and bought again (food storage, supplies)?\n\nOK: yes. Cancel: things kept (a home inventory).") ? "stock" : "home");
     }
-    if (b.classList.contains("iv-add")) return openCountWizard("add");
-    if (b.classList.contains("iv-use")) return openCountWizard("use");
+    if (b.classList.contains("iv-add")) return openCounter("add");
+    if (b.classList.contains("iv-use")) return openCounter("use");
     if (b.classList.contains("iv-products")) return openProducts();
     if (b.dataset.filter !== undefined && b.closest(".iv-filters")) { IV.filter = b.dataset.filter; save("inventoryFilter", IV.filter); return renderList(); }
     if (b.classList.contains("iv-all-places")) { IV.place = null; return renderList(); }

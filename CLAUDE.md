@@ -107,6 +107,15 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
   (others' assigned tasks stay out of my lists; reminders go to the assignee). Triggers keep
   `user_groups.changed_at`; the browser polls `/api/changes` (app.js `checkShared`). Inventories
   are next (IDEAS.md).
+- **Inventory: products vs items.** A product (`products`, `product_codes`; one catalog per user)
+  is what a thing is; an item (document kind `item`) is a product in one inventory, at most one
+  per inventory. The item's name, brand, unit, used_up and url are *copies* of its product's, kept
+  in step by `sync_product`, so search, the trash and "Buy …" tasks work from the item alone.
+  Barcode lookups (`look_up`) use Open Food Facts, UPCitemdb, and Walmart product pages, found
+  through Serper with the user's key, or a pasted link. Walmart's search page refuses programs;
+  don't try to get past that. A lookup's picture is fetched only by a server-side token
+  (`LOOKUPS`), never from a URL the browser sends. Product pictures are blobs too
+  (`image_blob_id`), so the blob-cleanup triggers check `products`.
 - Attachments are blobs in the database (deduplicated by sha256), so the DB file is the
   whole backup. Each is on one document; a picture placed in a text is `<img data-file="id">`,
   and the browser adds the `src` (`showBody`).

@@ -5,6 +5,25 @@ Settings → Troubleshooting.
 
 ## Unreleased
 
+- **Inventory, easier:** what a thing *is* and how many you have are kept apart now.
+  - **Products** hold what a thing is: its name, brand, size, barcodes, picture, link, category and
+    unit. They're one catalog for all your inventories, so a barcode scanned once is known in every
+    inventory. Your existing things each became a product, keeping their barcodes and photos.
+  - **＋ Add to inventory** and **− Use** just count: scan (or type a name), set how many with big
+    − / + buttons, done. They ask where it goes only the first time something comes into an inventory.
+  - **Add a product** is a short wizard (barcode → what it is → details). It runs by itself when you
+    scan a barcode nothing has.
+- **Looking up new barcodes, better:**
+  - The lookup fills in the name, brand, size and a picture (taken automatically). Names that come
+    back in ALL CAPS are written normally ("Campbell's soup cream mushroom").
+  - **Paste a Walmart product link** (or share it from the phone) and its name, brand, size and
+    picture fill in.
+  - **With a Serper key** (Settings → Inventory, free at serper.dev) each new barcode's Walmart page
+    is found by itself. Without one, *Find it on Walmart* opens Google's first result for you.
+- **Unit and category are choices** you tap (cans, boxes, bags …), not something to type each time.
+- **Fixed:** on the phone, choosing a category while adding something no longer blanks what you'd
+  typed. The wizards keep what's typed, even if the app reloads.
+- Things used up no longer offer receipts and manuals; things kept still do.
 - **Notes:** a new page for anything worth keeping that isn't a task. Notes have a title,
   formatted text (bold, italic, underline, strike, fonts, headings, lists, quotes, links),
   pictures you can place and drag anywhere in the text, and other files. Give them categories,

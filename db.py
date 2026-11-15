@@ -157,6 +157,9 @@ KINDS = {
             ("lent_to", "TEXT"),
             ("lent_on", "TEXT"),
             ("lend_task_id", "INTEGER REFERENCES task_data(id) ON DELETE SET NULL"),
+            # what it is (products): its name, brand, unit, used_up and url above are copies of
+            # the product's, kept the same by app.py's sync_product
+            ("product_id", "INTEGER REFERENCES products(id) ON DELETE SET NULL"),
         ],
     },
 }
@@ -313,13 +316,33 @@ CREATE TABLE IF NOT EXISTS locations (
     position     REAL NOT NULL DEFAULT 0
 );
 
--- Barcodes (UPC, EAN, …) of an inventory's items: an item can have several (brands, sizes);
--- a code means one item in its inventory.
-CREATE TABLE IF NOT EXISTS item_codes (
-    inventory_id INTEGER NOT NULL REFERENCES inventories(id) ON DELETE CASCADE,
-    code         TEXT NOT NULL,
-    item_id      INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    PRIMARY KEY (inventory_id, code)
+-- Products: what a thing is (Campbell's tomato soup, its barcodes, picture and link), apart
+-- from how many there are and where (items). One catalog per person, for all their
+-- inventories; others see a product through a shared inventory holding it. used_up is what
+-- new items of it are (used up and bought again, or kept). The picture is a blob (image_*).
+CREATE TABLE IF NOT EXISTS products (
+    id            INTEGER PRIMARY KEY,
+    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    brand         TEXT NOT NULL DEFAULT '',
+    size          TEXT NOT NULL DEFAULT '',
+    category      TEXT NOT NULL DEFAULT '',
+    unit          TEXT NOT NULL DEFAULT '',
+    used_up       INTEGER NOT NULL DEFAULT 1,
+    url           TEXT,
+    image_blob_id INTEGER REFERENCES blobs(id),
+    image_mime    TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Barcodes (UPC, EAN, …) of products: a product can have several (sizes, packaging); a code
+-- means one product in its maker's catalog.
+CREATE TABLE IF NOT EXISTS product_codes (
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    code       TEXT NOT NULL,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, code)
 );
 
 CREATE TABLE IF NOT EXISTS areas (
@@ -574,7 +597,8 @@ CREATE TRIGGER IF NOT EXISTS shared_inventory AFTER UPDATE ON inventories
         WHEN NEW.group_id IS NOT NULL OR OLD.group_id IS NOT NULL BEGIN
     UPDATE user_groups SET changed_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id IN (NEW.group_id, OLD.group_id);
 END;
-CREATE INDEX IF NOT EXISTS item_codes_item ON item_codes(item_id);
+CREATE INDEX IF NOT EXISTS product_codes_product ON product_codes(product_id);
+CREATE INDEX IF NOT EXISTS item_data_product ON item_data(product_id);
 CREATE TRIGGER IF NOT EXISTS shared_journal AFTER UPDATE ON journals
         WHEN NEW.group_id IS NOT NULL OR OLD.group_id IS NOT NULL BEGIN
     UPDATE user_groups SET changed_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id IN (NEW.group_id, OLD.group_id);
@@ -586,10 +610,27 @@ CREATE INDEX IF NOT EXISTS document_deps_blocker ON document_deps(blocker_id);
 CREATE INDEX IF NOT EXISTS document_links_b ON document_links(b);
 CREATE INDEX IF NOT EXISTS attachments_document ON attachments(document_id);
 CREATE INDEX IF NOT EXISTS attachments_blob ON attachments(blob_id);
-CREATE TRIGGER IF NOT EXISTS attachments_blob_gone AFTER DELETE ON attachments
+-- A file's bytes go when nothing has them any more: no attachment, and no product's picture.
+DROP TRIGGER IF EXISTS attachments_blob_gone;
+CREATE TRIGGER attachments_blob_gone AFTER DELETE ON attachments
 BEGIN
     DELETE FROM blobs WHERE id = old.blob_id
-        AND NOT EXISTS (SELECT 1 FROM attachments WHERE blob_id = old.blob_id);
+        AND NOT EXISTS (SELECT 1 FROM attachments WHERE blob_id = old.blob_id)
+        AND NOT EXISTS (SELECT 1 FROM products WHERE image_blob_id = old.blob_id);
+END;
+CREATE TRIGGER IF NOT EXISTS products_blob_gone AFTER DELETE ON products
+WHEN old.image_blob_id IS NOT NULL
+BEGIN
+    DELETE FROM blobs WHERE id = old.image_blob_id
+        AND NOT EXISTS (SELECT 1 FROM attachments WHERE blob_id = old.image_blob_id)
+        AND NOT EXISTS (SELECT 1 FROM products WHERE image_blob_id = old.image_blob_id);
+END;
+CREATE TRIGGER IF NOT EXISTS products_picture_changed AFTER UPDATE OF image_blob_id ON products
+WHEN old.image_blob_id IS NOT NULL AND old.image_blob_id IS NOT new.image_blob_id
+BEGIN
+    DELETE FROM blobs WHERE id = old.image_blob_id
+        AND NOT EXISTS (SELECT 1 FROM attachments WHERE blob_id = old.image_blob_id)
+        AND NOT EXISTS (SELECT 1 FROM products WHERE image_blob_id = old.image_blob_id);
 END;
 CREATE INDEX IF NOT EXISTS task_data_project ON task_data(project_id);
 CREATE INDEX IF NOT EXISTS task_data_completed ON task_data(completed_at);
@@ -680,7 +721,8 @@ def migrate(conn):
         conn.execute("ALTER TABLE user_groups ADD COLUMN changed_at TEXT NOT NULL DEFAULT ''")
     item_cols = {r["name"] for r in conn.execute("PRAGMA table_info(item_data)")}
     for col, ddl in (("brand", "TEXT NOT NULL DEFAULT ''"), ("category", "TEXT NOT NULL DEFAULT ''"),
-                     ("store", "TEXT NOT NULL DEFAULT ''"), ("url", "TEXT")):
+                     ("store", "TEXT NOT NULL DEFAULT ''"), ("url", "TEXT"),
+                     ("product_id", "INTEGER REFERENCES products(id) ON DELETE SET NULL")):
         if item_cols and col not in item_cols:
             conn.execute(f"ALTER TABLE item_data ADD COLUMN {col} {ddl}")
     if not legacy and "assigned_to" not in {r["name"] for r in conn.execute("PRAGMA table_info(task_data)")}:
@@ -982,6 +1024,40 @@ def allow_items(conn):
         conn.execute("PRAGMA foreign_keys = ON")
 
 
+def items_to_products(conn):
+    """Items without a product get one, made from what the item says it is (its name, brand,
+    unit, link, barcodes and first picture). Items of one person with the same barcode share
+    a product when their names match; otherwise the later one's product goes without that
+    barcode. Once, from before products, the old item_codes table is used and then dropped."""
+    old_codes = _is_table(conn, "item_codes")
+    loose = conn.execute(
+        "SELECT x.*, d.user_id, d.title FROM item_data x JOIN documents d ON d.id = x.id "
+        "WHERE x.product_id IS NULL ORDER BY x.id").fetchall()
+    for it in loose:
+        codes = [r[0] for r in conn.execute("SELECT code FROM item_codes WHERE item_id = ? ORDER BY code",
+                                            (it["id"],))] if old_codes else []
+        product = None
+        for code in codes:
+            row = conn.execute("SELECT p.id, p.name FROM product_codes c JOIN products p ON p.id = c.product_id "
+                               "WHERE c.user_id = ? AND c.code = ?", (it["user_id"], code)).fetchone()
+            if row and row["name"].casefold() == (it["title"] or "").casefold():
+                product = row["id"]
+                break
+        if product is None:
+            pic = conn.execute("SELECT blob_id, mime FROM attachments WHERE document_id = ? AND mime LIKE 'image/%' "
+                               "AND mime != 'image/svg+xml' ORDER BY id LIMIT 1", (it["id"],)).fetchone()
+            product = conn.execute(
+                "INSERT INTO products (user_id, name, brand, category, unit, used_up, url, image_blob_id, image_mime) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (it["user_id"], it["title"] or "Something", it["brand"] or "", it["category"] or "", it["unit"] or "",
+                 it["used_up"], it["url"], pic and pic["blob_id"], pic and pic["mime"])).lastrowid
+        conn.executemany("INSERT OR IGNORE INTO product_codes (user_id, code, product_id) VALUES (?, ?, ?)",
+                         [(it["user_id"], c, product) for c in codes])
+        conn.execute("UPDATE item_data SET product_id = ? WHERE id = ?", (product, it["id"]))
+    if old_codes:
+        conn.execute("DROP TABLE item_codes")
+
+
 def connect(path):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
@@ -1009,6 +1085,7 @@ def init_db(path):
     migrate(conn)
     allow_items(conn)
     conn.executescript(VIEWS)
+    items_to_products(conn)
     conn.executescript(INDEXES)
     format_text(conn)
     untangle_trash(conn)

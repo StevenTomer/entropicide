@@ -344,6 +344,7 @@ function changeOffline(kind, id, changes) {
 function countOffline(body) {
   const items = S.data.items || [];
   const it = body.item_id ? items.find((i) => i.id === body.item_id)
+    : body.product_id ? items.find((i) => i.inventory_id === body.inventory_id && i.product_id === body.product_id)
     : items.find((i) => i.inventory_id === body.inventory_id && i.codes.includes(body.code));
   if (!it) throw new Error("New things need a connection: scan it again when you're back online.");
   if (!it.used_up && body.delta < 0) return { kept: true, item: it };
@@ -4105,7 +4106,14 @@ async function openSettings() {
     <section>
       <h3>Inventory</h3>
       <label class="check"><input type="checkbox" class="look-up-codes" ${me.settings.look_up_codes ? "checked" : ""}>
-        Look up the names of new barcodes at Open Food Facts (a free product database on the internet; only the barcode is sent)</label>
+        Look up new barcodes online: their names, brands and pictures, from Open Food Facts and UPCitemdb (free product
+        databases; only the barcode is sent)</label>
+      <label>Serper key, to find each barcode's Walmart page by itself
+        <input type="password" class="serper-key" autocomplete="off" placeholder="${me.settings.serper_key_set ? "Saved (type a new one to change it, or clear it)" : "None"}"></label>
+      <p class="muted small">Optional. Serper (<a href="https://serper.dev" target="_blank" rel="noopener noreferrer">serper.dev</a>)
+        searches Google for “walmart” and the barcode; its free key covers a few thousand products. Without one, Add a product
+        has a <em>Find it on Walmart</em> link to open, and you paste (or share) the page back.
+        ${me.settings.serper_key_set ? '<button type="button" class="link serper-clear">Remove the key</button>' : ""}</p>
     </section>
 
     <section>
@@ -4463,6 +4471,13 @@ function bindSettings() {
       S.data.user.settings = await api("PATCH", "/me/settings", { look_up_codes: t.checked });
       return;
     }
+    if (t.classList.contains("serper-key") && t.value.trim()) {
+      S.data.user.settings = await api("PATCH", "/me/settings", { serper_key: t.value.trim() });
+      t.value = "";
+      t.placeholder = "Saved (type a new one to change it, or clear it)";
+      toast("Saved. New barcodes will be looked up at Walmart.");
+      return;
+    }
     if (t.classList.contains("projects-in-lists")) {
       save("projectsInLists", t.checked ? "1" : "0");
       renderList();
@@ -4540,6 +4555,12 @@ function bindSettings() {
     const area = b.closest("[data-area]");
     const tag = b.closest("[data-tag-id]");
     const user = b.closest("[data-user]");
+    if (b.classList.contains("serper-clear")) {
+      S.data.user.settings = await api("PATCH", "/me/settings", { serper_key: "" });
+      b.remove();
+      toast("The Serper key is removed.");
+      return;
+    }
     if (b.closest(".text-size")) {
       if (b.classList.contains("ts-reset")) setTextSize(100);
       else stepTextSize(b.classList.contains("ts-up") ? 1 : -1);
@@ -5802,6 +5823,11 @@ async function afterLoad() {
     history.replaceState(null, "", location.pathname);
     if (params.get("shared")) toast("Added to your Inbox.");
     openTask(opened);
+  }
+  // A Walmart product's page shared from the phone: to Add a product (inventory.js).
+  if (params.get("product_link")) {
+    history.replaceState(null, "", location.pathname);
+    productFromLink(params.get("product_link"));
   }
   if (params.get("shared_note")) {
     history.replaceState(null, "", location.pathname);

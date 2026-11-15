@@ -94,9 +94,10 @@ DEFAULT_SETTINGS = {"defer_options": ["1h", "2h", "6h", "24h", "3d", "1w"], "tim
                     # The weekly review: a reminder on a day (0 Monday … 6 Sunday; "" none) at a
                     # time, the day it was last sent, and the day the last review was done.
                     "review_day": "", "review_time": "16:00", "review_reminded": "", "last_review": "",
-                    # Inventory: look up the names of new barcodes at Open Food Facts (only the
-                    # barcode is sent; on unless turned off)
-                    "look_up_codes": True,
+                    # Inventory: look up new barcodes online (Open Food Facts, UPCitemdb, and with
+                    # a Serper key Google for Walmart's page; only the barcode is sent; on unless
+                    # turned off). The key is never sent back out (public_settings).
+                    "look_up_codes": True, "serper_key": "",
                     # Focus's calendar: events made small, as "<event id>|<day>" (forgotten once
                     # the day's gone)
                     "focus_shrunk": [],
@@ -1237,6 +1238,12 @@ def user_settings(user):
     return DEFAULT_SETTINGS | {k: v for k, v in saved.items() if k in DEFAULT_SETTINGS}
 
 
+def public_settings(user):
+    """user_settings, as the browser gets them: a key only said to be there or not."""
+    settings = user_settings(user)
+    return {k: v for k, v in settings.items() if k != "serper_key"} | {"serper_key_set": bool(settings["serper_key"])}
+
+
 def set_tags(item_id, names):
     """Replace a task's, project's or note's tags, making new ones as needed."""
     conn = db.get_db()
@@ -1654,7 +1661,7 @@ def all_data():
               "push_devices": conn.execute("SELECT COUNT(*) FROM push_subscriptions WHERE user_id = ?",
                                            (uid,)).fetchone()[0],
               "display_name": g.user["display_name"], "is_admin": bool(g.user["is_admin"]),
-              "settings": user_settings(g.user)},
+              "settings": public_settings(g.user)},
         tasks=tasks_json(tasks),
         projects=projects_json(projects),
         areas=[dict(a) for a in areas],
@@ -1686,30 +1693,59 @@ def all_data():
 # --- inventories ----------------------------------------------------------------
 # An inventory (Pantry, Food storage, House) holds items: documents of kind "item", each used
 # up and bought again (counted down; below its minimum, a "Buy …" task in the inventory's
-# shopping project) or kept (it only moves, or is lent). Locations nest; barcodes find items.
+# shopping project) or kept (it only moves, or is lent). Locations nest.
+# What a thing *is* (its name, barcodes, picture, link) is a product, in its maker's catalog;
+# an item is that product in one inventory: how many, where, the minimum, who has it. An
+# item's name, brand, unit and so on are copies of its product's (sync_product), so search,
+# the trash and the "Buy …" tasks keep working from the item alone. One item per product in
+# an inventory, so counting never has to ask which.
 # The counter (POST /api/items/count) is what scanning, typing a code and − / + all use.
 
 def inventory_data(uid):
-    """For /api/data: the inventories g.user sees, their locations, and what's in them."""
+    """For /api/data: the inventories g.user sees, their locations, what's in them, and the
+    products: g.user's own, and any in those inventories."""
     conn = db.get_db()
     invs = [dict(r) for r in conn.execute(f"SELECT * FROM inventories WHERE {MINE} ORDER BY position, id", (uid, uid))]
     ids = [i["id"] for i in invs] or [0]
     marks = marks_for(ids)
+    products = conn.execute(
+        f"SELECT * FROM products WHERE user_id = ? OR id IN (SELECT product_id FROM items WHERE inventory_id IN ({marks})) "
+        "ORDER BY name COLLATE NOCASE, id", (uid, *ids)).fetchall()
     return {"inventories": invs,
             "locations": [dict(r) for r in conn.execute(
                 f"SELECT * FROM locations WHERE inventory_id IN ({marks}) ORDER BY position, id", ids)],
+            "products": products_json(products),
             "items": items_json(conn.execute(
                 f"SELECT * FROM items WHERE inventory_id IN ({marks}) AND deleted_at IS NULL ORDER BY name COLLATE NOCASE, id",
                 ids).fetchall())}
 
 
+def codes_of(product_ids):
+    out = {}
+    if product_ids:
+        for r in db.get_db().execute(f"SELECT product_id, code FROM product_codes WHERE product_id IN "
+                                     f"({marks_for(product_ids)}) ORDER BY code", list(product_ids)):
+            out.setdefault(r["product_id"], []).append(r["code"])
+    return out
+
+
 def items_json(rows):
-    ids = [r["id"] for r in rows]
-    codes = {}
-    if ids:
-        for r in db.get_db().execute(f"SELECT item_id, code FROM item_codes WHERE item_id IN ({marks_for(ids)}) ORDER BY code", ids):
-            codes.setdefault(r["item_id"], []).append(r["code"])
-    return with_shared(rows, "item", lambda r: dict(r) | {"used_up": bool(r["used_up"]), "codes": codes.get(r["id"], [])})
+    codes = codes_of({r["product_id"] for r in rows if r["product_id"]})
+    return with_shared(rows, "item", lambda r: dict(r) | {"used_up": bool(r["used_up"]),
+                                                         "codes": codes.get(r["product_id"], [])})
+
+
+def products_json(rows):
+    codes = codes_of([r["id"] for r in rows])
+    out = []
+    for r in rows:
+        p = {k: r[k] for k in r.keys() if k not in ("image_blob_id", "image_mime")}
+        p["used_up"] = bool(r["used_up"])
+        p["codes"] = codes.get(r["id"], [])
+        # (The picture's address changes with it, so the browser can keep it for long.)
+        p["image"] = url_for("product_image", product_id=r["id"], v=r["image_blob_id"]) if r["image_blob_id"] else None
+        out.append(p)
+    return out
 
 
 def item_fields(data):
@@ -1725,25 +1761,117 @@ def item_fields(data):
             if not 0 <= value <= 1e9:
                 raise ValueError("A count can't be less than nothing.")
             out[key] = value
-        elif key == "unit":
-            out[key] = str(value or "").strip()[:40]
-        elif key in ("brand", "category", "store"):
+        elif key == "store":
             out[key] = str(value or "").strip()[:200]
-        elif key == "url":
-            value = str(value or "").strip()[:2000]
-            if value and not re.match(r"https?://\S+$", value, re.I):
-                if re.match(r"[\w-]+(\.[\w-]+)+(/\S*)?$", value):
-                    value = "https://" + value  # (typed without its https://)
-                else:
-                    raise ValueError("A product link is a web address (https://…).")
-            out[key] = value or None
-        elif key == "used_up":
-            out[key] = 1 if value else 0
         elif key == "location_id":
             out[key] = None if value in (None, "") else int(value)
         elif key == "inventory_id":
             out[key] = check_ref("inventories", value)
     return out
+
+
+def clean_url(value):
+    value = str(value or "").strip()[:2000]
+    if value and not re.match(r"https?://\S+$", value, re.I):
+        if re.match(r"[\w-]+(\.[\w-]+)+(/\S*)?$", value):
+            value = "https://" + value  # (typed without its https://)
+        else:
+            raise ValueError("A product link is a web address (https://…).")
+    return value or None
+
+
+# What a product says, and so (copied) its items.
+PRODUCT_COPIED = ("name", "brand", "category", "unit", "used_up", "url")
+
+
+def product_fields(data):
+    out = {}
+    for key, value in data.items():
+        if key == "name":
+            value = str(value or "").strip()[:500]
+            if not value:
+                raise ValueError("Give it a name.")
+            out[key] = value
+        elif key in ("brand", "size", "category"):
+            out[key] = str(value or "").strip()[:200]
+        elif key == "unit":
+            out[key] = str(value or "").strip()[:40]
+        elif key == "used_up":
+            out[key] = 1 if value else 0
+        elif key == "url":
+            out[key] = clean_url(value)
+    return out
+
+
+def product(product_id, change=False):
+    """A product g.user may see (theirs, or in an inventory they see), and, change, may
+    change (theirs, or in an inventory they may change); else 404 or 403."""
+    conn = db.get_db()
+    row = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    if row is None:
+        abort(404)
+    if row["user_id"] == g.user["id"]:
+        return row
+    invs = conn.execute(f"SELECT * FROM inventories WHERE {MINE} AND id IN (SELECT inventory_id FROM items WHERE product_id = ?)",
+                        (g.user["id"], g.user["id"], product_id)).fetchall()
+    if not invs:
+        abort(404)
+    if change and not any(may_change(i) for i in invs):
+        abort(403)
+    return row
+
+
+def set_product_codes(product_id, codes, add=False):
+    """A product's barcodes (each meaning only it, in its maker's catalog); add: as well as
+    those it has. Not committed."""
+    conn = db.get_db()
+    owner = conn.execute("SELECT user_id FROM products WHERE id = ?", (product_id,)).fetchone()[0]
+    clean = list(dict.fromkeys(c for c in (re.sub(r"\s+", "", str(x))[:64] for x in codes) if c))
+    for code in clean:
+        other = conn.execute("SELECT p.name FROM product_codes c JOIN products p ON p.id = c.product_id "
+                             "WHERE c.user_id = ? AND c.code = ? AND c.product_id != ?", (owner, code, product_id)).fetchone()
+        if other:
+            raise ValueError(f"That barcode is {other[0]}'s already.")
+    if not add:
+        conn.execute("DELETE FROM product_codes WHERE product_id = ?", (product_id,))
+    conn.executemany("INSERT OR IGNORE INTO product_codes (user_id, code, product_id) VALUES (?, ?, ?)",
+                     [(owner, c, product_id) for c in clean])
+
+
+def sync_product(product_id):
+    """Copies what a product says to its items (and so their "Buy …" tasks). Not committed."""
+    conn = db.get_db()
+    p = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    for (item_id,) in conn.execute("SELECT id FROM items WHERE product_id = ?", (product_id,)).fetchall():
+        conn.execute(f"UPDATE items SET {', '.join(f'{k} = ?' for k in PRODUCT_COPIED)} WHERE id = ?",
+                     (*(p[k] for k in PRODUCT_COPIED), item_id))
+        restock_check(item_id)
+
+
+def write_product(data, row=None):
+    """Makes a product (row None: g.user's) or changes one; returns its id. With "codes" its
+    barcodes, and with "image_lookup" the picture a lookup found. Not committed."""
+    fields, conn = product_fields(data), db.get_db()
+    if row is None:
+        if not fields.get("name"):
+            raise ValueError("Give it a name.")
+        product_id = conn.execute(
+            f"INSERT INTO products (user_id, {', '.join(fields)}) VALUES (?, {', '.join('?' * len(fields))})",
+            (g.user["id"], *fields.values())).lastrowid
+    else:
+        product_id = row["id"]
+        if fields:
+            conn.execute(f"UPDATE products SET {', '.join(f'{k} = ?' for k in fields)}, updated_at = datetime('now') WHERE id = ?",
+                         (*fields.values(), product_id))
+    if isinstance(data.get("codes"), list):
+        set_product_codes(product_id, data["codes"])
+    if data.get("image_lookup"):
+        picture_from_lookup(product_id, str(data["image_lookup"]))
+    elif "image" in data and data["image"] is None:
+        conn.execute("UPDATE products SET image_blob_id = NULL, image_mime = NULL WHERE id = ?", (product_id,))
+    if row is not None and any(k in fields for k in PRODUCT_COPIED):
+        sync_product(product_id)
+    return product_id
 
 
 def check_location(inventory_id, location_id):
@@ -1752,21 +1880,6 @@ def check_location(inventory_id, location_id):
     row = db.get_db().execute("SELECT inventory_id FROM locations WHERE id = ?", (location_id,)).fetchone()
     if not row or row[0] != inventory_id:
         raise ValueError("That place isn't in this inventory.")
-
-
-def set_codes(item_id, inventory_id, codes):
-    """An item's barcodes (each meaning only it, in its inventory). Not committed."""
-    conn = db.get_db()
-    clean = list(dict.fromkeys(c for c in (re.sub(r"\s+", "", str(x))[:64] for x in codes) if c))
-    for code in clean:
-        other = conn.execute("SELECT item_id FROM item_codes WHERE inventory_id = ? AND code = ? AND item_id != ?",
-                             (inventory_id, code, item_id)).fetchone()
-        if other:
-            name = conn.execute("SELECT name FROM items WHERE id = ?", (other[0],)).fetchone()
-            raise ValueError(f"That barcode is {name[0] if name else 'something else'}'s already.")
-    conn.execute("DELETE FROM item_codes WHERE item_id = ?", (item_id,))
-    conn.executemany("INSERT INTO item_codes (inventory_id, code, item_id) VALUES (?, ?, ?)",
-                     [(inventory_id, c, item_id) for c in clean])
 
 
 def fmt_count(n):
@@ -1801,7 +1914,8 @@ def restock_check(item_id):
             conn.execute("UPDATE tasks SET completed_at = ? WHERE id = ?", (utcnow(), task["id"]))
         return
     need = max((it["restock_to"] or it["keep_at_least"]) - it["quantity"], 1)
-    title = f"Buy {it['name']} ({fmt_count(need)}{' ' + it['unit'] if it['unit'] else ''})"
+    unit = it["unit"] if it["unit"] and it["unit"] != "each" else ""  # ("Buy Batteries (4)", not "4 each")
+    title = f"Buy {it['name']} ({fmt_count(need)}{' ' + unit if unit else ''})"
     if task:
         if task["title"] != title:
             conn.execute("UPDATE tasks SET title = ? WHERE id = ?", (title, task["id"]))
@@ -1832,10 +1946,21 @@ def lend(item_id, to):
     conn.execute("UPDATE items SET lent_to = ?, lent_on = ?, lend_task_id = ? WHERE id = ?", (to, client_today(), tid, item_id))
 
 
+def item_here(inventory_id, product_id, but=None):
+    """The item of a product in an inventory (not in the trash), if there is one."""
+    return db.get_db().execute(
+        "SELECT * FROM items WHERE inventory_id = ? AND product_id = ? AND deleted_at IS NULL AND id IS NOT ?",
+        (inventory_id, product_id, but)).fetchone()
+
+
 def write_item(data, item=None):
-    """Makes an item (item None) or changes one, from API-style data; returns its id. Not committed."""
-    fields = item_fields(data)
+    """Makes an item (item None) or changes one, from API-style data; returns its id. A new
+    one is of a product (product_id), or else one is made from what data says it is (name,
+    brand, unit, codes …). What a product says (PRODUCT_COPIED, codes) changes its product,
+    and so every item of it. Not committed."""
     conn = db.get_db()
+    fields = item_fields({k: v for k, v in data.items() if k not in PRODUCT_COPIED})
+    about = {k: data[k] for k in (*PRODUCT_COPIED, "codes", "size") if k in data}
     inv_id = fields.get("inventory_id", item and item["inventory_id"])
     if not inv_id:
         raise ValueError("Which inventory is it in?")
@@ -1843,25 +1968,39 @@ def write_item(data, item=None):
     if "location_id" in fields:
         check_location(inv_id, fields["location_id"])
     if item is None:
-        if not fields.get("name"):
-            raise ValueError("Give it a name.")
-        fields.setdefault("used_up", 1 if inv["kind"] == "stock" else 0)
-        fields.setdefault("quantity", 0 if fields["used_up"] else 1)
-        fields["user_id"] = g.user["id"]
+        if data.get("product_id"):
+            p = product(int(data["product_id"]))
+            if about:
+                write_product(about, product(p["id"], change=True))
+        else:
+            about.setdefault("used_up", inv["kind"] == "stock")
+            p = {"id": write_product(about)}
+        p = db.get_db().execute("SELECT * FROM products WHERE id = ?", (p["id"],)).fetchone()
+        if item_here(inv_id, p["id"]):
+            raise ValueError(f"{p['name']} is in this inventory already.")
+        fields.update({k: p[k] for k in PRODUCT_COPIED}, product_id=p["id"], user_id=g.user["id"])
+        fields.setdefault("quantity", 0 if p["used_up"] else 1)
         item_id = db.insert(conn, "items", fields)
         follow_container(item_id)
     else:
         item_id = item["id"]
-        if any(k in fields for k in ("name", "notes")):
+        if fields.get("inventory_id", inv_id) != item["inventory_id"] and item["product_id"] and item_here(inv_id, item["product_id"], item_id):
+            raise ValueError(f"{item['name']} is in that inventory already.")
+        if "notes" in fields:
             fields["updated_at"] = utcnow()
         if fields:
             conn.execute(f"UPDATE items SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?", (*fields.values(), item_id))
         if "inventory_id" in fields and fields["inventory_id"] != item["inventory_id"]:
             conn.execute("UPDATE items SET location_id = NULL WHERE id = ?", (item_id,))
-            conn.execute("UPDATE item_codes SET inventory_id = ? WHERE item_id = ?", (inv_id, item_id))
             follow_container(item_id)
-    if isinstance(data.get("codes"), list):
-        set_codes(item_id, inv_id, data["codes"])
+        if about:
+            if item["product_id"]:
+                write_product(about, product(item["product_id"], change=True))
+            else:
+                about.setdefault("name", item["name"])
+                pid = write_product(about)
+                conn.execute("UPDATE items SET product_id = ? WHERE id = ?", (pid, item_id))
+                sync_product(pid)
     if isinstance(data.get("tags"), list):
         set_tags(item_id, data["tags"])
     if "lent_to" in data:
@@ -1896,13 +2035,27 @@ def update_item(item_id):
     return jsonify(items_json([can_see("items", item_id)])[0])
 
 
+def product_by_code(inv_id, code):
+    """(the item, the product) a barcode means in an inventory: an item there whose product has
+    it (whoever's catalog), else g.user's own product with it (not here yet: no item)."""
+    conn = db.get_db()
+    row = conn.execute("SELECT i.* FROM items i JOIN product_codes c ON c.product_id = i.product_id "
+                       "WHERE i.inventory_id = ? AND i.deleted_at IS NULL AND c.code = ? ORDER BY i.id LIMIT 1",
+                       (inv_id, code)).fetchone()
+    if row:
+        return row, None
+    row = conn.execute("SELECT product_id FROM product_codes WHERE user_id = ? AND code = ?", (g.user["id"], code)).fetchone()
+    return None, row and row[0]
+
+
 @app.post("/api/items/count")
 @login_required
 def count_item():
-    """Adds (delta > 0) or uses (delta < 0) some of an item, found by item_id, by barcode
-    (code) or by name, in inventory_id: what scanning, typing and − / + do. A code no item has
-    makes one when a name comes with it, else answers {"unknown": code}. Using a kept item
-    changes nothing ({"kept": true}). Otherwise {"item", "before", "after"}."""
+    """Adds (delta > 0) or uses (delta < 0) some of an item in inventory_id: what scanning,
+    typing and − / + do. Found by item_id, product_id, barcode (code) or name. A product not in
+    this inventory yet comes in (at location_id), and with a name a code no product has makes
+    one; a code that means nothing answers {"unknown": code}. Using a kept item changes
+    nothing ({"kept": true}). Otherwise {"item", "before", "after"} (and "made" if it's new here)."""
     data, conn = body(), db.get_db()
     try:
         delta = float(data.get("delta", 1))
@@ -1910,26 +2063,28 @@ def count_item():
     except (TypeError, ValueError):
         return bad("Say which inventory, and how many.")
     code = re.sub(r"\s+", "", str(data.get("code") or ""))[:64]
-    item = None
+    item, product_id = None, None
     if data.get("item_id"):
         item = owned("items", int(data["item_id"]))
+    elif data.get("product_id"):
+        product_id = product(int(data["product_id"]))["id"]
+        item = item_here(inv["id"], product_id)
     elif code:
-        row = conn.execute("SELECT item_id FROM item_codes WHERE inventory_id = ? AND code = ?", (inv["id"], code)).fetchone()
-        item = row and owned("items", row[0])
+        item, product_id = product_by_code(inv["id"], code)
     elif data.get("name"):
         rows = conn.execute("SELECT * FROM items WHERE inventory_id = ? AND deleted_at IS NULL AND name = ? COLLATE NOCASE",
                             (inv["id"], str(data["name"]).strip())).fetchall()
         item = rows[0] if len(rows) == 1 else None
     try:
         if item is None:
-            if not str(data.get("name") or "").strip():
+            if product_id is None and not str(data.get("name") or "").strip():
                 return jsonify(unknown=code or None)
-            # A new one: what was counted is what there is.
-            item_id = write_item({"name": data["name"], "inventory_id": inv["id"], "location_id": data.get("location_id"),
-                                  "unit": data.get("unit", ""), "codes": [code] if code else [],
-                                  **{k: data[k] for k in ("brand", "category", "store", "url") if data.get(k)},
-                                  **({"used_up": data["used_up"]} if "used_up" in data else {}),
-                                  "quantity": max(delta, 0)})
+            # New here: what was counted is what there is.
+            about = {} if product_id else {"name": data["name"], "codes": [code] if code else [],
+                                           **{k: data[k] for k in ("brand", "category", "unit", "url", "size") if data.get(k)},
+                                           **({"used_up": data["used_up"]} if "used_up" in data else {})}
+            item_id = write_item({"inventory_id": inv["id"], "location_id": data.get("location_id"),
+                                  **({"product_id": product_id} if product_id else about), "quantity": max(delta, 0)})
             conn.commit()
             return jsonify(item=items_json([can_see("items", item_id)])[0], before=0, after=max(delta, 0), made=True), 201
         if not may_change(item):
@@ -1939,9 +2094,8 @@ def count_item():
         before = item["quantity"]
         after = max(before + delta, 0)
         conn.execute("UPDATE items SET quantity = ?, updated_at = ? WHERE id = ?", (after, utcnow(), item["id"]))
-        if code and data.get("item_id"):  # (counted by id with a new code: it's this one's now)
-            known = [r[0] for r in conn.execute("SELECT code FROM item_codes WHERE item_id = ?", (item["id"],))]
-            set_codes(item["id"], inv["id"], [*known, code])
+        if code and data.get("item_id") and item["product_id"]:  # (counted by id with a new code: it's this one's now)
+            set_product_codes(item["product_id"], [code], add=True)
         restock_check(item["id"])
     except (ValueError, TypeError) as e:
         conn.rollback()
@@ -1950,23 +2104,283 @@ def count_item():
     return jsonify(item=items_json([can_see("items", item["id"])])[0], before=before, after=after)
 
 
+# Products: the catalog.
+
+@app.post("/api/products")
+@login_required
+def create_product():
+    try:
+        product_id = write_product(body())
+    except (ValueError, TypeError) as e:
+        db.get_db().rollback()
+        return bad(str(e))
+    db.get_db().commit()
+    return jsonify(products_json([product(product_id)])[0]), 201
+
+
+@app.patch("/api/products/<int:product_id>")
+@login_required
+def update_product(product_id):
+    row = product(product_id, change=True)
+    try:
+        write_product(body(), row)
+    except (ValueError, TypeError) as e:
+        db.get_db().rollback()
+        return bad(str(e))
+    db.get_db().commit()
+    return jsonify(products_json([product(product_id)])[0])
+
+
+@app.delete("/api/products/<int:product_id>")
+@login_required
+def delete_product(product_id):
+    """Out of the catalog, once nothing (in any inventory, or the trash) is of it."""
+    row, conn = product(product_id, change=True), db.get_db()
+    used = conn.execute("SELECT COUNT(*) FROM items WHERE product_id = ?", (product_id,)).fetchone()[0]
+    if used:
+        return bad(f"{row['name']} is in an inventory (or its trash): take it out of there first.")
+    conn.execute("DELETE FROM products WHERE id = ?", (product_id,))
+    conn.commit()
+    return jsonify(ok=True)
+
+
+PRODUCT_IMAGE_MAX = 5 * 1024 * 1024
+PRODUCT_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}  # (no SVG: it's shown plainly)
+
+
+def set_picture(product_id, data, mime):
+    if len(data) > PRODUCT_IMAGE_MAX:
+        raise ValueError("A product's picture can be up to 5 MB.")
+    if mime not in PRODUCT_IMAGE_TYPES:
+        raise ValueError("A product's picture is a photo (JPEG, PNG, GIF or WebP).")
+    conn = db.get_db()
+    conn.execute("UPDATE products SET image_blob_id = ?, image_mime = ?, updated_at = datetime('now') WHERE id = ?",
+                 (db.put_blob(conn, data), mime, product_id))
+
+
+@app.post("/api/products/<int:product_id>/image")
+@login_required
+def upload_product_image(product_id):
+    product(product_id, change=True)
+    f = request.files.get("file")
+    if not f:
+        return bad("Choose a photo.")
+    data = f.read(PRODUCT_IMAGE_MAX + 1)
+    try:
+        set_picture(product_id, data, mimetypes.guess_type(f.filename or "")[0] or f.mimetype)
+    except ValueError as e:
+        return bad(str(e))
+    db.get_db().commit()
+    return jsonify(products_json([product(product_id)])[0])
+
+
+@app.get("/api/products/<int:product_id>/image")
+@login_required
+def product_image(product_id):
+    row = product(product_id)
+    if not row["image_blob_id"]:
+        abort(404)
+    data = db.get_db().execute("SELECT data FROM blobs WHERE id = ?", (row["image_blob_id"],)).fetchone()[0]
+    res = send_file(io.BytesIO(data), mimetype=row["image_mime"], max_age=30 * 86400)
+    res.headers["X-Content-Type-Options"] = "nosniff"
+    return res
+
+
+# --- looking a barcode up ---------------------------------------------------------
+# What a new barcode is, from the internet, so it needn't be typed. With a Serper key
+# (Settings → Inventory) the barcode is searched for on Google ("walmart <code>") and the
+# first walmart.com product page read once; a Walmart link pasted or shared is read the same
+# way. Gaps are filled from Open Food Facts, then UPCitemdb (free, about 100 a day). Only the
+# barcode (or the link) is sent; it's all behind Settings → Look up barcodes online. Walmart's
+# search page turns away programs ("Robot or human?"); its product pages don't, and if they
+# ever do, that's taken as not found: no disguises and no retries.
+# A lookup's picture is remembered here for a while (LOOKUPS, by a token), and fetched only
+# when the product is saved with that token: the browser never names a URL to fetch.
+
+LOOKUP_AGENT = "Entropicide (self-hosted task manager)"
+LOOKUPS = {}  # token: (when, user id, picture URL)
+LOOKUP_KEEP = 600
+WALMART_PAGE_RE = re.compile(r"https?://(www\.)?walmart\.com/ip/[^\s?#]+", re.I)
+
+
+def fetch_url(url, data=None, headers=None, limit=3_000_000, timeout=8):
+    """(bytes, content type, final URL) of a GET (or, with data, a POST)."""
+    req = urllib.request.Request(url, data=data, headers={"User-Agent": LOOKUP_AGENT, **(headers or {})})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read(limit), r.headers.get_content_type(), r.geturl()
+
+
+def shouted(text):
+    letters = [c for c in text if c.isalpha()]
+    return len(letters) > 1 and sum(c.isupper() for c in letters) / len(letters) > 0.8
+
+
+def sentence_case(text):
+    """ALL CAPS (as product databases often have it) to a sentence: only the first letter."""
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if shouted(text):
+        text = text.lower()
+        return text[:1].upper() + text[1:]
+    return text
+
+
+def brand_case(text):
+    """CAMPBELL'S to Campbell's; a brand written any other way stays as it is."""
+    text = re.sub(r"\s+", " ", text or "").strip()
+    return " ".join(w[:1].upper() + w[1:] for w in text.lower().split(" ")) if shouted(text) else text
+
+
+def split_title(title, brand=""):
+    """A shop's title, "Reynolds Kitchens Slow Cooker Liners, Regular Size, 6 Count", as
+    (name, size): ("Slow Cooker Liners", "6 Count"), the brand left off the front, the size
+    being the last part with a number in it."""
+    title = re.sub(r"\s*[-|]\s*Walmart\.com\s*$", "", html.unescape(title or ""), flags=re.I)
+    title = re.sub(r"\s*\bHSA/FSA Eligible\b", "", title, flags=re.I).strip(" ,")
+    parts = [p.strip() for p in title.split(",") if p.strip()]
+    name = parts[0] if parts else ""
+    if brand and name.lower().startswith(brand.lower() + " "):
+        name = name[len(brand):].strip()
+    size = next((p for p in reversed(parts[1:]) if re.search(r"\d", p)), "")
+    return sentence_case(name), size
+
+
+def read_walmart(url):
+    """What a walmart.com product page says: {name, brand, size, image, upc, url}, or None."""
+    try:
+        data, _, final = fetch_url(url)
+    except (OSError, ValueError):
+        return None
+    page = data.decode("utf-8", "replace")
+    if "/blocked" in final or "Robot or human" in page[:50000]:
+        return None
+    meta = lambda prop: (m := re.search(rf'<meta[^>]+property="og:{prop}"[^>]+content="([^"]*)"', page)) and html.unescape(m[1])  # noqa: E731
+    found = lambda pattern: (m := re.search(pattern, page)) and m[1]  # noqa: E731
+    if not meta("title"):
+        return None
+    brand = brand_case(html.unescape(found(r'"brand":"([^"\\]{1,100})"') or ""))
+    name, size = split_title(meta("title"), brand)
+    page_url = meta("url") or final
+    return {"name": name, "brand": brand, "size": size, "image": meta("image"), "upc": found(r'"upc":"(\d{6,14})"'),
+            "url": page_url if WALMART_PAGE_RE.match(page_url) else url}
+
+
+def walmart_search(code, key):
+    """The first walmart.com product page Google has for a barcode (through Serper), or None."""
+    try:
+        data, _, _ = fetch_url("https://google.serper.dev/search", data=json.dumps({"q": f"walmart {code}"}).encode(),
+                               headers={"X-API-KEY": key, "Content-Type": "application/json"})
+        results = json.loads(data).get("organic") or []
+    except (OSError, ValueError):
+        return None
+    return next((r["link"] for r in results if WALMART_PAGE_RE.match(str(r.get("link") or ""))), None)
+
+
+def open_food_facts(code):
+    try:
+        data, _, _ = fetch_url(f"https://world.openfoodfacts.org/api/v2/product/{code}.json"
+                               "?fields=product_name,brands,quantity,image_front_url")
+        p = json.loads(data).get("product") or {}
+    except (OSError, ValueError):
+        return {}
+    brand = brand_case((p.get("brands") or "").split(",")[0])
+    return {"name": split_title(p.get("product_name") or "", brand)[0], "brand": brand,
+            "size": (p.get("quantity") or "").strip()[:40], "image": p.get("image_front_url")}
+
+
+def upc_item_db(code):
+    try:
+        data, _, _ = fetch_url(f"https://api.upcitemdb.com/prod/trial/lookup?upc={code}")
+        items = json.loads(data).get("items") or []
+    except (OSError, ValueError):
+        return {}
+    if not items:
+        return {}
+    p = items[0]
+    brand = brand_case(p.get("brand") or "")
+    images = [u for u in p.get("images") or [] if str(u).startswith("https://")]
+    # (Walmart's own photo, when it has one, is usually the best.)
+    images.sort(key=lambda u: "walmartimages.com" not in u)
+    return {"name": split_title(p.get("title") or "", brand)[0], "brand": brand, "image": images[0] if images else None}
+
+
+def same_code(a, b):
+    return bool(a and b) and a.lstrip("0") == b.lstrip("0")
+
+
+def look_up(code, link=None):
+    """Everything findable about a barcode (or a product link): {name, brand, size, url,
+    image (a token for its picture), picture (its URL, to show), found_by, warning}."""
+    settings = user_settings(g.user)
+    out = {"name": None, "brand": None, "size": None, "url": None, "picture": None, "found_by": [], "warning": None}
+    online = settings.get("look_up_codes")
+    page = None
+    if link and WALMART_PAGE_RE.match(link):
+        page = read_walmart(WALMART_PAGE_RE.match(link)[0])
+    elif link:
+        out["url"] = link
+    elif code and online and settings.get("serper_key"):
+        found = walmart_search(code, settings["serper_key"])
+        page = found and read_walmart(found)
+        if found and not page:
+            out["url"] = found
+    if page:
+        out.update({k: page[k] or None for k in ("name", "brand", "size", "url")}, picture=page["image"])
+        out["found_by"].append("Walmart")
+        if code and page["upc"] and not same_code(code, page["upc"]):
+            out["warning"] = "This Walmart page may be a different product: its barcode isn't the one scanned."
+    if code and online and re.fullmatch(r"\d{6,14}", code):
+        for source, ask in (("Open Food Facts", open_food_facts), ("UPCitemdb", upc_item_db)):
+            if out["name"] and out["picture"] and out["brand"]:
+                break
+            got = ask(code)
+            if any(got.values()):
+                out["found_by"].append(source)
+            for k in ("name", "brand", "size", "picture"):
+                out[k] = out[k] or got.get("image" if k == "picture" else k) or None
+    if not out["url"] and code:
+        # (Google's "I'm Feeling Lucky": usually straight to the product's page.)
+        out["find_url"] = "https://www.google.com/search?btnI=1&q=" + urllib.parse.quote(f"walmart {code}")
+    out["image"] = None
+    if out["picture"] and str(out["picture"]).startswith("https://"):
+        now = time.time()
+        for token in [t for t, v in LOOKUPS.items() if now - v[0] > LOOKUP_KEEP]:
+            LOOKUPS.pop(token, None)
+        out["image"] = secrets.token_urlsafe(12)
+        LOOKUPS[out["image"]] = (now, g.user["id"], out["picture"])
+    return out
+
+
+def picture_from_lookup(product_id, token):
+    """A lookup's picture (by its token) as a product's. Not committed. A picture that can't
+    be had is let go quietly: the product is saved anyway."""
+    found = LOOKUPS.get(token)
+    if not found or found[1] != g.user["id"] or time.time() - found[0] > LOOKUP_KEEP:
+        return
+    try:
+        data, mime, _ = fetch_url(found[2], limit=PRODUCT_IMAGE_MAX + 1)
+        set_picture(product_id, data, mime)
+    except (OSError, ValueError):
+        pass
+
+
 @app.get("/api/codes/<code>")
 @login_required
 def look_up_code(code):
-    """A product's name and brand from Open Food Facts, unless the user has turned that off
-    (Settings → Inventory); only the barcode is sent. {"name", "brand", "size"}, null if unknown."""
-    if not user_settings(g.user).get("look_up_codes") or not re.fullmatch(r"\d{6,14}", code):
-        return jsonify(name=None, brand=None, size=None)
+    return jsonify(look_up(re.sub(r"\s+", "", code)[:64]))
+
+
+@app.post("/api/codes/from-link")
+@login_required
+def look_up_link():
+    """A product's page (a Walmart link, pasted or shared): what it says, for its barcode (code)."""
+    data = body()
     try:
-        req = urllib.request.Request(f"https://world.openfoodfacts.org/api/v2/product/{code}.json?fields=product_name,brands,quantity",
-                                     headers={"User-Agent": "Entropicide (self-hosted task manager)"})
-        with urllib.request.urlopen(req, timeout=6) as r:
-            product = json.load(r).get("product") or {}
-    except (OSError, ValueError):
-        return jsonify(name=None, brand=None, size=None)
-    return jsonify(name=(product.get("product_name") or "").strip()[:200] or None,
-                   brand=(product.get("brands") or "").split(",")[0].strip()[:200] or None,
-                   size=(product.get("quantity") or "").strip()[:40] or None)
+        link = clean_url(data.get("url"))
+    except ValueError as e:
+        return bad(str(e))
+    if not link:
+        return bad("Paste the product's link.")
+    return jsonify(look_up(re.sub(r"\s+", "", str(data.get("code") or ""))[:64], link))
 
 
 # Locations: where things are in an inventory, nested.
@@ -2825,6 +3239,10 @@ def share():
     name = title or first or (urllib.parse.urlsplit(link).netloc.removeprefix("www.") if link else "") \
         or (files[0].filename if files else "") or "Shared"
     notes = "\n\n".join(x for x in (text if text != name else "", link) if x)
+    # A Walmart product's page goes to Add a Product (inventory.js), to fill in what it is.
+    if link and WALMART_PAGE_RE.match(link) and not files:
+        app_log("share", **info, result="A Walmart product page: opened in Add a Product")
+        return redirect(url_for("index", product_link=link))
     where = user_settings(g.user)["share_to"]
     try:
         if where in ("inbox", "ask"):
@@ -4371,6 +4789,8 @@ def update_settings():
         settings["weather_units"] = data["weather_units"]
     if "look_up_codes" in data:
         settings["look_up_codes"] = bool(data["look_up_codes"])
+    if "serper_key" in data:
+        settings["serper_key"] = re.sub(r"\s+", "", str(data["serper_key"] or ""))[:200]
     if "last_review" in data:
         settings["last_review"] = clean_date(data["last_review"]) or ""
     if "share_to" in data:
@@ -4383,7 +4803,7 @@ def update_settings():
     conn = db.get_db()
     conn.execute("UPDATE users SET settings = ? WHERE id = ?", (json.dumps(settings), g.user["id"]))
     conn.commit()
-    return jsonify(settings)
+    return jsonify(public_settings({"settings": json.dumps(settings)}))
 
 
 @app.post("/api/me/password")
@@ -4512,7 +4932,7 @@ def export_data():
         z.writestr("data.json", json.dumps({
             "exported_at": utcnow(), "app": f"{APP_NAME} ({PUBLIC_URL})",
             "user": {"username": g.user["username"], "display_name": g.user["display_name"],
-                     "settings": user_settings(g.user)},
+                     "settings": public_settings(g.user)},
             "areas": list(areas.values()),
             "tags": rows("SELECT id, name FROM tags WHERE user_id = ? ORDER BY name"),
             "projects": list(projects.values()),

@@ -1771,7 +1771,9 @@ def item_fields(data):
     return out
 
 
-def clean_url(value):
+def product_url(value):
+    """A product's link: a web address (https:// added if it's left off), or None for none.
+    (Not the Links page's clean_url, which requires one.)"""
     value = str(value or "").strip()[:2000]
     if value and not re.match(r"https?://\S+$", value, re.I):
         if re.match(r"[\w-]+(\.[\w-]+)+(/\S*)?$", value):
@@ -1800,7 +1802,7 @@ def product_fields(data):
         elif key == "used_up":
             out[key] = 1 if value else 0
         elif key == "url":
-            out[key] = clean_url(value)
+            out[key] = product_url(value)
     return out
 
 
@@ -2435,7 +2437,7 @@ def look_up_link():
     """A product's page (a Walmart link, pasted or shared): what it says, for its barcode (code)."""
     data = body()
     try:
-        link = clean_url(data.get("url"))
+        link = product_url(data.get("url"))
     except ValueError as e:
         return bad(str(e))
     if not link:

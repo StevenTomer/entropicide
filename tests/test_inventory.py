@@ -367,3 +367,14 @@ def test_a_brand_you_have_is_found_in_a_name(pantry, monkeypatch):
                                                                 "application/json")})
     r = ann.get("/api/codes/0043000287091").get_json()
     assert (r["name"], r["brand"]) == ("Chicken stuffing", "Stove Top")
+
+
+def test_a_product_needs_no_link(pantry):
+    """Leaving a product's link blank is fine (and clearing one)."""
+    ann, inv = pantry
+    r = ann.post("/api/products", json={"name": "Home-canned peaches", "url": "", "category": "Fruit"}, headers=H)
+    assert r.status_code == 201 and r.get_json()["url"] is None
+    pid = r.get_json()["id"]
+    assert ann.patch(f"/api/products/{pid}", json={"url": "walmart.com/ip/1"}, headers=H).get_json()["url"] == "https://walmart.com/ip/1"
+    assert ann.patch(f"/api/products/{pid}", json={"url": ""}, headers=H).get_json()["url"] is None
+    assert ann.patch(f"/api/products/{pid}", json={"url": "not a link"}, headers=H).status_code == 400

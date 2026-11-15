@@ -345,6 +345,37 @@ function wizardDialog(id, title) {
 const CT = { open: null };  // the counter, while it's open: { mode, inv, dlg, stream, stopped, busy, last, lastSeen, undo }
 const SAME_CODE_GAP = 800;  // ms a barcode must be out of sight to count again
 
+// A beep for each count (Web Audio, so nothing to download): high for one added, lower for one
+// used, rising for something new here, a low buzz for nothing counted. 🔇 on the counter turns
+// it off on this device. The sound has to be started from a tap, so openCounter (opened by
+// one) wakes it.
+let beeper = null;
+const beepsOn = () => load("inventoryBeep", "1") === "1";
+function wakeBeeper() {
+  try {
+    beeper = beeper || new (window.AudioContext || window.webkitAudioContext)();
+    if (beeper.state === "suspended") beeper.resume();
+  } catch { beeper = null; }
+}
+function beep(kind) {
+  if (!beeper || !beepsOn()) return;
+  const notes = { add: [[1320, 0, 0.09]], use: [[740, 0, 0.11]], new: [[880, 0, 0.08], [1320, 0.1, 0.1]],
+    bad: [[200, 0, 0.25]] }[kind] || [];
+  const now = beeper.currentTime;
+  for (const [freq, at, long] of notes) {
+    const tone = beeper.createOscillator(), loud = beeper.createGain();
+    tone.type = kind === "bad" ? "square" : "sine";
+    tone.frequency.value = freq;
+    // (A quick rise and fall, so it doesn't click.)
+    loud.gain.setValueAtTime(0.0001, now + at);
+    loud.gain.exponentialRampToValueAtTime(0.3, now + at + 0.01);
+    loud.gain.exponentialRampToValueAtTime(0.0001, now + at + long);
+    tone.connect(loud).connect(beeper.destination);
+    tone.start(now + at);
+    tone.stop(now + at + long + 0.02);
+  }
+}
+
 function openCounter(mode, then = null, place = undefined) {
   const inv = currentInventory();
   if (!inv) return;
@@ -352,6 +383,7 @@ function openCounter(mode, then = null, place = undefined) {
   mode = mode || saved?.mode || "add";
   saveDraft("countDraft", null);
   closeCounter();
+  wakeBeeper();
   const dlg = document.createElement("dialog");
   dlg.className = "iv-counter";
   document.body.append(dlg);
@@ -389,6 +421,7 @@ function drawCounter() {
         <button type="button" class="${adding ? "on" : ""}" data-mode="add">＋ Add</button>
         <button type="button" class="${adding ? "" : "on"}" data-mode="use">− Use</button></span>
       <b class="ct-title">${adding ? "Adding to" : "Using from"} ${h(inv.name)}</b>
+      <button type="button" class="icon ct-sound" aria-label="${beepsOn() ? "Turn the beep off" : "Turn the beep on"}" title="Beep on each scan">${beepsOn() ? "🔊" : "🔇"}</button>
       <button type="button" class="primary ct-done">Done</button></div>
     <div class="ct-camera"><video playsinline muted></video><p class="ct-camera-said">Opening the camera…</p></div>
     <div class="ct-panel">
@@ -405,7 +438,7 @@ function drawCounter() {
 const counterHint = (c) => `Scan barcodes: each one ${c.mode === "add" ? "adds one" : "takes one away"}.`;
 
 // What happened, at the bottom (and a buzz): kind "good", "new" or "bad".
-function counterSay(text, kind = "good", undo = null) {
+function counterSay(text, kind = "good", undo = null, sound = true) {
   const c = CT.open;
   if (!c) return;
   Object.assign(c, { said: text, saidKind: kind, undo });
@@ -413,6 +446,7 @@ function counterSay(text, kind = "good", undo = null) {
   p.className = `ct-said ${kind} flash`;
   p.innerHTML = h(text) + (undo ? ' <button type="button" class="link ct-undo">Undo</button>' : "");
   navigator.vibrate?.(kind === "bad" ? [60, 60, 60] : 60);
+  if (sound) beep(kind === "good" ? (c.mode === "use" ? "use" : "add") : kind);
 }
 
 async function startCamera(c) {
@@ -516,6 +550,13 @@ async function counterClicked(e) {
   const c = CT.open, b = e.target.closest("button");
   if (!c || !b) return;
   if (b.classList.contains("ct-done")) return closeCounter();
+  if (b.classList.contains("ct-sound")) {
+    save("inventoryBeep", beepsOn() ? "0" : "1");
+    b.textContent = beepsOn() ? "🔊" : "🔇";
+    b.setAttribute("aria-label", beepsOn() ? "Turn the beep off" : "Turn the beep on");
+    wakeBeeper();
+    return beep("add");  // (a sample, when it's turned on)
+  }
   if (b.dataset.mode) {
     // (Only what says add or use changes: the camera keeps running.)
     c.mode = b.dataset.mode;
@@ -535,10 +576,10 @@ async function counterClicked(e) {
     if (u.made) {
       // (Something new here: taken out again, as it was.)
       await saveItem(u.item, { deleted: true });
-      return counterSay("Undone: taken out again.", "good");
+      return counterSay("Undone: taken out again.", "good", null, false);
     }
     const r = await countIn({ item_id: u.item }, u.delta, {}, { quiet: true, inv: inventoryById(c.inv) }).catch(() => null);
-    if (r?.item) counterSay(`Undone: ${r.item.name} is ${qtyText(r.item)} again.`, "good");
+    if (r?.item) counterSay(`Undone: ${r.item.name} is ${qtyText(r.item)} again.`, "good", null, false);
   }
 }
 

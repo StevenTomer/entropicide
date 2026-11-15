@@ -10,8 +10,8 @@ Settings → Troubleshooting.
     unit. They're one catalog for all your inventories, so a barcode scanned once is known in every
     inventory. Your existing things each became a product, keeping their barcodes and photos.
   - **＋ Add to inventory** and **− Use** open the camera straight away. Each barcode read adds one
-    (or takes one away) at once, so you scan can after can with no taps in between, with Undo for
-    the last one. A box under the camera takes a typed barcode or name instead.
+    (or takes one away) at once, with a beep, so you scan can after can with no taps in between, with
+    Undo for the last one. A box under the camera takes a typed barcode or name instead.
   - **Add a product** is a short wizard (barcode → what it is → details). It runs by itself when you
     scan a barcode nothing has, asks where it goes, then goes back to scanning with one added.
 - **Looking up new barcodes, better:**

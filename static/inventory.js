@@ -38,7 +38,10 @@ const isLow = (it) => it.used_up && it.keep_at_least != null && it.quantity < it
 const fmtQty = (n) => (Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100));
 const shownUnit = (unit) => (unit && unit !== "each" ? unit : "");  // ("3", not "3 each")
 const qtyText = (it) => `${fmtQty(it.quantity)}${shownUnit(it.unit) ? ` ${it.unit}` : ""}`;
-const looksLikeCode = (text) => /^\d{6,14}$/.test(text);
+// A barcode, typed (or typed by a USB scanner): a UPC or EAN (6–14 digits), or another kind
+// (Code 39, Code 128, a part number: "TOOL-0042"): no spaces, and at least three digits. (Anything
+// the camera reads is one, whatever it looks like.)
+const looksLikeCode = (text) => /^\d{6,14}$/.test(text) || (/^\S{4,200}$/.test(text) && (text.match(/\d/g) || []).length >= 3);
 const fullName = (p) => (p.brand ? `${p.brand} ${p.name}` : p.name);
 
 // A thing's picture: its product's, else (from before products) a photo on the item.
@@ -248,7 +251,10 @@ function productsFor(inv, text) {
 // The camera, reading barcodes continuously (so can after can can be scanned), with the
 // browser's own reader, else the vendored one (its engine loaded from here, never a CDN).
 
-const BARCODE_FORMATS = ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "itf", "qr_code"];
+// Every kind it can read: product barcodes (UPC, EAN), and the others on tools, parts and
+// labels (Code 128, 39 and 93, ITF, Codabar; QR, Data Matrix, PDF417, Aztec).
+const BARCODE_FORMATS = ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "code_93", "itf", "codabar",
+  "qr_code", "data_matrix", "pdf417", "aztec"];
 let barcodeReader = null;
 
 async function makeBarcodeReader() {
@@ -457,6 +463,7 @@ function drawCounter() {
         <button>${adding ? "Add" : "Use"}</button>
       </form>
       <div class="ct-matches"></div>
+      ${adding ? '<p class="ct-no-code-p"><button type="button" class="ct-no-code">Something new with no barcode…</button></p>' : ""}
     </div>`;
 }
 
@@ -496,7 +503,7 @@ async function startCamera(c) {
         if (code) {
           const again = code === c.last && Date.now() - c.lastSeen < SAME_CODE_GAP;
           c.lastSeen = Date.now();
-          if (!again && !c.busy) { c.last = code; await counterEntry(code); }
+          if (!again && !c.busy) { c.last = code; await counterEntry(code, true); }
         }
       } catch { /* (a frame it couldn't read) */ }
       setTimeout(tick, 150);
@@ -511,14 +518,14 @@ async function startCamera(c) {
 }
 
 // A barcode read or typed, or a name typed: count it, else find it, else make it.
-async function counterEntry(text) {
+async function counterEntry(text, scanned = false) {
   const c = CT.open, inv = c && inventoryById(c.inv);
   text = (text || "").trim();
   if (!c || !text) return;
   const place = text.match(/#location:(\d+)/);
   if (place) { closeCounter(); return showPlace(Number(place[1])); }
   const found = productsFor(inv, text);
-  const isCode = looksLikeCode(text) || (S.data.products || []).some((p) => p.codes.includes(text));
+  const isCode = scanned || looksLikeCode(text) || (S.data.products || []).some((p) => p.codes.includes(text));
   $(".ct-matches", c.dlg).innerHTML = "";
   if (isCode) return found.length ? counterCount(found[0]) : counterNewProduct({ code: text });
   if (found.length === 1) return counterCount(found[0]);
@@ -599,6 +606,8 @@ async function counterClicked(e) {
   }
   if (b.classList.contains("ct-match")) { $(".ct-code", c.dlg).value = ""; $(".ct-matches", c.dlg).innerHTML = ""; return counterCount(productById(Number(b.dataset.product))); }
   if (b.classList.contains("ct-new-product")) return counterNewProduct({ name: b.dataset.name || "" });
+  // (No barcode: straight to what it is, with whatever's typed as its name.)
+  if (b.classList.contains("ct-no-code")) return counterNewProduct({ name: $(".ct-code", c.dlg)?.value.trim() || "", noCode: true });
   if (b.classList.contains("ct-goto")) {
     const id = Number(b.dataset.item);
     closeCounter();
@@ -627,7 +636,7 @@ const PW = { state: null, photo: null };  // state: the draft; photo: a File tak
 
 function openProductWizard(start = null) {
   const inv = currentInventory();
-  const fresh = start && { step: start.code || start.name || start.link ? 2 : 1, code: start.code || "", name: start.name || "",
+  const fresh = start && { step: start.code || start.name || start.link || start.noCode ? 2 : 1, code: start.code || "", name: start.name || "",
     brand: "", size: "", category: "", unit: "", used_up: inv?.kind !== "home", url: "", picture: "", image: "",
     back: !!start.back, looked: false, location: inv ? Number(load(`inventoryPlace${inv.id}`, "")) || null : null };
   PW.state = fresh || loadDraft("productDraft");
@@ -663,9 +672,9 @@ function drawProductWizard() {
   let body = "";
   if (s.step === 1) {
     body = `<p>Scan its barcode, or type the number under it.</p>
-      <div class="pw-row"><input data-w="code" value="${h(s.code)}" placeholder="Barcode (UPC)" inputmode="numeric" aria-label="Barcode" enterkeyhint="next">
+      <div class="pw-row"><input data-w="code" value="${h(s.code)}" placeholder="Barcode (UPC, or any other kind)" aria-label="Barcode" autocapitalize="characters" enterkeyhint="next">
         <button type="button" class="pw-scan">📷 Scan</button></div>
-      <p class="pw-buttons"><button type="button" class="link pw-no-code">It has no barcode</button>
+      <p class="pw-buttons"><button type="button" class="pw-no-code">It has no barcode</button>
         <button class="primary">Next →</button></p>`;
   } else if (s.step === 2) {
     const pic = PW.photo ? URL.createObjectURL(PW.photo) : s.picture;
@@ -736,7 +745,10 @@ async function lookUpCode() {
   const s = PW.state;
   s.looking = true;
   drawProductWizard();
-  const r = await api("GET", `/codes/${encodeURIComponent(s.code)}`, undefined, { quiet: true }).catch(() => null);
+  // (Only a UPC or EAN can be looked up: another kind of barcode is just yours, so it goes straight
+  // to typing what it is.)
+  const r = /^\d{6,14}$/.test(s.code)
+    ? await api("GET", `/codes/${encodeURIComponent(s.code)}`, undefined, { quiet: true }).catch(() => null) : null;
   if (PW.state !== s) return;
   s.looking = false;
   takeLookup(r || { found_by: [] });

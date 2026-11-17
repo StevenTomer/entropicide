@@ -5,6 +5,8 @@ Settings → Troubleshooting.
 
 ## Unreleased
 
+- **Things with no barcode:** the scanner has *Something new with no barcode…*, straight to what it is (and *It has no barcode* in Add a product is a proper button).
+- **Any kind of barcode:** besides UPCs, the scanner reads Code 128, 39 and 93, ITF, Codabar, QR, Data Matrix, PDF417 and Aztec, and a code with letters (TOOL-0042) works typed or scanned. (Names are looked up online only for UPCs.)
 - Adding a new product from the scanner ends with **Save, and add** and how many (not just one), and each count says **Go to item** beside Undo.
 - **Scan a place's label to put something there:** 📷 beside every choice of place (a thing's details, adding a product) reads the place's QR label and chooses it.
 - Inventory places, categories and things sort naturally: Shelving unit 2 before Shelving unit 10.

@@ -378,3 +378,13 @@ def test_a_product_needs_no_link(pantry):
     assert ann.patch(f"/api/products/{pid}", json={"url": "walmart.com/ip/1"}, headers=H).get_json()["url"] == "https://walmart.com/ip/1"
     assert ann.patch(f"/api/products/{pid}", json={"url": ""}, headers=H).get_json()["url"] is None
     assert ann.patch(f"/api/products/{pid}", json={"url": "not a link"}, headers=H).status_code == 400
+
+
+def test_other_kinds_of_barcode(pantry):
+    """Not only UPCs: a Code 39 part number, or a long QR code's text, is a barcode too."""
+    ann, inv = pantry
+    qr = "https://example.com/manual/drill-model-DCD771C2-serial-" + "0123456789" * 8
+    for code, name in (("TOOL-0042", "Shovel, round"), (qr, "Drill")):
+        r = count(ann, inv, code=code, delta=1, name=name).get_json()
+        assert r["made"] and r["item"]["codes"] == [code]
+        assert count(ann, inv, code=code, delta=1).get_json()["after"] == 2

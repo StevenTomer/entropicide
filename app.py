@@ -1829,7 +1829,7 @@ def set_product_codes(product_id, codes, add=False):
     those it has. Not committed."""
     conn = db.get_db()
     owner = conn.execute("SELECT user_id FROM products WHERE id = ?", (product_id,)).fetchone()[0]
-    clean = list(dict.fromkeys(c for c in (re.sub(r"\s+", "", str(x))[:64] for x in codes) if c))
+    clean = list(dict.fromkeys(c for c in (re.sub(r"\s+", "", str(x))[:CODE_MAX] for x in codes) if c))
     for code in clean:
         other = conn.execute("SELECT p.name FROM product_codes c JOIN products p ON p.id = c.product_id "
                              "WHERE c.user_id = ? AND c.code = ? AND c.product_id != ?", (owner, code, product_id)).fetchone()
@@ -1883,6 +1883,10 @@ def check_location(inventory_id, location_id):
     row = db.get_db().execute("SELECT inventory_id FROM locations WHERE id = ?", (location_id,)).fetchone()
     if not row or row[0] != inventory_id:
         raise ValueError("That place isn't in this inventory.")
+
+
+# Barcodes: UPCs and EANs, and any other kind (Code 128 or 39, a QR code's text), up to this long.
+CODE_MAX = 200
 
 
 def fmt_count(n):
@@ -2065,7 +2069,7 @@ def count_item():
         inv = owned("inventories", int(data.get("inventory_id") or 0))
     except (TypeError, ValueError):
         return bad("Say which inventory, and how many.")
-    code = re.sub(r"\s+", "", str(data.get("code") or ""))[:64]
+    code = re.sub(r"\s+", "", str(data.get("code") or ""))[:CODE_MAX]
     item, product_id = None, None
     if data.get("item_id"):
         item = owned("items", int(data["item_id"]))
@@ -2428,7 +2432,7 @@ def picture_from_lookup(product_id, token):
 @app.get("/api/codes/<code>")
 @login_required
 def look_up_code(code):
-    return jsonify(look_up(re.sub(r"\s+", "", code)[:64]))
+    return jsonify(look_up(re.sub(r"\s+", "", code)[:CODE_MAX]))
 
 
 @app.post("/api/codes/from-link")
@@ -2442,7 +2446,7 @@ def look_up_link():
         return bad(str(e))
     if not link:
         return bad("Paste the product's link.")
-    return jsonify(look_up(re.sub(r"\s+", "", str(data.get("code") or ""))[:64], link))
+    return jsonify(look_up(re.sub(r"\s+", "", str(data.get("code") or ""))[:CODE_MAX], link))
 
 
 # Locations: where things are in an inventory, nested.

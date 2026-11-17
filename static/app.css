@@ -1230,3 +1230,4 @@ dialog.iv-counter:not([open]) { display: none; }
 .pw-add { display: inline-flex; gap: 0.375rem; align-items: center; }
 .pw-add .pw-qty { width: 4.5rem; text-align: center; }
 .ct-said .ct-goto { margin-left: 0.875rem; }
+.ct-no-code-p { margin: 0.5rem 0 0; text-align: center; }

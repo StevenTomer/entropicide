@@ -401,7 +401,7 @@ function beep(kind) {
   }
 }
 
-function openCounter(mode, then = null, place = undefined) {
+function openCounter(mode, then = null, place = undefined, qty = 1) {
   const inv = currentInventory();
   if (!inv) return;
   const saved = loadDraft("countDraft");
@@ -423,7 +423,7 @@ function openCounter(mode, then = null, place = undefined) {
   dlg.addEventListener("submit", counterSubmitted);
   dlg.showModal();
   startCamera(c);
-  if (then) counterCount(then, place);
+  if (then) counterCount(then, place, qty);
 }
 
 function closeCounter() {
@@ -451,7 +451,7 @@ function drawCounter() {
     <div class="ct-camera"><video playsinline muted></video><p class="ct-camera-said">Opening the camera…</p></div>
     <div class="ct-panel">
       <p class="ct-said ${c.saidKind}">${c.said ? h(c.said) : counterHint(c)}
-        ${c.undo ? '<button type="button" class="link ct-undo">Undo</button>' : ""}</p>
+        ${counterLinks(c.undo)}</p>
       <form class="ct-type" autocomplete="off">
         <input class="ct-code" placeholder="Or type a barcode or a name" aria-label="Barcode or name" enterkeyhint="go">
         <button>${adding ? "Add" : "Use"}</button>
@@ -459,6 +459,10 @@ function drawCounter() {
       <div class="ct-matches"></div>
     </div>`;
 }
+
+// After a count: Undo, and Go to item (its details, the scanner closed).
+const counterLinks = (undo) => (undo ? ` <button type="button" class="link ct-undo">Undo</button>
+  <button type="button" class="link ct-goto" data-item="${undo.item}">Go to item</button>` : "");
 
 const counterHint = (c) => `Scan barcodes: each one ${c.mode === "add" ? "adds one" : "takes one away"}.`;
 
@@ -469,7 +473,7 @@ function counterSay(text, kind = "good", undo = null, sound = true) {
   Object.assign(c, { said: text, saidKind: kind, undo });
   const p = $(".ct-said", c.dlg);
   p.className = `ct-said ${kind} flash`;
-  p.innerHTML = h(text) + (undo ? ' <button type="button" class="link ct-undo">Undo</button>' : "");
+  p.innerHTML = h(text) + counterLinks(undo);
   navigator.vibrate?.(kind === "bad" ? [60, 60, 60] : 60);
   if (sound) beep(kind === "good" ? (c.mode === "use" ? "use" : "add") : kind);
 }
@@ -529,7 +533,7 @@ function matchesHtml(inv, typed, matches) {
 }
 
 // Counts one of a product in or out; something new here goes in place (else the last used).
-async function counterCount(p, place = undefined) {
+async function counterCount(p, place = undefined, qty = 1) {
   const c = CT.open, inv = c && inventoryById(c.inv);
   if (!c || c.busy) return;
   c.busy = true;
@@ -537,7 +541,7 @@ async function counterCount(p, place = undefined) {
     const here = itemHere(inv, p.id);
     if (here && !here.used_up && c.mode === "use") return counterSay(`${p.name} is kept, not used up: nothing taken.`, "bad");
     if (place === undefined) place = Number(load(`inventoryPlace${inv.id}`, "")) || null;
-    const r = await countIn({ product_id: p.id }, c.mode === "use" ? -1 : 1, here ? {} : { location_id: place },
+    const r = await countIn({ product_id: p.id }, (c.mode === "use" ? -1 : 1) * (qty > 0 ? qty : 1), here ? {} : { location_id: place },
       { quiet: true, inv }).catch(() => null);
     if (!r?.item) return r?.kept ? counterSay(`${p.name} is kept, not used up: nothing taken.`, "bad") : null;
     const where = r.made && r.item.location_id ? ` (in ${placePath(r.item.location_id)})` : "";
@@ -595,6 +599,12 @@ async function counterClicked(e) {
   }
   if (b.classList.contains("ct-match")) { $(".ct-code", c.dlg).value = ""; $(".ct-matches", c.dlg).innerHTML = ""; return counterCount(productById(Number(b.dataset.product))); }
   if (b.classList.contains("ct-new-product")) return counterNewProduct({ name: b.dataset.name || "" });
+  if (b.classList.contains("ct-goto")) {
+    const id = Number(b.dataset.item);
+    closeCounter();
+    if (S.view !== "inventory") setView("inventory");
+    return openItem(id);
+  }
   if (b.classList.contains("ct-undo") && c.undo) {
     const u = c.undo;
     c.undo = null;
@@ -684,7 +694,9 @@ function drawProductWizard() {
       ${s.back && inv && placeOptions(inv).length ? `<h3>Where it goes in ${h(inv.name)}</h3>
         <span class="place-pick"><select class="pw-place" aria-label="Where it goes">${options([["", "No place"], ...placeOptions(inv)], s.location ?? "")}</select>${scanPlaceButton(inv)}</span>` : ""}
       <p class="pw-buttons"><button type="button" class="link pw-back">← Back</button>
-        <button class="primary pw-save">${s.back ? "Save, and add one" : "Save"}</button></p>`;
+        ${s.back ? `<span class="pw-add"><button class="primary pw-save">Save, and add</button>
+          <input type="number" class="pw-qty" data-w="qty" min="1" step="any" value="${h(s.qty || 1)}" inputmode="decimal" aria-label="How many to add"></span>`
+          : '<button class="primary pw-save">Save</button>'}</p>`;
   }
   dlg.innerHTML = head + `<form class="pw-body" autocomplete="off">${body}</form>`;
 }
@@ -773,15 +785,16 @@ async function productWizardNext() {
   } finally { s.saving = false; }
 }
 
-// Saved (or found already): back to counting it, or just closed.
+// Saved (or found already): back to counting it (as many as were said), or just closed.
 function productSaved(p) {
   const back = PW.state?.back, place = PW.state?.location ?? null;
+  const qty = Number($("#product-wizard .pw-qty")?.value || PW.state?.qty) || 1;
   PW.state.saving = true;
   PW.state = null;
   saveDraft("productDraft", null);
   $("#product-wizard")?.close();
   renderList();
-  if (back) openCounter(null, p, place);  // (and one's counted, as the scan that found it would have)
+  if (back) openCounter(null, p, place, qty);  // (and they're counted, as the scan that found it would have)
   else toast(`${p.name} is in your products. ＋ Add to inventory counts some in.`);
 }
 

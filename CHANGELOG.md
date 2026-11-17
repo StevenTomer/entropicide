@@ -5,6 +5,7 @@ Settings → Troubleshooting.
 
 ## Unreleased
 
+- Adding a new product from the scanner ends with **Save, and add** and how many (not just one), and each count says **Go to item** beside Undo.
 - **Scan a place's label to put something there:** 📷 beside every choice of place (a thing's details, adding a product) reads the place's QR label and chooses it.
 - Inventory places, categories and things sort naturally: Shelving unit 2 before Shelving unit 10.
 - **Inventory, easier:** what a thing *is* and how many you have are kept apart now.

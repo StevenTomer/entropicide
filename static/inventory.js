@@ -56,12 +56,16 @@ function placePath(id) {
   return out.reverse().map((l) => l.name).join(" › ");
 }
 
+// Names in the order people expect: numbers by their value (Shelf 2 before Shelf 10), and
+// ignoring case and accents.
+const natural = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+
 // An inventory's places as a tree, flattened in order: [[id, name drawn as a branch, depth]].
 // (Spaces that don't collapse, so a list of choices shows the tree too.)
 function placeOptions(inv) {
   const out = [], places = (S.data.locations || []).filter((l) => l.inventory_id === inv.id);
   const walk = (parent, depth) => {
-    for (const l of places.filter((x) => (x.parent_id ?? null) === parent).sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const l of places.filter((x) => (x.parent_id ?? null) === parent).sort((a, b) => natural(a.name, b.name))) {
       out.push([l.id, `${"    ".repeat(depth)}${depth ? "└ " : ""}${l.name}`, depth]);
       walk(l.id, depth + 1);
     }
@@ -76,7 +80,7 @@ const STOCK_CATEGORIES = ["Baking", "Breakfast", "Canned goods", "Cleaning", "Co
   "Spices", "Vegetables"];
 function categoryList(inv) {
   const own = (S.data.products || []).map((p) => p.category).filter(Boolean);
-  return [...new Set([...own, ...(inv?.kind === "home" ? [] : STOCK_CATEGORIES)])].sort((a, b) => a.localeCompare(b));
+  return [...new Set([...own, ...(inv?.kind === "home" ? [] : STOCK_CATEGORIES)])].sort(natural);
 }
 
 // Units to choose from: the usual ones, and any others already used.
@@ -111,7 +115,7 @@ function renderInventory(el) {
   const items = invItems(inv);
   const mine = inv.user_id == null || inv.user_id === S.data.user.id;
   const low = items.filter(isLow).length, lent = items.filter((i) => i.lent_to).length;
-  const shown = shownItems(inv, items);
+  const shown = shownItems(inv, items).sort((a, b) => natural(a.name, b.name));
   let html = `<div class="notes-bar">
     <div class="cat-chips" role="group" aria-label="Inventory">
       ${all.map((x) => `<button type="button" class="cat-chip${x.id === inv.id ? " on" : ""}" data-inventory="${x.id}">${x.kind === "home" ? "🏠" : "🥫"} ${h(x.name)}</button>`).join("")}
@@ -145,7 +149,7 @@ function renderInventory(el) {
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(it);
     }
-    for (const key of [...groups.keys()].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b))) {
+    for (const key of [...groups.keys()].sort((a, b) => (a === "") - (b === "") || natural(a, b))) {
       html += `<h2 class="group">${h(key || (byPlace ? "No place" : "No category"))}</h2>` +
         groups.get(key).map((it) => itemRow(it, !byPlace)).join("");
     }
@@ -213,7 +217,7 @@ function replaceProduct(p) {
   S.data.products = S.data.products || [];
   const i = S.data.products.findIndex((x) => x.id === p.id);
   if (i >= 0) S.data.products[i] = p; else S.data.products.push(p);
-  S.data.products.sort((a, b) => a.name.localeCompare(b.name));
+  S.data.products.sort((a, b) => natural(a.name, b.name));
 }
 
 // Counts some of an item (found by item_id or product_id) in or out of an inventory. Returns
@@ -237,7 +241,7 @@ function productsFor(inv, text) {
   const words = text.toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return [];
   return all.filter((p) => words.every((w) => fullName(p).toLowerCase().includes(w)))
-    .sort((a, b) => here(a) - here(b) || a.name.localeCompare(b.name)).slice(0, 12);
+    .sort((a, b) => here(a) - here(b) || natural(a.name, b.name)).slice(0, 12);
 }
 
 // ---- the scanner ----
@@ -260,6 +264,27 @@ async function makeBarcodeReader() {
   lib.prepareZXingModule({ overrides: { locateFile: (path) => `${VENDOR_URL}/barcode/${path}` }, fireImmediately: true });
   return (barcodeReader = new lib.BarcodeDetector({ formats: BARCODE_FORMATS }));
 }
+
+// 📷 beside a choice of place: scanning a place's QR label (Labels, on the inventory) chooses
+// it, as if picked from the list (so it saves the same way).
+const scanPlaceButton = (inv) => `<button type="button" class="icon scan-place" data-inv="${inv.id}"
+  title="Scan the place's QR label" aria-label="Scan the place's label">📷</button>`;
+
+document.addEventListener("click", (e) => {
+  const b = e.target.closest(".scan-place");
+  if (!b) return;
+  e.preventDefault();
+  const select = b.closest(".place-pick")?.querySelector("select"), inv = Number(b.dataset.inv);
+  if (!select) return;
+  openScanner((code) => {
+    const m = code.match(/#location:(\d+)/), l = m && locationById(Number(m[1]));
+    if (!l || l.inventory_id !== inv) return m ? "That's a place in another inventory." : "That isn't a place's label: scan the QR code on the shelf or bin.";
+    select.value = String(l.id);
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    toast(`Place: ${placePath(l.id)}`);
+    return "stop";
+  }, "Scan the place's label");
+});
 
 // Opens the camera; each barcode read goes to onCode (the same one again only after a pause).
 // onCode returning "stop" closes it.
@@ -657,7 +682,7 @@ function drawProductWizard() {
         <button type="button" class="cat-chip${s.used_up ? " on" : ""}" data-value="1">Used up, and bought again</button>
         <button type="button" class="cat-chip${s.used_up ? "" : " on"}" data-value="">Kept (a tool, a ladder)</button></div>
       ${s.back && inv && placeOptions(inv).length ? `<h3>Where it goes in ${h(inv.name)}</h3>
-        <select class="pw-place" aria-label="Where it goes">${options([["", "No place"], ...placeOptions(inv)], s.location ?? "")}</select>` : ""}
+        <span class="place-pick"><select class="pw-place" aria-label="Where it goes">${options([["", "No place"], ...placeOptions(inv)], s.location ?? "")}</select>${scanPlaceButton(inv)}</span>` : ""}
       <p class="pw-buttons"><button type="button" class="link pw-back">← Back</button>
         <button class="primary pw-save">${s.back ? "Save, and add one" : "Save"}</button></p>`;
   }
@@ -942,7 +967,7 @@ function openItem(id) {
       ${it.url ? ` · <a href="${h(it.url)}" target="_blank" rel="noopener noreferrer">Its page ↗</a>` : ""}</p>
     <div class="two">
       <label>${it.used_up ? "How many left" : "How many"}${shownUnit(it.unit) ? ` (${h(it.unit)})` : ""} <input type="number" data-f="quantity" min="0" step="any" value="${fmtQty(it.quantity)}"></label>
-      <label>Place <select data-f="location_id">${options([["", "No place"], ...placeOptions(inv), ["new", "New place…"]], it.location_id ?? "")}</select></label>
+      <label>Place <span class="place-pick"><select data-f="location_id">${options([["", "No place"], ...placeOptions(inv), ["new", "New place…"]], it.location_id ?? "")}</select>${scanPlaceButton(inv)}</span></label>
     </div>
     ${it.location_id && placePath(it.location_id).includes("›") ? `<p class="muted small ii-path">${h(placePath(it.location_id))}</p>` : ""}
     ${it.used_up ? `<div class="two">

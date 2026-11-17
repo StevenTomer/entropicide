@@ -5,6 +5,8 @@ Settings → Troubleshooting.
 
 ## Unreleased
 
+- **Scan a place's label to put something there:** 📷 beside every choice of place (a thing's details, adding a product) reads the place's QR label and chooses it.
+- Inventory places, categories and things sort naturally: Shelving unit 2 before Shelving unit 10.
 - **Inventory, easier:** what a thing *is* and how many you have are kept apart now.
   - **Products** hold what a thing is: its name, brand, size, barcodes, picture, link, category and
     unit. They're one catalog for all your inventories, so a barcode scanned once is known in every

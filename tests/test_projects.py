@@ -13,8 +13,8 @@ def helpers(client):
     return add, project, patch
 
 
-def data(client):
-    d = client.get("/api/data").get_json()
+def data(client, now=None):
+    d = client.get("/api/data" + (f"?now={now}" if now else "")).get_json()
     return {t["id"]: t for t in d["tasks"]}, {p["id"]: p for p in d["projects"]}
 
 
@@ -201,7 +201,7 @@ def test_a_projects_start_date(app, user_client):
     # A start still to come schedules it, and its tasks, not before then.
     r = client.patch(f"/api/projects/{trip}?now=2026-11-09T09:00", json={"start_date": "2026-11-20"}, headers=H).get_json()
     assert (r["state"], r["start_date"]) == ("scheduled", "2026-11-20")
-    tasks, _ = data(client)
+    tasks, _ = data(client, "2026-11-09T09:00")  # (read back on that day, not today)
     assert (tasks[pack]["state"], tasks[pack]["start_date"]) == ("scheduled", "2026-11-20")
     assert (tasks[book]["state"], tasks[book]["start_date"]) == ("scheduled", "2026-12-01")
     # Scheduled needs a start to come; clearing it brings it (and what went with it) back.

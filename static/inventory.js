@@ -63,13 +63,14 @@ function placePath(id) {
 // ignoring case and accents.
 const natural = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
 
-// An inventory's places as a tree, flattened in order: [[id, name drawn as a branch, depth]].
-// (Spaces that don't collapse, so a list of choices shows the tree too.)
+// An inventory's places as a tree, flattened in order: [[id, its whole path, depth]]. The whole
+// path ("Basement › Shelf unit 2 › Shelf 1"), as there can be many a Shelf 1, and a phone's list
+// of choices (or a choice made) shows no indenting.
 function placeOptions(inv) {
   const out = [], places = (S.data.locations || []).filter((l) => l.inventory_id === inv.id);
   const walk = (parent, depth) => {
     for (const l of places.filter((x) => (x.parent_id ?? null) === parent).sort((a, b) => natural(a.name, b.name))) {
-      out.push([l.id, `${"    ".repeat(depth)}${depth ? "└ " : ""}${l.name}`, depth]);
+      out.push([l.id, placePath(l.id), depth]);
       walk(l.id, depth + 1);
     }
   };
@@ -337,6 +338,51 @@ async function openScanner(onCode, title = "Scan") {
     $(".iv-scan-said", dlg).textContent = err?.name === "NotAllowedError"
       ? "The camera isn't allowed: allow it for this site, then try again." : "Couldn't open the camera, or read barcodes, here.";
   }
+}
+
+// Takes a photo with the camera, here (resolves to it as a JPEG file, or null if cancelled).
+// Here, not in the phone's camera app: while that's open, Android may close this page to save
+// memory, and the photo would have nowhere to come back to. "From gallery" chooses one taken
+// already; its file box is in this dialog, which nothing redraws.
+function takePhoto(title = "Take a photo") {
+  return new Promise((done) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "iv-scanner iv-photo";
+    dlg.innerHTML = `<div class="draw-head"><b>${h(title)}</b><span class="iv-scan-said muted">Opening the camera…</span>
+      <span class="draw-end"><button type="button" class="ph-cancel">Cancel</button></span></div>
+      <video playsinline muted></video>
+      <div class="ph-buttons"><label class="ph-gallery">From gallery<input type="file" accept="image/*" hidden></label>
+        <button type="button" class="primary ph-take" disabled>📷 Take photo</button></div>`;
+    document.body.append(dlg);
+    let stream = null, result = null;
+    const finish = (file) => { result = file; if (dlg.open) dlg.close(); };
+    dlg.addEventListener("close", () => { stream?.getTracks().forEach((t) => t.stop()); dlg.remove(); done(result); });
+    $(".ph-cancel", dlg).onclick = () => finish(null);
+    $("input[type=file]", dlg).onchange = (e) => finish(e.target.files[0] || null);
+    const video = $("video", dlg);
+    $(".ph-take", dlg).onclick = () => {
+      // (At most 1600 pixels across: plenty for a product, and quick to upload.)
+      const scale = Math.min(1, 1600 / Math.max(video.videoWidth, video.videoHeight));
+      const canvas = Object.assign(document.createElement("canvas"),
+        { width: Math.round(video.videoWidth * scale), height: Math.round(video.videoHeight * scale) });
+      canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob((blob) => finish(blob ? new File([blob], "photo.jpg", { type: "image/jpeg" }) : null), "image/jpeg", 0.85);
+    };
+    dlg.showModal();
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1920 } }, audio: false })
+      .then(async (cam) => {
+        stream = cam;
+        if (!dlg.isConnected) return cam.getTracks().forEach((t) => t.stop());
+        video.srcObject = cam;
+        await video.play();
+        $(".iv-scan-said", dlg).textContent = "";
+        $(".ph-take", dlg).disabled = false;
+      })
+      .catch((err) => {
+        $(".iv-scan-said", dlg).textContent = err?.name === "NotAllowedError"
+          ? "The camera isn't allowed: allow it for this site, or choose one from the gallery." : "No camera here: choose a picture from the gallery.";
+      });
+  });
 }
 
 // Scans one barcode: resolves to it, or null if the camera was closed first.
@@ -667,22 +713,23 @@ function drawProductWizard() {
   if (!dlg || !s) return;
   const steps = ["Barcode", "What it is", "Details"].map((t, i) =>
     `<span class="${i + 1 === s.step ? "on" : i + 1 < s.step ? "done" : ""}">${i + 1}. ${t}</span>`).join("");
+  // (Next is at the top, out from under a phone's keyboard; it submits the form below, so a
+  // required name is still asked for.)
   const head = `<form method="dialog" class="dlg-head"><h2>Add a product</h2><button class="icon" aria-label="Close">✕</button></form>
-    <div class="pw-steps">${steps}</div>`;
+    <div class="pw-top"><div class="pw-steps">${steps}</div>${s.step < 3 ? '<button class="primary pw-next" form="pw-form">Next →</button>' : ""}</div>`;
   let body = "";
   if (s.step === 1) {
     body = `<p>Scan its barcode, or type the number under it.</p>
       <div class="pw-row"><input data-w="code" value="${h(s.code)}" placeholder="Barcode (UPC, or any other kind)" aria-label="Barcode" autocapitalize="characters" enterkeyhint="next">
         <button type="button" class="pw-scan">📷 Scan</button></div>
-      <p class="pw-buttons"><button type="button" class="pw-no-code">It has no barcode</button>
-        <button class="primary">Next →</button></p>`;
+      <p class="pw-buttons"><button type="button" class="pw-no-code">It has no barcode</button></p>`;
   } else if (s.step === 2) {
     const pic = PW.photo ? URL.createObjectURL(PW.photo) : s.picture;
     body = `${s.looking ? '<p class="pw-looking">Looking it up…</p>' : s.found ? `<p class="muted small">Found at ${h(s.found)}.</p>` : s.looked ? '<p class="muted small">Not found online: type what it is.</p>' : ""}
       ${s.warning ? `<p class="pw-warning">${h(s.warning)}</p>` : ""}
       <div class="pw-what">
         <div class="pw-pic">${pic ? `<img src="${h(pic)}" alt="">` : '<span class="muted small">No picture</span>'}
-          <label class="link small">${pic ? "Change" : "+ Photo"}<input type="file" class="pw-photo" accept="image/*" capture="environment" hidden></label></div>
+          <button type="button" class="link small pw-photo">${pic ? "Change" : "+ Photo"}</button></div>
         <div class="pw-fields">
           <label>Name <input data-w="name" value="${h(s.name)}" placeholder="Tomato soup" required></label>
           <label>Brand <input data-w="brand" value="${h(s.brand)}" placeholder="Campbell's"></label>
@@ -692,7 +739,7 @@ function drawProductWizard() {
       <label>Its page at a shop <input data-w="url" class="pw-url" value="${h(s.url)}" type="url" placeholder="Paste a Walmart link (it fills in the rest)"></label>
       ${!s.url && s.find_url ? `<p class="small"><a href="${h(s.find_url)}" target="_blank" rel="noopener noreferrer" class="pw-find">Find it on Walmart ↗</a>
         <span class="muted">(Walmart's pages for this barcode): open the product, then copy its link and paste it above${/Android/.test(navigator.userAgent) ? ", or Share it to Entropicide" : ""}.</span></p>` : ""}
-      <p class="pw-buttons"><button type="button" class="link pw-back">← Back</button> <button class="primary">Next →</button></p>`;
+      <p class="pw-buttons"><button type="button" class="link pw-back">← Back</button></p>`;
   } else {
     body = `<p class="pw-summary"><b>${h(s.brand ? `${s.brand} ${s.name}` : s.name)}</b>${s.size ? ` <span class="muted">${h(s.size)}</span>` : ""}</p>
       <h3>Category</h3>${pickChips("category", categoryList(inv), s.category, "Another category")}
@@ -704,10 +751,12 @@ function drawProductWizard() {
         <span class="place-pick"><select class="pw-place" aria-label="Where it goes">${options([["", "No place"], ...placeOptions(inv)], s.location ?? "")}</select>${scanPlaceButton(inv)}</span>` : ""}
       <p class="pw-buttons"><button type="button" class="link pw-back">← Back</button>
         ${s.back ? `<span class="pw-add"><button class="primary pw-save">Save, and add</button>
-          <input type="number" class="pw-qty" data-w="qty" min="1" step="any" value="${h(s.qty || 1)}" inputmode="decimal" aria-label="How many to add"></span>`
+          <span class="pw-stepper"><button type="button" class="pw-qty-less" aria-label="One fewer">−</button>
+          <input type="number" class="pw-qty" data-w="qty" min="1" step="any" value="${h(s.qty || 1)}" inputmode="decimal" aria-label="How many to add">
+          <button type="button" class="pw-qty-more" aria-label="One more">+</button></span></span>`
           : '<button class="primary pw-save">Save</button>'}</p>`;
   }
-  dlg.innerHTML = head + `<form class="pw-body" autocomplete="off">${body}</form>`;
+  dlg.innerHTML = head + `<form class="pw-body" id="pw-form" autocomplete="off">${body}</form>`;
 }
 
 function productWizardTyped(e) {
@@ -725,7 +774,6 @@ async function productWizardChanged(e) {
     if (PW.state.location) save(`inventoryPlace${currentInventory().id}`, t.value);
     return saveDraft("productDraft", PW.state);
   }
-  if (t.classList.contains("pw-photo") && t.files[0]) { PW.photo = t.files[0]; PW.state.image = ""; drawProductWizard(); }
   // A Walmart link pasted: what it says fills in the rest.
   if (t.classList.contains("pw-url") && /walmart\.com\/ip\//i.test(t.value)) lookUpLink(t.value.trim());
 }
@@ -813,6 +861,16 @@ function productSaved(p) {
 async function productWizardClicked(e) {
   const b = e.target.closest("button"), s = PW.state;
   if (!b || !s) return;
+  if (b.classList.contains("pw-qty-less") || b.classList.contains("pw-qty-more")) {
+    s.qty = Math.max(1, (Number(s.qty) || 1) + (b.classList.contains("pw-qty-more") ? 1 : -1));
+    $("#product-wizard .pw-qty").value = fmtQty(s.qty);
+    return saveDraft("productDraft", s);
+  }
+  if (b.classList.contains("pw-photo")) {
+    const file = await takePhoto(`A picture of ${s.name || "it"}`);
+    if (file && PW.state === s) { PW.photo = file; s.image = ""; drawProductWizard(); }
+    return;
+  }
   const chips = b.closest("[data-pick]");
   if (chips && b.dataset.value !== undefined) {
     const f = chips.dataset.pick;
@@ -896,7 +954,7 @@ function openProduct(id, inv = currentInventory()) {
   dlg.innerHTML = `<form method="dialog" class="dlg-head"><h2>${h(p.name)}</h2><button class="icon" aria-label="Close">✕</button></form>
     <div class="pw-what">
       <div class="pw-pic">${p.image ? `<img src="${h(p.image)}" alt="">` : '<span class="muted small">No picture</span>'}
-        <label class="link small">${p.image ? "Change" : "+ Photo"}<input type="file" class="pd-photo" accept="image/*" capture="environment" hidden></label></div>
+        <button type="button" class="link small pd-photo">${p.image ? "Change" : "+ Photo"}</button></div>
       <div class="pw-fields">
         <label>Name <input data-f="name" value="${h(p.name)}" required></label>
         <label>Brand <input data-f="brand" value="${h(p.brand)}"></label>
@@ -922,11 +980,6 @@ function openProduct(id, inv = currentInventory()) {
   };
   dlg.onchange = async (e) => {
     const t = e.target;
-    if (t.classList.contains("pd-photo") && t.files[0]) {
-      const r = await uploadProductPicture(id, t.files[0]);
-      if (r) { replaceProduct(r); renderList(); openProduct(id, inv); }
-      return;
-    }
     if (t.dataset.f) saveProduct({ [t.dataset.f]: t.type === "checkbox" ? t.checked : t.value });
   };
   dlg.onclick = async (e) => {
@@ -934,6 +987,12 @@ function openProduct(id, inv = currentInventory()) {
     if (!b) return;
     const chips = b.closest("[data-pick]");
     if (chips && b.dataset.value !== undefined) return saveProduct({ [chips.dataset.pick]: b.dataset.value });
+    if (b.classList.contains("pd-photo")) {
+      const file = await takePhoto(`A picture of ${p.name}`);
+      const r = file && await uploadProductPicture(id, file);
+      if (r) { replaceProduct(r); renderList(); openProduct(id, inv); }
+      return;
+    }
     if (b.classList.contains("pd-code-del")) return saveProduct({ codes: p.codes.filter((c) => c !== b.dataset.code) });
     if (b.classList.contains("pd-code-type")) {
       const code = prompt("The barcode's number")?.trim();

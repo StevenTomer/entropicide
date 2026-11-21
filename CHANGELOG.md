@@ -5,6 +5,11 @@ Settings → Troubleshooting.
 
 ## Unreleased
 
+- **Photos of products are taken in the app** (with *From gallery* for one you have), not in the
+  phone's camera app, which could lose the photo if you took your time.
+- **Places show their whole path** in every list (Garage › Shelf unit 2 › Shelf 1), so one Shelf 1
+  can be told from another.
+- In Add a product, **Next** is at the top, and how many to add has − and + beside it.
 - **Things with no barcode:** the scanner has *Something new with no barcode…*, straight to what it is (and *It has no barcode* in Add a product is a proper button).
 - **Any kind of barcode:** besides UPCs, the scanner reads Code 128, 39 and 93, ITF, Codabar, QR, Data Matrix, PDF417 and Aztec, and a code with letters (TOOL-0042) works typed or scanned. (Names are looked up online only for UPCs.)
 - Adding a new product from the scanner ends with **Save, and add** and how many (not just one), and each count says **Go to item** beside Undo.

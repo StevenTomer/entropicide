@@ -728,7 +728,10 @@ function groupedByProject(list) {
     tasks.get(p.id).push(t);
   }
   if (shown && !S.search && !S.tagFilter.size) {
+    // (An inventory's shopping list only when there's something to buy.)
+    const shopping = new Set((S.data.inventories || []).map((i) => i.shopping_id).filter(Boolean));
     for (const p of byPriority(S.data.projects.filter((q) => q.state === S.view && inArea(q.area_id)))) {
+      if (shopping.has(p.id) && !S.data.tasks.some((t) => t.project_id === p.id)) continue;
       if (!tasks.has(p.id)) { tasks.set(p.id, []); order.push(p); }
     }
   }

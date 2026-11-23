@@ -24,6 +24,8 @@ const IV = {
   layout: load("inventoryLayout", "places"),     // places | categories | names
   place: null,                                   // a place to show alone (from a label)
   resumed: false,                                // an unfinished wizard reopened (once a load)
+  selecting: false,                              // choosing things (press and hold one), to move or delete them
+  sel: new Set(),                                // the ids chosen
 };
 const VENDOR_URL = `${BASE}/static/vendor`;
 
@@ -133,38 +135,69 @@ function renderInventory(el) {
       ${mine ? '<button type="button" class="link danger iv-delete">Delete</button>' : ""}
     </div>
   </div>
-  <div class="iv-actions">
-    <button type="button" class="primary iv-add" title="Scan (or type) what's come in">＋ Add to inventory</button>
+  ${IV.selecting ? selectBar(shown) : `<div class="iv-actions">
+    <button type="button" class="primary iv-add" title="Scan (or type) what's come in">＋ Add</button>
     <button type="button" class="iv-use" title="Scan (or type) what's been used">− Use</button>
-    <button type="button" class="link iv-products">Products (${(S.data.products || []).length})</button>
-  </div>
+    <button type="button" class="iv-look" title="Scan (or type) something to see how many there are, and where (nothing's counted)">🔍 Look up</button>
+    <span class="iv-actions-end"><button type="button" class="link iv-select" title="Or press and hold one">Select</button>
+      <button type="button" class="link iv-products">Products (${(S.data.products || []).length})</button></span>
+  </div>`}
   <div class="iv-filters">
     ${[["", `All · ${items.length}`], ["low", `Low · ${low}`], ["kept", "Kept"], ["lent", `Lent · ${lent}`]]
       .map(([f, label]) => `<button type="button" class="cat-chip${IV.filter === f ? " on" : ""}" data-filter="${f}">${label}</button>`).join("")}
+    <span class="iv-place-filter-wrap"><button type="button" class="cat-chip iv-place-filter${IV.place ? " on" : ""}" title="Only what's in a place">📍 ${IV.place ? placeLabel(IV.place) : "A place…"}</button>${IV.place
+      ? '<button type="button" class="icon iv-all-places" title="Every place" aria-label="Every place">✕</button>'
+      : '<button type="button" class="icon iv-place-scan" title="Scan a place\'s QR label to see what\'s there" aria-label="Scan a place\'s label">📷</button>'}</span>
     <select class="iv-layout" aria-label="Order">${options([["places", "By place"], ["categories", "By category"], ["names", "A–Z"]], IV.layout)}</select>
-    ${IV.place ? `<button type="button" class="link iv-all-places">All places (now: ${h(placePath(IV.place))}) ✕</button>` : ""}
   </div>`;
-  if (!shown.length) {
-    html += `<p class="empty">${items.length ? "Nothing here matches." : "Nothing in it yet. Press <b>＋ Add to inventory</b>, then scan a barcode (or type a name)."}</p>`;
-  } else if (IV.layout === "places" || IV.layout === "categories") {
-    const byPlace = IV.layout === "places", groups = new Map();
+  // Groups (by place, category, or first letter), each with a heading; with many things, a bar
+  // of them along the top, to jump to one.
+  const groups = new Map();
+  if (shown.length) {
+    const key = IV.layout === "places" ? (it) => (it.location_id && locationById(it.location_id) ? placePath(it.location_id) : "")
+      : IV.layout === "categories" ? (it) => it.category
+      : (it) => (/[a-z]/i.test(it.name[0] || "") ? it.name[0].toUpperCase() : "#");
     for (const it of shown) {
-      const key = byPlace ? (it.location_id && locationById(it.location_id) ? placePath(it.location_id) : "") : it.category;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(it);
+      const k = key(it);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(it);
     }
-    for (const key of [...groups.keys()].sort((a, b) => (a === "") - (b === "") || natural(a, b))) {
-      html += `<h2 class="group">${h(key || (byPlace ? "No place" : "No category"))}</h2>` +
-        groups.get(key).map((it) => itemRow(it, !byPlace)).join("");
-    }
-  } else {
+  }
+  const keys = [...groups.keys()].sort((a, b) => (a === "") - (b === "") || natural(a, b));
+  const groupName = (k) => k || (IV.layout === "places" ? "No place" : "No category");
+  const headed = IV.layout !== "names" || shown.length > JUMP_FROM;
+  if (shown.length > JUMP_FROM && keys.length > 1) {
+    html += `<nav class="iv-jump" aria-label="Jump to"><button type="button" class="icon" data-iv-jump="top" title="Back to the top" aria-label="Back to the top">↑</button>
+      ${keys.map((k, i) => `<button type="button" class="cat-chip" data-iv-jump="${i}" title="${h(groupName(k))}">${h(IV.layout === "places" && k ? k.split(" › ").slice(-2).join(" › ") : groupName(k))}</button>`).join("")}</nav>`;
+  }
+  if (!shown.length) {
+    html += `<p class="empty">${items.length ? "Nothing here matches." : "Nothing in it yet. Press <b>＋ Add</b>, then scan a barcode (or type a name)."}</p>`;
+  } else if (!headed) {
     html += shown.map((it) => itemRow(it, true)).join("");
+  } else {
+    keys.forEach((k, i) => {
+      html += `<h2 class="group" id="ivg-${i}">${h(groupName(k))}</h2>` + groups.get(k).map((it) => itemRow(it, IV.layout !== "places")).join("");
+    });
   }
   el.innerHTML = html;
   if (!IV.resumed) {
     IV.resumed = true;
     if (loadDraft("productDraft")) openProductWizard();
   }
+}
+
+// More things than this, and the page has a bar to jump along it (and A–Z has letters).
+const JUMP_FROM = 12;
+
+// Choosing things, to move or delete them together: how many, and what to do.
+function selectBar(shown) {
+  const n = IV.sel.size;
+  return `<div class="iv-selbar"><b>${n} chosen</b>
+    <button type="button" class="link iv-sel-all">All ${shown.length}</button>
+    <button type="button" class="link iv-sel-none">None</button>
+    <span class="iv-actions-end"><button type="button" class="iv-sel-move"${n ? "" : " disabled"}>Move…</button>
+      <button type="button" class="danger iv-sel-delete"${n ? "" : " disabled"}>Delete…</button>
+      <button type="button" class="iv-sel-done">Done</button></span></div>`;
 }
 
 // What the page shows: the filter, a place (and what's in it), and the search box.
@@ -194,10 +227,12 @@ function itemRow(it, withPlace) {
         <span class="iv-qty${it.quantity === 0 ? " out" : ""}">${h(qtyText(it))}</span>
         <button type="button" class="iv-plus" aria-label="One more">+</button></span>`
     : it.quantity !== 1 ? `<span class="iv-qty">× ${fmtQty(it.quantity)}</span>` : "";
-  return `<div class="iv-row${isLow(it) ? " low" : ""}" data-item="${it.id}">
+  const chosen = IV.selecting && IV.sel.has(it.id);
+  return `<div class="iv-row${isLow(it) ? " low" : ""}${chosen ? " chosen" : ""}" data-item="${it.id}">
+    ${IV.selecting ? `<input type="checkbox" class="iv-check" ${chosen ? "checked" : ""} aria-label="Choose ${h(it.name)}">` : ""}
     ${pic ? `<img class="iv-thumb" src="${h(pic)}" alt="" loading="lazy">` : '<span class="iv-thumb"></span>'}
     <div class="row-body"><button type="button" class="link iv-open">${h(it.name)}</button>${meta ? `<div class="meta">${meta}</div>` : ""}</div>
-    ${count}
+    ${IV.selecting ? "" : count}
   </div>`;
 }
 
@@ -277,17 +312,93 @@ async function makeBarcodeReader() {
 const scanPlaceButton = (inv) => `<button type="button" class="icon scan-place" data-inv="${inv.id}"
   title="Scan the place's QR label" aria-label="Scan the place's label">📷</button>`;
 
-document.addEventListener("click", (e) => {
-  const b = e.target.closest(".scan-place");
-  if (!b) return;
+// A place, for a button: where it is (muted), then itself. "Garage › Shelf unit 2 › **Shelf 1**".
+function placeLabel(id) {
+  const path = id ? placePath(id) : "";
+  if (!path) return '<span class="muted">No place</span>';
+  const parts = path.split(" › ");
+  return (parts.length > 1 ? `<span class="muted">${h(parts.slice(0, -1).join(" › "))} › </span>` : "") + `<b>${h(parts.at(-1))}</b>`;
+}
+
+// A place to choose, in a form: a button showing the whole path, which opens pickPlace, and 📷
+// to scan its label. The choice is in a hidden input (attrs: its data-f or class), which says
+// "change" as a select would.
+const placeField = (inv, value, attrs) => `<span class="place-pick" data-inv="${inv.id}">
+  <input type="hidden" ${attrs} value="${value ?? ""}">
+  <button type="button" class="place-choose">${placeLabel(value)}</button>${scanPlaceButton(inv)}</span>`;
+
+function setPlacePick(pick, id) {
+  const input = $("input[type=hidden]", pick);
+  input.value = id ?? "";
+  $(".place-choose", pick).innerHTML = placeLabel(id);
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+// Chooses a place in an inventory: its tree (indented, with how many things are in each), a
+// box to find one by name, No place, a new one, or its label scanned. Resolves to its id, null
+// for no place, or undefined if nothing was chosen.
+function pickPlace(inv, current = null, { title = "Choose a place", none = true, add = true } = {}) {
+  return new Promise((done) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "place-picker";
+    let result;
+    const count = (id) => invItems(inv).filter((i) => i.location_id === id).length;
+    const row = ([id, , depth], q) => {
+      const l = locationById(id), n = count(id);
+      return `<li><button type="button" class="pp-place${id === current ? " on" : ""}" data-id="${id}" style="--depth: ${q ? 0 : depth}">
+        ${q ? placeLabel(id) : `${depth ? '<span class="pp-branch">└</span>' : ""}${h(l.name)}`}${n ? `<span class="pp-n">${n}</span>` : ""}</button></li>`;
+    };
+    const draw = (q = "") => {
+      const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+      const places = placeOptions(inv).filter(([id]) => words.every((w) => placePath(id).toLowerCase().includes(w)));
+      $(".pp-list", dlg).innerHTML = (none && !q ? `<li><button type="button" class="pp-place${current == null ? " on" : ""}" data-id="">No place</button></li>` : "") +
+        (places.map((x) => row(x, q)).join("") || '<li class="muted">No place is called that.</li>');
+    };
+    dlg.innerHTML = `<form method="dialog" class="dlg-head"><h2>${h(title)}</h2><button class="icon" aria-label="Close">✕</button></form>
+      <div class="pw-row"><input class="pp-find" placeholder="Find a place" aria-label="Find a place" autocomplete="off">
+        <button type="button" class="pp-scan">📷 Scan label</button></div>
+      <ul class="plain pp-list"></ul>
+      ${add ? '<p><button type="button" class="link pp-new">+ A new place…</button></p>' : ""}`;
+    document.body.append(dlg);
+    draw();
+    const finish = (id) => { result = id; dlg.close(); };
+    dlg.addEventListener("input", (e) => { if (e.target.matches(".pp-find")) draw(e.target.value); });
+    dlg.addEventListener("click", async (e) => {
+      const b = e.target.closest("button");
+      if (b?.matches(".pp-place")) return finish(b.dataset.id ? Number(b.dataset.id) : null);
+      if (b?.matches(".pp-new")) { const l = await newPlace(inv, current); if (l) finish(l.id); return; }
+      if (b?.matches(".pp-scan")) {
+        openScanner((code) => {
+          const m = code.match(/#location:(\d+)/), l = m && locationById(Number(m[1]));
+          if (!l || l.inventory_id !== inv.id) return m ? "That's a place in another inventory." : "That isn't a place's label: scan the QR code on the shelf or bin.";
+          finish(l.id);
+          return "stop";
+        }, "Scan the place's label");
+      }
+    });
+    dlg.addEventListener("close", () => { dlg.remove(); done(result); });
+    dlg.showModal();
+    // (The chosen place in view, in a long list.)
+    $(".pp-place.on", dlg)?.scrollIntoView({ block: "center" });
+  });
+}
+
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest(".scan-place, .place-choose");
+  const pick = b?.closest(".place-pick");
+  if (!pick) return;
   e.preventDefault();
-  const select = b.closest(".place-pick")?.querySelector("select"), inv = Number(b.dataset.inv);
-  if (!select) return;
+  const inv = inventoryById(Number(pick.dataset.inv)), input = $("input[type=hidden]", pick);
+  const current = input.value ? Number(input.value) : null;
+  if (b.matches(".place-choose")) {
+    const id = await pickPlace(inv, current, { title: "Where it goes" });
+    if (id !== undefined && id !== current) setPlacePick(pick, id);
+    return;
+  }
   openScanner((code) => {
     const m = code.match(/#location:(\d+)/), l = m && locationById(Number(m[1]));
-    if (!l || l.inventory_id !== inv) return m ? "That's a place in another inventory." : "That isn't a place's label: scan the QR code on the shelf or bin.";
-    select.value = String(l.id);
-    select.dispatchEvent(new Event("change", { bubbles: true }));
+    if (!l || l.inventory_id !== inv.id) return m ? "That's a place in another inventory." : "That isn't a place's label: scan the QR code on the shelf or bin.";
+    setPlacePick(pick, l.id);
     toast(`Place: ${placePath(l.id)}`);
     return "stop";
   }, "Scan the place's label");
@@ -489,15 +600,22 @@ function closeCounter() {
   renderList();
 }
 
+// What each of the counter's modes says. Look up counts nothing: a scan opens what it is.
+const COUNTER_MODES = {
+  add: { button: "＋ Add", title: "Adding to", go: "Add", hint: "Scan barcodes: each one adds one." },
+  use: { button: "− Use", title: "Using from", go: "Use", hint: "Scan barcodes: each one takes one away." },
+  look: { button: "🔍 Look up", title: "Looking up in", go: "Look up", hint: "Scan a barcode to see what it is, and how many there are (nothing's counted)." },
+};
+
 function drawCounter() {
   const c = CT.open, inv = inventoryById(c.inv);
-  const adding = c.mode === "add";
-  c.dlg.classList.toggle("use", !adding);
+  const adding = c.mode === "add", m = COUNTER_MODES[c.mode];
+  c.dlg.classList.toggle("use", c.mode === "use");
+  c.dlg.classList.toggle("look", c.mode === "look");
   c.dlg.innerHTML = `<div class="ct-head">
-      <span class="iv-mode" role="group" aria-label="Add or use">
-        <button type="button" class="${adding ? "on" : ""}" data-mode="add">＋ Add</button>
-        <button type="button" class="${adding ? "" : "on"}" data-mode="use">− Use</button></span>
-      <b class="ct-title">${adding ? "Adding to" : "Using from"} ${h(inv.name)}</b>
+      <span class="iv-mode" role="group" aria-label="Add, use or look up">
+        ${Object.entries(COUNTER_MODES).map(([k, x]) => `<button type="button" class="${c.mode === k ? "on" : ""}" data-mode="${k}">${x.button}</button>`).join("")}</span>
+      <b class="ct-title">${m.title} ${h(inv.name)}</b>
       <button type="button" class="icon ct-sound" aria-label="${beepsOn() ? "Turn the beep off" : "Turn the beep on"}" title="Beep on each scan">${beepsOn() ? "🔊" : "🔇"}</button>
       <button type="button" class="primary ct-done">Done</button></div>
     <div class="ct-camera"><video playsinline muted></video><p class="ct-camera-said">Opening the camera…</p></div>
@@ -506,7 +624,7 @@ function drawCounter() {
         ${counterLinks(c.undo)}</p>
       <form class="ct-type" autocomplete="off">
         <input class="ct-code" placeholder="Or type a barcode or a name" aria-label="Barcode or name" enterkeyhint="go">
-        <button>${adding ? "Add" : "Use"}</button>
+        <button>${m.go}</button>
       </form>
       <div class="ct-matches"></div>
       ${adding ? '<p class="ct-no-code-p"><button type="button" class="ct-no-code">Something new with no barcode…</button></p>' : ""}
@@ -517,7 +635,7 @@ function drawCounter() {
 const counterLinks = (undo) => (undo ? ` <button type="button" class="link ct-undo">Undo</button>
   <button type="button" class="link ct-goto" data-item="${undo.item}">Go to item</button>` : "");
 
-const counterHint = (c) => `Scan barcodes: each one ${c.mode === "add" ? "adds one" : "takes one away"}.`;
+const counterHint = (c) => COUNTER_MODES[c.mode].hint;
 
 // What happened, at the bottom (and a buzz): kind "good", "new" or "bad".
 function counterSay(text, kind = "good", undo = null, sound = true) {
@@ -573,6 +691,7 @@ async function counterEntry(text, scanned = false) {
   const found = productsFor(inv, text);
   const isCode = scanned || looksLikeCode(text) || (S.data.products || []).some((p) => p.codes.includes(text));
   $(".ct-matches", c.dlg).innerHTML = "";
+  if (isCode && !found.length && c.mode === "look") return counterSay("Nothing has that barcode yet (switch to Add to add it).", "bad");
   if (isCode) return found.length ? counterCount(found[0]) : counterNewProduct({ code: text });
   if (found.length === 1) return counterCount(found[0]);
   $(".ct-matches", c.dlg).innerHTML = matchesHtml(inv, text, found);
@@ -592,6 +711,14 @@ async function counterCount(p, place = undefined, qty = 1) {
   c.busy = true;
   try {
     const here = itemHere(inv, p.id);
+    if (c.mode === "look") {
+      // (Looking up: what it is, and how many there are. Here, its details; else the product.)
+      beep("add");
+      closeCounter();
+      if (here) return openItem(here.id);
+      toast(`${p.name} isn't in ${inv.name}.`);
+      return openProduct(p.id, inv);
+    }
     if (here && !here.used_up && c.mode === "use") return counterSay(`${p.name} is kept, not used up: nothing taken.`, "bad");
     if (place === undefined) place = Number(load(`inventoryPlace${inv.id}`, "")) || null;
     const r = await countIn({ product_id: p.id }, (c.mode === "use" ? -1 : 1) * (qty > 0 ? qty : 1), here ? {} : { location_id: place },
@@ -640,13 +767,16 @@ async function counterClicked(e) {
     return beep("add");  // (a sample, when it's turned on)
   }
   if (b.dataset.mode) {
-    // (Only what says add or use changes: the camera keeps running.)
+    // (Only what says add, use or look up changes: the camera keeps running.)
     c.mode = b.dataset.mode;
-    const adding = c.mode === "add";
-    c.dlg.classList.toggle("use", !adding);
+    const m = COUNTER_MODES[c.mode];
+    c.dlg.classList.toggle("use", c.mode === "use");
+    c.dlg.classList.toggle("look", c.mode === "look");
     c.dlg.querySelectorAll("[data-mode]").forEach((x) => x.classList.toggle("on", x.dataset.mode === c.mode));
-    $(".ct-title", c.dlg).textContent = `${adding ? "Adding to" : "Using from"} ${inventoryById(c.inv).name}`;
-    $(".ct-type button", c.dlg).textContent = adding ? "Add" : "Use";
+    $(".ct-title", c.dlg).textContent = `${m.title} ${inventoryById(c.inv).name}`;
+    $(".ct-type button", c.dlg).textContent = m.go;
+    const noCode = $(".ct-no-code-p", c.dlg);
+    if (noCode) noCode.hidden = c.mode !== "add";
     if (!c.said) $(".ct-said", c.dlg).textContent = counterHint(c);
     return;
   }
@@ -748,7 +878,7 @@ function drawProductWizard() {
         <button type="button" class="cat-chip${s.used_up ? " on" : ""}" data-value="1">Used up, and bought again</button>
         <button type="button" class="cat-chip${s.used_up ? "" : " on"}" data-value="">Kept (a tool, a ladder)</button></div>
       ${s.back && inv && placeOptions(inv).length ? `<h3>Where it goes in ${h(inv.name)}</h3>
-        <span class="place-pick"><select class="pw-place" aria-label="Where it goes">${options([["", "No place"], ...placeOptions(inv)], s.location ?? "")}</select>${scanPlaceButton(inv)}</span>` : ""}
+        ${placeField(inv, s.location, 'class="pw-place"')}` : ""}
       <p class="pw-buttons"><button type="button" class="link pw-back">← Back</button>
         ${s.back ? `<span class="pw-add"><button class="primary pw-save">Save, and add</button>
           <span class="pw-stepper"><button type="button" class="pw-qty-less" aria-label="One fewer">−</button>
@@ -1050,10 +1180,12 @@ function openItem(id) {
     <p class="small">${p ? '<button type="button" class="link ii-product">Edit product (name, picture, barcodes, unit) …</button>' : ""}
       ${it.url ? ` · <a href="${h(it.url)}" target="_blank" rel="noopener noreferrer">Its page ↗</a>` : ""}</p>
     <div class="two">
-      <label>${it.used_up ? "How many left" : "How many"}${shownUnit(it.unit) ? ` (${h(it.unit)})` : ""} <input type="number" data-f="quantity" min="0" step="any" value="${fmtQty(it.quantity)}"></label>
-      <label>Place <span class="place-pick"><select data-f="location_id">${options([["", "No place"], ...placeOptions(inv), ["new", "New place…"]], it.location_id ?? "")}</select>${scanPlaceButton(inv)}</span></label>
+      <label>${it.used_up ? "How many left" : "How many"}${shownUnit(it.unit) ? ` (${h(it.unit)})` : ""}
+        <span class="ii-stepper"><button type="button" class="ii-less" aria-label="One less">−</button>
+        <input type="number" data-f="quantity" min="0" step="any" inputmode="decimal" value="${fmtQty(it.quantity)}">
+        <button type="button" class="ii-more" aria-label="One more">+</button></span></label>
+      <label>Place ${placeField(inv, it.location_id, 'data-f="location_id"')}</label>
     </div>
-    ${it.location_id && placePath(it.location_id).includes("›") ? `<p class="muted small ii-path">${h(placePath(it.location_id))}</p>` : ""}
     ${it.used_up ? `<div class="two">
       <label title="Below this, “Buy …” goes on the shopping list">Keep at least <input type="number" data-f="keep_at_least" min="0" step="any" value="${it.keep_at_least ?? ""}" placeholder="none"></label>
       <label title="How many to buy back up to (else the minimum)">Buy back up to <input type="number" data-f="restock_to" min="0" step="any" value="${it.restock_to ?? ""}" placeholder="the minimum"></label>
@@ -1092,11 +1224,6 @@ async function itemChanged(e) {
   }
   const f = t.dataset.f;
   if (!f) return;
-  if (f === "location_id" && t.value === "new") {
-    t.value = it.location_id ?? "";
-    const l = await newPlace(inventoryById(it.inventory_id), it.location_id);
-    return l ? saveItem(id, { location_id: l.id }) : null;
-  }
   const value = f === "tags" ? t.value.split(",").map((x) => x.trim()).filter(Boolean)
     : ["quantity", "keep_at_least", "restock_to"].includes(f) ? (t.value === "" ? null : Number(t.value))
     : f === "location_id" ? (t.value ? Number(t.value) : null) : t.value;
@@ -1107,6 +1234,9 @@ async function itemChanged(e) {
 async function itemClicked(e) {
   const b = e.target.closest("button"), id = Number($("#item-dialog").dataset.item), it = itemById(id);
   if (!b || !it) return;
+  if (b.classList.contains("ii-less") || b.classList.contains("ii-more")) {
+    return saveItem(id, { quantity: Math.max(0, it.quantity + (b.classList.contains("ii-more") ? 1 : -1)) });
+  }
   if (b.classList.contains("ii-product")) { $("#item-dialog").close(); return openProduct(it.product_id, inventoryById(it.inventory_id)); }
   if (b.classList.contains("ii-lend-btn")) {
     const who = prompt(`Lend “${it.name}” to whom?`)?.trim();
@@ -1263,13 +1393,75 @@ async function newInventory(kind) {
 
 function bindInventory() {
   const list = $("#list");
+  // Press and hold a thing (or right-click it): choosing begins, with it chosen.
+  // held: a hold just began choosing, so the click that ends it isn't a tap. (The list is
+  // redrawn by then, so that click may never come: held is let go of soon after, and at the
+  // next press, so it can't swallow a later tap.)
+  let hold = null, held = false;
+  const stopHold = () => { clearTimeout(hold); hold = null; };
+  list.addEventListener("pointerdown", (e) => {
+    held = false;
+    const row = S.view === "inventory" && !IV.selecting && e.target.closest(".iv-row");
+    if (!row || e.button > 0) return;
+    const x = e.clientX, y = e.clientY;
+    hold = setTimeout(() => { held = true; navigator.vibrate?.(30); startChoosing(Number(row.dataset.item)); }, 500);
+    const moved = (m) => { if (Math.abs(m.clientX - x) + Math.abs(m.clientY - y) > 10) stopHold(); };
+    list.addEventListener("pointermove", moved);
+    window.addEventListener("pointerup", () => {
+      stopHold();
+      list.removeEventListener("pointermove", moved);
+      if (held) setTimeout(() => { held = false; }, 400);
+    }, { once: true });
+  });
+  list.addEventListener("pointercancel", stopHold);
+  list.addEventListener("contextmenu", (e) => {
+    const row = S.view === "inventory" && e.target.closest(".iv-row");
+    if (!row) return;
+    e.preventDefault();
+    if (!IV.selecting && !held) startChoosing(Number(row.dataset.item));
+  });
   list.addEventListener("click", async (e) => {
     if (S.view !== "inventory") return;
+    // (The click that ends a press and hold isn't a tap on the thing.)
+    if (held) { held = false; e.preventDefault(); return; }
+    if (IV.selecting) {
+      const row = e.target.closest(".iv-row");
+      if (row) {
+        e.preventDefault();
+        const id = Number(row.dataset.item);
+        if (IV.sel.has(id)) IV.sel.delete(id); else IV.sel.add(id);
+        return renderList();
+      }
+    }
     const b = e.target.closest("button");
     if (!b) return;
     const row = b.closest("[data-item]"), inv = currentInventory();
+    if (b.dataset.ivJump !== undefined) {
+      const to = b.dataset.ivJump === "top" ? $(".notes-bar", list) : document.getElementById(`ivg-${b.dataset.ivJump}`);
+      return to?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    if (b.classList.contains("iv-select")) return startChoosing();
+    if (b.classList.contains("iv-sel-done")) { IV.selecting = false; IV.sel.clear(); return renderList(); }
+    if (b.classList.contains("iv-sel-none")) { IV.sel.clear(); return renderList(); }
+    if (b.classList.contains("iv-sel-all")) { for (const it of shownItems(inv, invItems(inv))) IV.sel.add(it.id); return renderList(); }
+    if (b.classList.contains("iv-sel-move")) return moveChosen(inv);
+    if (b.classList.contains("iv-sel-delete")) return deleteChosen();
+    if (b.classList.contains("iv-look")) return openCounter("look");
+    if (b.classList.contains("iv-place-filter")) {
+      const id = await pickPlace(inv, IV.place, { title: "Show only what's in", none: false, add: false });
+      if (id) { IV.place = id; renderList(); }
+      return;
+    }
+    if (b.classList.contains("iv-place-scan")) {
+      return openScanner((code) => {
+        const m = code.match(/#location:(\d+)/), l = m && locationById(Number(m[1]));
+        if (!l) return m ? "That place isn't in an inventory you can see." : "That isn't a place's label: scan the QR code on the shelf or bin.";
+        showPlace(l.id);
+        return "stop";
+      }, "Scan a place's label");
+    }
     if (b.classList.contains("iv-start")) return newInventory(b.dataset.kind);
-    if (b.dataset.inventory) { IV.inv = Number(b.dataset.inventory); IV.place = null; save("inventory", b.dataset.inventory); return renderList(); }
+    if (b.dataset.inventory) { IV.inv = Number(b.dataset.inventory); IV.place = null; IV.selecting = false; IV.sel.clear(); save("inventory", b.dataset.inventory); return renderList(); }
     if (b.classList.contains("iv-new")) {
       return newInventory(confirm("Is it for things used up and bought again (food storage, supplies)?\n\nOK: yes. Cancel: things kept (a home inventory).") ? "stock" : "home");
     }
@@ -1310,6 +1502,43 @@ function bindInventory() {
   });
 }
 document.addEventListener("DOMContentLoaded", bindInventory);
+
+// ---- choosing several, to move or delete them ----
+
+function startChoosing(id = null) {
+  IV.selecting = true;
+  IV.sel.clear();
+  if (id) IV.sel.add(id);
+  renderList();
+}
+
+async function changeChosen(changes) {
+  const r = await api("POST", "/items/bulk", { ids: [...IV.sel], changes });
+  if (!r) return null;
+  await refresh();
+  return r;
+}
+
+async function moveChosen(inv) {
+  const n = IV.sel.size;
+  const id = await pickPlace(inv, null, { title: `Move ${n} thing${n > 1 ? "s" : ""} to` });
+  if (id === undefined) return;
+  if (!(await changeChosen({ location_id: id }))) return;
+  IV.selecting = false;
+  IV.sel.clear();
+  renderList();
+  toast(`Moved ${n} to ${id ? placePath(id) : "no place"}.`);
+}
+
+async function deleteChosen() {
+  const ids = [...IV.sel], n = ids.length;
+  if (!confirm(`Move ${n} thing${n > 1 ? "s" : ""} to the trash? (The Trash can bring them back.)`)) return;
+  if (!(await changeChosen({ deleted: true }))) return;
+  IV.selecting = false;
+  IV.sel.clear();
+  renderList();
+  toast(`${n} moved to the trash.`, async () => { await api("POST", "/items/bulk", { ids, changes: { deleted: false } }); await refresh(); });
+}
 
 // Ticking off a "Buy …" task from an inventory: how many were bought go in.
 async function boughtFor(taskId) {

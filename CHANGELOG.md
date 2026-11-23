@@ -5,6 +5,16 @@ Settings → Troubleshooting.
 
 ## Unreleased
 
+- **Look up** (beside Add and Use, which are shorter now): scan something to open its details,
+  without counting anything.
+- **Choose several things** (press and hold one, then tap more, or *Select*) to move them all to a
+  place, or put them in the trash (it asks first; Undo brings them back).
+- **Choosing a place** shows the whole tree, with how many things are in each place, and a box to
+  find one; the choice shows its whole path.
+- **Only what's in a place:** *📍 A place…* on the Inventory page, or 📷 to scan the place's label.
+- **A bar to jump along a long inventory**, by place, category or letter (A–Z now has letters).
+- − and + beside the count in a thing's details.
+- The Queue no longer shows an inventory's shopping list when there's nothing on it to buy.
 - **Photos of products are taken in the app** (with *From gallery* for one you have), not in the
   phone's camera app, which could lose the photo if you took your time.
 - **Places show their whole path** in every list (Garage › Shelf unit 2 › Shelf 1), so one Shelf 1

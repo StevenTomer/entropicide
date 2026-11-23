@@ -2042,6 +2042,29 @@ def update_item(item_id):
     return jsonify(items_json([can_see("items", item_id)])[0])
 
 
+@app.post("/api/items/bulk")
+@login_required
+def bulk_items():
+    """Several things changed alike (the Inventory page's chosen ones): {"ids": [...], "changes":
+    {"location_id": … and/or "deleted": true|false}}. All or none: one that can't be (another
+    inventory's place, say) changes nothing."""
+    data, conn = body(), db.get_db()
+    ids, changes = data.get("ids"), data.get("changes")
+    if not isinstance(ids, list) or not ids or not isinstance(changes, dict):
+        return bad("Say which things, and what to change.")
+    changes = {k: v for k, v in changes.items() if k in ("location_id", "deleted")}
+    if not changes:
+        return bad("Things can be moved, or put in the trash, together.")
+    try:
+        for item_id in dict.fromkeys(int(i) for i in ids):
+            write_item(changes, owned("items", item_id))
+    except (ValueError, TypeError) as e:
+        conn.rollback()
+        return bad(str(e))
+    conn.commit()
+    return jsonify(ok=True, count=len(set(ids)))
+
+
 def product_by_code(inv_id, code):
     """(the item, the product) a barcode means in an inventory: an item there whose product has
     it (whoever's catalog), else g.user's own product with it (not here yet: no item)."""

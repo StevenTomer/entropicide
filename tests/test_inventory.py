@@ -388,3 +388,21 @@ def test_other_kinds_of_barcode(pantry):
         r = count(ann, inv, code=code, delta=1, name=name).get_json()
         assert r["made"] and r["item"]["codes"] == [code]
         assert count(ann, inv, code=code, delta=1).get_json()["after"] == 2
+
+
+def test_moving_and_trashing_several(app, pantry):
+    """The Inventory page's chosen things, moved or put in the trash together (all or none)."""
+    ann, inv = pantry
+    shelf = ann.post("/api/locations", json={"inventory_id": inv, "name": "Shelf 1"}, headers=H).get_json()["id"]
+    ids = [ann.post("/api/items", json={"name": n, "inventory_id": inv}, headers=H).get_json()["id"] for n in ("Rice", "Beans", "Oats")]
+    bulk = lambda changes, which=ids[:2]: ann.post("/api/items/bulk", json={"ids": which, "changes": changes}, headers=H)  # noqa: E731
+    assert bulk({"location_id": shelf}).status_code == 200
+    assert {n: i["location_id"] for n, i in items(ann).items()} == {"Rice": shelf, "Beans": shelf, "Oats": None}
+    # Another inventory's place: nothing moves.
+    cabin = ann.post("/api/inventories", json={"name": "Cabin"}, headers=H).get_json()["id"]
+    porch = ann.post("/api/locations", json={"inventory_id": cabin, "name": "Porch"}, headers=H).get_json()["id"]
+    assert bulk({"location_id": porch}, ids).status_code == 400
+    assert items(ann)["Oats"]["location_id"] is None
+    assert bulk({"deleted": True}).status_code == 200 and set(items(ann)) == {"Oats"}
+    assert bulk({"deleted": False}).status_code == 200 and set(items(ann)) == {"Rice", "Beans", "Oats"}
+    assert bulk({"quantity": 5}).status_code == 400  # (only moving and the trash)

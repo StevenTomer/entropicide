@@ -258,14 +258,33 @@ function pushBack() {
   history.pushState({ ...(history.state || {}), entropicideBack: backDepth }, "");
 }
 
+// Where the browser has CloseWatcher (Chrome 120 on), it's used instead: Android's Back closes
+// it rather than going back through history, and a page may keep one open without a tap, so
+// even a Back straight after the app opens is caught. Each one closed by Back is made again.
+let backWatcher = null;
+const useWatcher = () => "CloseWatcher" in window && inApp();
+
+function watchBack() {
+  if (!S.data || !useWatcher() || backWatcher) return;
+  try {
+    backWatcher = new window.CloseWatcher();
+  } catch { backWatcher = null; return; }
+  backWatcher.onclose = () => {
+    backWatcher = null;
+    topOpen()?.();
+    setTimeout(watchBack, 0);
+  };
+}
+
 function fillBack() {
-  if (!S.data || !inApp()) return;
+  if (!S.data || !inApp() || useWatcher()) return;
   while (backDepth < BACK_SPARE) pushBack();
 }
 document.addEventListener("pointerup", fillBack, true);
 document.addEventListener("keydown", fillBack, true);
 
 function syncBackStep() {
+  if (useWatcher()) return watchBack();
   if (inApp()) {
     if (S.data && backDepth === 0) pushBack();
     return;

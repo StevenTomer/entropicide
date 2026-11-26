@@ -124,13 +124,15 @@ function renderInventory(el) {
   const shown = shownItems(inv, items).sort((a, b) => natural(a.name, b.name));
   let html = `<div class="notes-bar">
     <div class="cat-chips" role="group" aria-label="Inventory">
-      ${all.map((x) => `<button type="button" class="cat-chip${x.id === inv.id ? " on" : ""}" data-inventory="${x.id}">${x.kind === "home" ? "🏠" : "🥫"} ${h(x.name)}</button>`).join("")}
+      ${all.map((x) => `<button type="button" class="cat-chip${x.id === inv.id ? " on" : ""}" data-inventory="${x.id}">${x.icon ? ownIcon(x.icon, "inventories", x.id) : x.kind === "home" ? "🏠" : "🥫"} ${h(x.name)}</button>`).join("")}
       <button type="button" class="link iv-new">+ New inventory</button>
     </div>
     <div class="notes-opts">
       ${inventoryShareField(inv)}
       <button type="button" class="link iv-places">Places…</button>
       <button type="button" class="link iv-labels" title="QR labels for the places: scanning one shows what's there">Labels</button>
+      <button type="button" class="link iv-icon" title="An icon of its own">${inv.icon ? `${ownIcon(inv.icon, "inventories", inv.id)} Icon` : "Icon…"}</button>
+      ${shortcutButton(`inventory:${inv.id}`)}
       <button type="button" class="link iv-rename">Rename</button>
       ${mine ? '<button type="button" class="link danger iv-delete">Delete</button>' : ""}
     </div>
@@ -1472,6 +1474,7 @@ function bindInventory() {
     if (b.classList.contains("iv-all-places")) { IV.place = null; return renderList(); }
     if (b.classList.contains("iv-places")) return openPlaces();
     if (b.classList.contains("iv-labels")) return printLabels(placeOptions(inv).map(([x]) => x));
+    if (b.classList.contains("iv-icon")) return chooseIcon("inventories", inv);
     if (b.classList.contains("iv-rename")) {
       const name = prompt("Rename the inventory", inv.name)?.trim();
       if (name && await api("PATCH", `/inventories/${inv.id}`, { name })) await refresh();

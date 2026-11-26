@@ -420,7 +420,7 @@ function renderJournal(el, terms, words) {
   renderNoteTags(S.data.notes.filter((n) => j && n.journal_id === j.id));
   let html = `<div class="notes-bar">
     <div class="cat-chips" role="group" aria-label="Journal">
-      ${S.data.journals.map((x) => `<button type="button" class="cat-chip${x.id === j?.id ? " on" : ""}" data-journal="${x.id}">📓 ${h(x.name)}</button>`).join("")}
+      ${S.data.journals.map((x) => `<button type="button" class="cat-chip${x.id === j?.id ? " on" : ""}" data-journal="${x.id}">${x.icon ? ownIcon(x.icon, "journals", x.id) : "📓"} ${h(x.name)}</button>`).join("")}
       <button type="button" class="link new-journal">+ New journal</button>
     </div>
     ${j ? `<button type="button" class="primary new-note" title="New entry (N)">+ New entry</button>
@@ -428,6 +428,8 @@ function renderJournal(el, terms, words) {
         <select class="journal-order" aria-label="Order">${options([["newest", "Newest first"], ["oldest", "Oldest first"]], NV.order)}</select>
         <button type="button" class="link open-timeline" data-timeline="journal:${j.id}" title="Its waypoints (⚑) in time">Timeline</button>
         ${journalShareField(j)}
+        <button type="button" class="link journal-icon" title="An icon of its own">${j.icon ? `${ownIcon(j.icon, "journals", j.id)} Icon` : "Icon…"}</button>
+        ${shortcutButton(`journal:${j.id}`)}
         <button type="button" class="link rename-journal">Rename</button>
         ${j.user_id == null || j.user_id === S.data.user.id ? '<button type="button" class="link danger delete-journal">Delete journal</button>' : ""}
       </div>` : ""}
@@ -598,10 +600,7 @@ function openNote(n) {
     body.contentEditable = "false";
     for (const c of dlg.querySelectorAll(".ne-head select, .ne-head input, .ne-title, .ne-tools button, .ne-tools select, .ne-pin, .ne-waypoint")) c.disabled = true;
   }
-  if (!dlg.open) {
-    dlg.showModal();
-    history.pushState({ note: true }, "");  // so Back closes the note, not the app
-  }
+  if (!dlg.open) dlg.showModal();  // (Back closes it: app.js "the Back button")
   dlg.scrollTop = 0;
   if (!n.id) (n.journal_id ? body : $(".ne-title", dlg)).focus();
   else $(".ne-close", dlg).focus();
@@ -756,8 +755,7 @@ function noteEditorSaved(ids) {
 
 function closeNote() {
   const dlg = $("#note-dialog");
-  if (history.state?.note) history.back();  // which closes it (popstate, below)
-  else if (dlg?.open) dlg.close();
+  if (dlg?.open) dlg.close();
 }
 
 async function setNoteJournal(on) {
@@ -805,9 +803,8 @@ function bindNoteDialog(dlg) {
       if (!$("#note-dialog").open) { ned.n = null; if (ed === noteHost) ed = null; renderList(); }
     });
   });
-  window.addEventListener("popstate", () => { if (dlg.open && !history.state?.note) dlg.close(); });
   dlg.addEventListener("cancel", (e) => {
-    // Esc: closes the picture bar first, else the note (through history, like the ✕).
+    // Esc (and Back): closes the picture bar first, else the note.
     e.preventDefault();
     if (noteHost.img) chooseImage(null); else closeNote();
   });
@@ -1005,7 +1002,7 @@ function askShared(taskId) {
     <div class="share-choices">
       <button type="button" class="primary" data-to="inbox">📥 A task in the Inbox</button>
       <button type="button" data-to="note">📝 A new note</button>
-      ${S.data.journals.map((j) => `<button type="button" data-to="journal" data-journal="${j.id}">📓 A new entry in “${h(j.name)}”</button>`).join("")}
+      ${S.data.journals.map((j) => `<button type="button" data-to="journal" data-journal="${j.id}">${j.icon ? ownIcon(j.icon, "journals", j.id) : "📓"} A new entry in “${h(j.name)}”</button>`).join("")}
     </div>
     <p class="muted small">Closing this leaves it in the Inbox. To stop being asked, choose a place in Settings → Sharing to Entropicide.</p>`;
   dlg.onclick = async (e) => {
@@ -1070,6 +1067,7 @@ function bindNotes() {
       if (!S.data.journals.some((x) => x.id === j.id)) S.data.journals.push(j);
       return setNV("journal", j.id, "journal");
     }
+    if (b?.classList.contains("journal-icon")) return chooseIcon("journals", currentJournal());
     if (b?.classList.contains("rename-journal")) {
       const j = currentJournal();
       const name = prompt("Rename the journal", j.name)?.trim();

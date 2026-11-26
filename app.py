@@ -99,6 +99,9 @@ DEFAULT_SETTINGS = {"defer_options": ["1h", "2h", "6h", "24h", "3d", "1w"], "tim
                     # a Serper key Google for Walmart's page; only the barcode is sent; on unless
                     # turned off). The key is never sent back out (public_settings).
                     "look_up_codes": True, "serper_key": "",
+                    # The toolbar's shortcuts: "project:<id>", "journal:<id>" or "inventory:<id>",
+                    # in their order
+                    "shortcuts": [],
                     # Focus's calendar: events made small, as "<event id>|<day>" (forgotten once
                     # the day's gone)
                     "focus_shrunk": [],
@@ -1676,7 +1679,7 @@ def all_data():
         note_categories=[dict(r) for r in conn.execute(
             "SELECT id, name, color, position FROM note_categories WHERE user_id = ? ORDER BY position, id", (uid,))],
         journals=[dict(r) for r in conn.execute(
-            f"SELECT id, user_id, group_id, name, position, created_at FROM journals WHERE {MINE} ORDER BY position, id", (uid, uid))],
+            f"SELECT id, user_id, group_id, name, icon, position, created_at FROM journals WHERE {MINE} ORDER BY position, id", (uid, uid))],
         # Sharing: my groups, the people in them (by id, for "by Ann" and assignees), and where
         # what's shared stood when this was read (GET /api/changes says when it's moved on).
         groups=[dict(r) | {"members": [m[0] for m in conn.execute(
@@ -4275,6 +4278,8 @@ def category_fields(data, table):
         if data["color"] not in NOTE_COLORS:
             raise ValueError("Unknown colour.")
         out["color"] = data["color"]
+    if table in ("journals", "inventories") and "icon" in data:
+        out["icon"] = clean_icon(data["icon"])
     if table == "inventories" and "kind" in data:
         if data["kind"] not in ("stock", "home"):
             raise ValueError("An inventory is of things used up (stock) or kept (home).")
@@ -4561,11 +4566,69 @@ def reorder(kind):
     return "", 204
 
 
+def clean_icon(value):
+    """An icon of a project's, journal's or inventory's own: an emoji (or a few characters), or "" for none.
+    (An uploaded SVG is "svg:<version>", set only by set_own_svg.)"""
+    value = re.sub(r"\s+", "", str(value or ""))
+    if len(value) > 16:
+        raise ValueError("An icon is an emoji, or a character or two.")
+    if value.startswith("svg:"):
+        raise ValueError("Upload an SVG icon through its own route.")
+    return value
+
+
+# An SVG icon of a project's, journal's or inventory's own: uploaded ({"svg": "<svg…>"}) or
+# downloaded ({"url": …}), cleaned as areas' are, kept in svg_icons; its icon says "svg:<version>".
+OWN_ICON_TABLES = {"projects": "project", "journals": "journal", "inventories": "inventory"}
+
+
+@app.put("/api/icons/<kind>/<int:row_id>")
+@login_required
+def set_own_svg(kind, row_id):
+    if kind not in OWN_ICON_TABLES:
+        abort(404)
+    owned(kind, row_id)
+    data = body()
+    try:
+        if isinstance(data.get("svg"), str):
+            svg = data["svg"]
+        elif isinstance(data.get("url"), str) and data["url"].strip():
+            svg = icons.fetch_svg(data["url"].strip())
+        else:
+            return bad("Choose an SVG file or give a URL.")
+        svg = icons.clean_svg(svg)
+    except icons.IconError as e:
+        return bad(str(e))
+    icon = "svg:" + hashlib.sha256(svg.encode()).hexdigest()[:12]
+    conn = db.get_db()
+    conn.execute("INSERT INTO svg_icons (owner, svg) VALUES (?, ?) ON CONFLICT (owner) DO UPDATE SET svg = excluded.svg",
+                 (f"{OWN_ICON_TABLES[kind]}:{row_id}", svg))
+    conn.execute(f"UPDATE {kind} SET icon = ? WHERE id = ?", (icon, row_id))
+    conn.commit()
+    return jsonify(id=row_id, icon=icon)
+
+
+@app.get("/api/icons/<kind>/<int:row_id>.svg")
+@login_required
+def own_svg(kind, row_id):
+    if kind not in OWN_ICON_TABLES:
+        abort(404)
+    owned(kind, row_id)
+    row = db.get_db().execute("SELECT svg FROM svg_icons WHERE owner = ?", (f"{OWN_ICON_TABLES[kind]}:{row_id}",)).fetchone()
+    if not row:
+        abort(404)
+    # (Its URL carries ?v=<version>, so a new icon has a new URL and this can be kept for long.)
+    return Response(row["svg"], headers=icons.SERVE_HEADERS | {"Cache-Control": "private, max-age=31536000, immutable"})
+
+
 def project_fields(data):
     """Validate the editable project fields present in data."""
     out = {}
     for key, value in data.items():
         if shared_fields("project", key, value, out):
+            continue
+        if key == "icon":
+            out[key] = clean_icon(value)
             continue
         if key == "sequential":
             out[key] = 1 if value else 0
@@ -4878,6 +4941,12 @@ def update_settings():
         settings["weather_units"] = data["weather_units"]
     if "look_up_codes" in data:
         settings["look_up_codes"] = bool(data["look_up_codes"])
+    if "shortcuts" in data:
+        keys = data["shortcuts"]
+        if not isinstance(keys, list) or len(keys) > 40 or not all(
+                isinstance(k, str) and re.fullmatch(r"(project|journal|inventory):\d{1,12}", k) for k in keys):
+            return bad("Shortcuts are project:<id>, journal:<id> or inventory:<id>.")
+        settings["shortcuts"] = list(dict.fromkeys(keys))
     if "serper_key" in data:
         settings["serper_key"] = re.sub(r"\s+", "", str(data["serper_key"] or ""))[:200]
     if "last_review" in data:

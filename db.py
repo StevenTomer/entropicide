@@ -109,6 +109,8 @@ KINDS = {
             # The weekly review: how often it's looked over (days; 0 never), and when it last was.
             ("review_every", "INTEGER NOT NULL DEFAULT 7"),
             ("last_reviewed", "TEXT"),
+            # an icon of its own (an emoji; "" none), in lists and the toolbar
+            ("icon", "TEXT NOT NULL DEFAULT ''"),
         ],
     },
     "note": {
@@ -303,6 +305,7 @@ CREATE TABLE IF NOT EXISTS inventories (
     name        TEXT NOT NULL,
     kind        TEXT NOT NULL DEFAULT 'stock' CHECK (kind IN ('stock', 'home')),
     shopping_id INTEGER,
+    icon        TEXT NOT NULL DEFAULT '',  -- an emoji of its own ("" none: by its kind)
     position    REAL NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -512,12 +515,20 @@ CREATE TABLE IF NOT EXISTS note_categories (
     position REAL NOT NULL DEFAULT 0
 );
 
+-- SVG icons uploaded for projects, journals and inventories ("project:<id>" …), cleaned (app.py
+-- set_own_svg). Its icon column says "svg:<version>" then, so lists carry only that.
+CREATE TABLE IF NOT EXISTS svg_icons (
+    owner TEXT PRIMARY KEY,
+    svg   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS journals (
     id         INTEGER PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     -- shared with this group, and so are all its entries (NULL: its user's alone)
     group_id   INTEGER REFERENCES user_groups(id) ON DELETE SET NULL,
     name       TEXT NOT NULL,
+    icon       TEXT NOT NULL DEFAULT '',  -- an emoji of its own ("" none)
     position   REAL NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -733,6 +744,13 @@ def migrate(conn):
     if "review_every" not in project_cols:
         conn.execute("ALTER TABLE project_data ADD COLUMN review_every INTEGER NOT NULL DEFAULT 7")
         conn.execute("ALTER TABLE project_data ADD COLUMN last_reviewed TEXT")
+    # Icons of their own: projects, journals and inventories.
+    if "icon" not in {r["name"] for r in conn.execute("PRAGMA table_info(project_data)")}:
+        conn.execute("ALTER TABLE project_data ADD COLUMN icon TEXT NOT NULL DEFAULT ''")
+    for table in ("journals", "inventories"):
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if cols and "icon" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN icon TEXT NOT NULL DEFAULT ''")
     if not legacy and "step" not in {r["name"] for r in conn.execute("PRAGMA table_info(project_data)")}:
         # Subprojects take a place among their parent's tasks (after them, to begin with).
         conn.execute("ALTER TABLE project_data ADD COLUMN step REAL")

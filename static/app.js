@@ -207,6 +207,61 @@ function send(method, path, body) {
   });
 }
 
+// ---- the Back button ---------------------------------------------------------
+// Android's Back (and a browser's) closes what's open instead of leaving the app: the topmost
+// dialog (as Esc would, through its "cancel"), else the phone's sidebar, else a task's or
+// project's details. While anything is open there's one step of history of ours to go back
+// through; when the last thing closes some other way (✕, Esc, a tap) that step is taken back,
+// so Back is never left with a step that does nothing.
+
+const backStep = { pushed: false, skip: 0 };
+const dialogsOpened = [];  // open dialogs, in the order they opened (the last on top)
+
+function topOpen() {
+  for (let i = dialogsOpened.length - 1; i >= 0; i--) {
+    const d = dialogsOpened[i];
+    if (d.open && d.isConnected) return () => {
+      // (Through "cancel", so a dialog with something of its own to close first does that.)
+      if (d.dispatchEvent(new Event("cancel", { cancelable: true }))) d.close();
+    };
+  }
+  if (document.body.classList.contains("nav-open")) return () => document.body.classList.remove("nav-open");
+  const detail = $("#detail");
+  if (detail && !detail.hidden && S.selected) return () => { S.selected = null; render(); };
+  return null;
+}
+
+function syncBackStep() {
+  const open = !!topOpen();
+  if (open && !backStep.pushed) {
+    history.pushState({ ...(history.state || {}), entropicideBack: true }, "");
+    backStep.pushed = true;
+  } else if (!open && backStep.pushed) {
+    backStep.pushed = false;
+    backStep.skip++;  // (the popstate this makes isn't a press of Back)
+    history.back();
+  }
+}
+
+window.addEventListener("popstate", () => {
+  if (backStep.skip) { backStep.skip--; return; }
+  if (!backStep.pushed) return;
+  backStep.pushed = false;
+  topOpen()?.();
+  // (Something's still open, or what closed had more to close first: a step again.)
+  setTimeout(syncBackStep, 0);
+});
+
+new MutationObserver((records) => {
+  for (const r of records) {
+    if (r.target.tagName !== "DIALOG") continue;
+    const at = dialogsOpened.indexOf(r.target);
+    if (at >= 0) dialogsOpened.splice(at, 1);
+    if (r.target.open) dialogsOpened.push(r.target);
+  }
+  syncBackStep();
+}).observe(document.documentElement, { subtree: true, attributes: true, attributeFilter: ["open", "hidden", "class"] });
+
 // ---- offline changes -----------------------------------------------------
 // Task, project and note changes made without a connection wait in an outbox (kept in this
 // browser) and are sent in order once the server answers again. Meanwhile they're applied
@@ -264,7 +319,7 @@ const OFFLINE_NEW = {
     missed: false, completed_at: null, repeat: null, on_miss: null, series_latest: null, blocked_by: [], people: [],
     spent: 0, remind_at: null, remind_before: null, group_id: null, assigned_to: null, by: S.data.user.id }),
   projects: () => ({ name: "", notes: "", sequential: false, state: "next", focus: false, due_date: null, start_date: null,
-    completed_at: null, priority: 0, blocked_by: [], parent_id: null, step: null, review_every: 7, last_reviewed: null,
+    completed_at: null, priority: 0, blocked_by: [], parent_id: null, step: null, review_every: 7, last_reviewed: null, icon: "",
     review_due: false, stalled: true, group_id: null, by: S.data.user.id }),
   notes: () => ({ title: "", body: "", font: "", category_id: null, journal_id: null, entry_date: null, entry_time: null,
     pinned: false, archived_at: null, group_id: null, by: S.data.user.id }),
@@ -743,7 +798,7 @@ function groupedByProject(list) {
     } else {
       const path = projectChain(p.id).reverse().map((q) => q.name).join(" › ");
       html += `<h3 class="proj-group"><button type="button" class="link open-subproject" data-project="${p.id}"
-        title="Open the project">▤ ${h(path)}</button></h3>`;
+        title="Open the project">${p.icon ? ownIcon(p.icon, "projects", p.id) : "▤"} ${h(path)}</button></h3>`;
     }
     html += tasks.get(p.id).map((t) => taskRow(t, { grouped: true })).join("");
   }
@@ -1007,6 +1062,15 @@ function renderNav() {
   markNav();
 }
 
+// The icon before the title, for a project, an inventory, or the one journal (HTML).
+function viewIcon() {
+  let x = null, path = "";
+  if (S.view.startsWith("project:")) [x, path] = [projectById(Number(S.view.slice(8))), "projects"];
+  else if (S.view === "inventory") [x, path] = [currentInventory(), "inventories"];
+  else if (S.view === "journal" && S.data.journals.length <= 1) [x, path] = [currentJournal(), "journals"];
+  return x?.icon ? `${ownIcon(x.icon, path, x.id)} ` : "";
+}
+
 function viewTitle() {
   if (S.view === "focus") return "Focus";
   if (S.view === "projects") return "Projects";
@@ -1173,7 +1237,7 @@ function projectRow(p, depth = null, { draggable = false, onPage = draggable } =
     <button class="star ${p.focus ? "on" : ""}" aria-label="Focus" title="Focus">★</button>
     ${areaIcon(p.area_id)}
     <div class="row-body">
-      <div class="title">${h(p.name)}</div>
+      <div class="title">${p.icon ? `${ownIcon(p.icon, "projects", p.id)} ` : ""}${h(p.name)}</div>
       <div class="meta">
         ${depth && p.state !== "next" ? `<span class="badge">${PROJECT_STATES.find(([s]) => s === p.state)?.[1] || p.state}</span>` : ""}
         ${p.sequential ? '<span class="badge">Sequential</span>' : ""}
@@ -1207,7 +1271,7 @@ function renderTagBar(list) {
 }
 
 function renderList() {
-  $("#view-title").textContent = viewTitle();
+  $("#view-title").innerHTML = viewIcon() + h(viewTitle());
   document.title = viewTitle() + " · Entropicide";
   const el = $("#list");
   const readOnly = S.view === "logbook" || S.view === "trash";
@@ -1276,6 +1340,8 @@ function renderList() {
       ${p.notes ? `<div class="project-notes notes note-body">${showBody(p.notes)}</div>` : ""}
       <button class="link edit-project">Edit project</button>
       <button class="link open-timeline" data-timeline="project:${p.id}" title="Its waypoints (⚑) in time">Timeline</button>
+      <button class="link project-icon" title="An icon of its own">${p.icon ? `${ownIcon(p.icon, "projects", p.id)} Icon` : "Icon…"}</button>
+      ${shortcutButton(`project:${p.id}`)}
       ${p.state !== "done"
         ? '<button class="link complete-project">Mark project complete</button>'
         : '<button class="link reopen-project">Reopen project</button>'}
@@ -1426,14 +1492,110 @@ function linkIconUrl(l) {
   return `${BASE}/api/links/${l.id}/icon.svg?v=${l.icon_version}`;
 }
 
+// ---- icons, and the toolbar's shortcuts ----
+// Projects, journals and inventories can have an icon of their own (an emoji), and a shortcut
+// in the toolbar (settings.shortcuts, "kind:id", in order) that goes straight to them.
+
+const ICONS = ["🏠", "🏡", "🏢", "🏫", "🏥", "⛪", "🚗", "🚲", "✈️", "🧳", "🏖️", "⛺", "🌲", "🌻", "🍎", "🥫",
+  "🍞", "🧀", "🍷", "☕", "🍳", "🧰", "🔧", "🔨", "🪚", "🧹", "🧺", "👕", "👟", "🎒", "💼", "📚",
+  "📓", "📔", "✏️", "🎨", "🎸", "🎮", "🎁", "💰", "💳", "📈", "🧾", "💊", "🩺", "🏋️", "⚽", "🐶",
+  "🐱", "🎄", "🎉", "❤️", "⭐", "🔥", "💡", "🔑", "📦", "🗄️", "🧪", "🌍", "👶", "👪", "🙏", "🎓"];
+
+// An icon of a project's, journal's or inventory's own (path: projects, journals, inventories):
+// an emoji, or an uploaded SVG ("svg:<version>", served from /api/icons).
+function ownIcon(icon, path, id) {
+  if (!icon) return "";
+  if (icon.startsWith("svg:")) return `<img class="own-svg" src="${BASE}/api/icons/${path}/${id}.svg?v=${h(icon.slice(4))}" alt="">`;
+  return `<span class="own-icon">${h(icon)}</span>`;
+}
+
+// Chooses an icon: resolves to an emoji, "" for none, { svg } (a file's) or { url } (an SVG to
+// download), or undefined if nothing was chosen.
+function pickIcon(current = "", title = "Choose an icon") {
+  return new Promise((done) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "icon-picker";
+    let result;
+    dlg.innerHTML = `<form method="dialog" class="dlg-head"><h2>${h(title)}</h2><button class="icon" aria-label="Close">✕</button></form>
+      <div class="ip-grid">${ICONS.map((i) => `<button type="button" class="ip-icon${i === current ? " on" : ""}" data-icon="${i}">${i}</button>`).join("")}</div>
+      <form class="inline ip-own"><input name="own" value="${h(ICONS.includes(current) ? "" : current)}" placeholder="Or type (or paste) any emoji"
+        aria-label="Any emoji" autocomplete="off"><button>Use it</button></form>
+      <p class="ip-more"><label class="link">Upload an SVG…<input type="file" accept=".svg,image/svg+xml" class="ip-file" hidden></label>
+        <button type="button" class="link ip-url">From a URL…</button>
+        <button type="button" class="link ip-none">No icon</button></p>`;
+    document.body.append(dlg);
+    const finish = (icon) => { result = icon; dlg.close(); };
+    dlg.addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (b?.dataset.icon) finish(b.dataset.icon);
+      else if (b?.classList.contains("ip-none")) finish("");
+      else if (b?.classList.contains("ip-url")) {
+        const url = prompt("The SVG icon's address (https://…)")?.trim();
+        if (url) finish({ url });
+      }
+    });
+    $(".ip-file", dlg).addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      if (file.size > 200 * 1024) return toast("That SVG is too big for an icon (up to 200 KB).");
+      finish({ svg: await file.text() });
+    });
+    $(".ip-own", dlg).addEventListener("submit", (e) => { e.preventDefault(); finish(e.target.elements.own.value.trim()); });
+    dlg.addEventListener("close", () => { dlg.remove(); done(result); });
+    dlg.showModal();
+  });
+}
+
+// What a shortcut ("project:12") goes to: { name, icon, go }, or null if it's gone.
+function shortcutTarget(key) {
+  const [kind, raw] = key.split(":"), id = Number(raw);
+  if (kind === "project") {
+    const p = projectById(id);
+    return p && { name: p.name, icon: p.icon || "▤", path: "projects", id, go: () => setView(`project:${id}`) };
+  }
+  if (kind === "journal") {
+    const j = S.data.journals.find((x) => x.id === id);
+    return j && { name: j.name, icon: j.icon || "📓", path: "journals", id, go: () => { NV.journal = id; save("journal", id); setView("journal"); } };
+  }
+  const inv = (S.data.inventories || []).find((x) => x.id === id);
+  return inv && { name: inv.name, icon: inv.icon || (inv.kind === "home" ? "🏠" : "🥫"), path: "inventories", id,
+    go: () => { IV.inv = id; IV.place = null; save("inventory", String(id)); setView("inventory"); } };
+}
+
+const shortcuts = () => S.data.user.settings?.shortcuts || [];
+const hasShortcut = (key) => shortcuts().includes(key);
+
+async function toggleShortcut(key) {
+  const on = hasShortcut(key);
+  S.data.user.settings = await api("PATCH", "/me/settings", { shortcuts: on ? shortcuts().filter((k) => k !== key) : [...shortcuts(), key] });
+  renderToolbar();
+  renderList();
+  toast(on ? "Taken off the toolbar." : "On the toolbar, at the top.");
+}
+
+// The link that puts it on the toolbar, or takes it off.
+const shortcutButton = (key) => `<button type="button" class="link toggle-shortcut" data-shortcut="${key}"
+  title="${hasShortcut(key) ? "Take it off the toolbar" : "A button at the top that goes straight to it"}">${hasShortcut(key) ? "★ On the toolbar" : "☆ Add to the toolbar"}</button>`;
+
+// An icon chosen for a project, journal or inventory (kind: its API path).
+async function chooseIcon(kind, x) {
+  const icon = await pickIcon(x.icon || "", `An icon for “${x.name}”`);
+  if (icon === undefined) return;
+  Object.assign(x, typeof icon === "object" ? await api("PUT", `/icons/${kind}/${x.id}`, icon) : await api("PATCH", `/${kind}/${x.id}`, { icon }));
+  render();
+}
+
 function renderToolbar() {
   const el = $("#toolbar");
   const starred = linkTree().filter((l) => l.starred);
   const cal = S.data.google.connected;
   if (!cal && S.view === "calendar") S.view = "focus";
-  el.hidden = !starred.length && !cal;
+  const marks = shortcuts().map((key) => [key, shortcutTarget(key)]).filter(([, t]) => t);
+  el.hidden = !starred.length && !cal && !marks.length;
   el.innerHTML = (cal ? `<button type="button" class="tb-calendar${S.view === "calendar" ? " active" : ""}"
       title="Calendar: the next two weeks" aria-label="Calendar">${CALENDAR_ICON}</button>` : "") +
+    marks.map(([key, t]) => `<button type="button" class="tb-shortcut" data-shortcut="${key}" title="${h(t.name)}" aria-label="${h(t.name)}">
+      <span class="tb-emoji">${ownIcon(t.icon, t.path, t.id)}</span><span class="tb-name">${h(t.name)}</span></button>`).join("") +
     starred.map((l) => l.icon_version
       ? `<a class="tb-icon" href="${h(l.url)}" target="_blank" rel="noopener noreferrer" title="${h(l.name)}">
           <img src="${linkIconUrl(l)}" alt="${h(l.name)}"></a>`
@@ -3700,16 +3862,12 @@ function openViewer(files, fileId) {
   viewer.at = Math.max(0, viewer.files.findIndex((f) => f.id === fileId));
   if (!viewer.files.length) return;
   const dlg = $("#viewer");
-  if (!dlg.open) {
-    dlg.showModal();
-    history.pushState({ viewer: true }, "");  // so Back closes the viewer, not the app
-  }
+  if (!dlg.open) dlg.showModal();  // (Back closes it: see "the Back button")
   showViewerFile();
 }
 
 function closeViewer() {
-  if (history.state?.viewer) history.back();  // which closes it (popstate, below)
-  else $("#viewer").close();
+  $("#viewer").close();
 }
 
 function stepViewer(by) {
@@ -3816,7 +3974,6 @@ function bindViewer() {
       zoomPdf(e.key === "-" ? 1 / 1.25 : 1.25);
     }
   }, true);
-  // Close through history too, so Back isn't left with a step that does nothing.
   dlg.addEventListener("cancel", (e) => { e.preventDefault(); closeViewer(); });
   dlg.addEventListener("close", () => {
     viewer.run++;
@@ -3824,7 +3981,6 @@ function bindViewer() {
     viewer.pdf = null;
     body.innerHTML = "";
   });
-  window.addEventListener("popstate", () => { if (dlg.open) dlg.close(); });
   // Swipe left/right between files (not while a picture is at full size, or a PDF zoomed in).
   let start = null;
   body.addEventListener("touchstart", (e) => {
@@ -5310,6 +5466,7 @@ function bind() {
       await api("POST", "/trash/empty");
       return refresh();
     }
+    if (b?.classList.contains("project-icon")) return chooseIcon("projects", projectById(Number(b.closest("[data-project]").dataset.project)));
     if (b?.classList.contains("edit-project")) {
       return select("project", Number(b.closest("[data-project]").dataset.project));
     }
@@ -5578,6 +5735,13 @@ function bind() {
   document.addEventListener("mousedown", () => { if (S.navFocus) { S.navFocus = false; markNav(); } }, true);
   $("#toolbar").addEventListener("click", (e) => {
     if (e.target.closest(".tb-calendar")) setView(S.view === "calendar" ? "focus" : "calendar");
+    const mark = e.target.closest(".tb-shortcut");
+    if (mark) shortcutTarget(mark.dataset.shortcut)?.go();
+  });
+  // ☆ Add to the toolbar (on a project's page, a journal's, an inventory's).
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest(".toggle-shortcut");
+    if (b) { e.preventDefault(); toggleShortcut(b.dataset.shortcut); }
   });
 }
 

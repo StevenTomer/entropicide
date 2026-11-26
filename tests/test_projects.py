@@ -214,3 +214,45 @@ def test_a_projects_start_date(app, user_client):
     # Further off than Scheduled (Someday) keeps the date but doesn't schedule.
     r = client.patch(f"/api/projects/{trip}?now=2026-11-20T09:00", json={"state": "someday", "start_date": "2027-01-01"}, headers=H).get_json()
     assert r["state"] == "someday"
+
+
+def test_icons_and_toolbar_shortcuts(user_client):
+    """Projects, journals and inventories can have an icon; the toolbar keeps shortcuts to them."""
+    client = user_client("ann")
+    _, project, _ = helpers(client)
+    trip = project(name="Trip")["id"]
+    r = client.patch(f"/api/projects/{trip}", json={"icon": " 🧳 "}, headers=H)
+    assert r.get_json()["icon"] == "🧳"
+    assert client.patch(f"/api/projects/{trip}", json={"icon": "x" * 20}, headers=H).status_code == 400
+    j = client.post("/api/journals", json={"name": "Travel"}, headers=H).get_json()["id"]
+    assert client.patch(f"/api/journals/{j}", json={"icon": "✈️"}, headers=H).get_json()["icon"] == "✈️"
+    inv = client.post("/api/inventories", json={"name": "Garage", "kind": "home"}, headers=H).get_json()["id"]
+    assert client.patch(f"/api/inventories/{inv}", json={"icon": "🧰"}, headers=H).get_json()["icon"] == "🧰"
+    d = client.get("/api/data").get_json()
+    assert ([p["icon"] for p in d["projects"]], [x["icon"] for x in d["journals"]], [x["icon"] for x in d["inventories"]]) == (
+        ["🧳"], ["✈️"], ["🧰"])
+    keys = [f"project:{trip}", f"journal:{j}", f"inventory:{inv}", f"project:{trip}"]
+    assert client.patch("/api/me/settings", json={"shortcuts": keys}, headers=H).get_json()["shortcuts"] == keys[:3]
+    assert client.patch("/api/me/settings", json={"shortcuts": ["note:1"]}, headers=H).status_code == 400
+
+
+def test_an_uploaded_svg_icon(app, user_client):
+    """An SVG icon, cleaned (no script), served to whoever may see it; "svg:" can't be typed."""
+    client, other = user_client("ann"), user_client("bob")
+    j = client.post("/api/journals", json={"name": "Travel"}, headers=H).get_json()["id"]
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><script>alert(1)</script><circle r="4"/></svg>'
+    r = client.put(f"/api/icons/journals/{j}", json={"svg": svg}, headers=H).get_json()
+    assert r["icon"].startswith("svg:")
+    assert client.get("/api/data").get_json()["journals"][0]["icon"] == r["icon"]
+    served = client.get(f"/api/icons/journals/{j}.svg").get_data(as_text=True)
+    assert "<circle" in served and "script" not in served
+    assert other.get(f"/api/icons/journals/{j}.svg").status_code == 404
+    assert other.put(f"/api/icons/journals/{j}", json={"svg": svg}, headers=H).status_code == 404
+    assert client.put(f"/api/icons/notes/{j}", json={"svg": svg}, headers=H).status_code == 404
+    assert client.put(f"/api/icons/journals/{j}", json={"svg": "not an svg"}, headers=H).status_code == 400
+    assert client.patch(f"/api/journals/{j}", json={"icon": "svg:abc"}, headers=H).status_code == 400
+    # Back to an emoji.
+    assert client.patch(f"/api/journals/{j}", json={"icon": "✈️"}, headers=H).get_json()["icon"] == "✈️"
+    p = client.post("/api/projects", json={"name": "Trip"}, headers=H).get_json()["id"]
+    assert client.put(f"/api/icons/projects/{p}", json={"svg": svg}, headers=H).get_json()["icon"].startswith("svg:")
+    assert client.get(f"/api/icons/projects/{p}.svg").status_code == 200

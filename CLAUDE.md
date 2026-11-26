@@ -116,6 +116,12 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
   don't try to get past that. A lookup's picture is fetched only by a server-side token
   (`LOOKUPS`), never from a URL the browser sends. Product pictures are blobs too
   (`image_blob_id`), so the blob-cleanup triggers check `products`.
+- **Back button** (app.js "the Back button"): while a dialog, the phone sidebar or the details
+  panel is open there's one history step of ours, and Back closes the topmost (a dialog through its
+  `cancel`). Found by a MutationObserver on `open`/`hidden`/`class`; don't push history for a dialog
+  yourself. **Icons and shortcuts:** `icon` (an emoji, or `svg:<version>` for an uploaded SVG kept in
+  `svg_icons` and drawn by app.js `ownIcon`) on `project_data`, `journals`, `inventories`;
+  the toolbar's shortcuts are `settings.shortcuts` ("project:<id>" …), app.js `shortcutTarget`.
 - Attachments are blobs in the database (deduplicated by sha256), so the DB file is the
   whole backup. Each is on one document; a picture placed in a text is `<img data-file="id">`,
   and the browser adds the `src` (`showBody`).

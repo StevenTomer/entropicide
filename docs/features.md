@@ -49,6 +49,9 @@ In brief:
   and linked tasks, with `"phrases"`, `-word`, `#tag`, `cat:`, `journal:`, `area:`, `has:`,
   `is:pinned`, `before:` / `after:` / `on:`. Saved as you type, and offline too. A task can
   become a note. Stored as cleaned HTML (`richtext.py`).
+- **Icons and toolbar shortcuts:** projects, journals and inventories can have an emoji icon, and
+  a toolbar button that goes straight to them. Android's Back closes the open dialog, sidebar or
+  details before it leaves the app.
 - **Inventory:** food storage, supplies and household things, shareable with a group.
   - **Products:** a catalog of what things are (name, brand, size, barcodes, picture, link,
     category, unit), shared by all your inventories.

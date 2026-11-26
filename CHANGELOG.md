@@ -5,6 +5,13 @@ Settings → Troubleshooting.
 
 ## Unreleased
 
+- **Back closes things:** on a phone, Android's Back button (and a browser's) closes the open
+  dialog, the sidebar, a task's details or a note, one at a time, instead of leaving the app.
+- **Shortcuts on the toolbar:** *☆ Add to the toolbar* on a project, journal or inventory puts a
+  button at the top that goes straight to it.
+- **Icons of their own:** give a project, journal or inventory an icon (pick one, any emoji, or
+  upload an SVG),
+  shown in lists, titles and on its toolbar button.
 - **Look up** (beside Add and Use, which are shorter now): scan something to open its details,
   without counting anything.
 - **Choose several things** (press and hold one, then tap more, or *Select*) to move them all to a

@@ -1271,3 +1271,17 @@ dialog.place-picker:not([open]) { display: none; }
 .iv-jump .cat-chip { flex-shrink: 0; max-width: 12rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .iv-jump .icon { flex-shrink: 0; }
 h2.group[id^="ivg-"] { scroll-margin-top: 3rem; }
+/* Icons of their own, and the toolbar's shortcuts */
+dialog.icon-picker { width: min(26rem, calc(100vw - 1rem)); }
+.ip-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(2.75rem, 1fr)); gap: 0.25rem; margin: 0.5rem 0 0.75rem; }
+.ip-icon { font-size: 1.5rem; padding: 0.25rem; line-height: 1.3; background: none; border: 1px solid transparent; border-radius: var(--radius); }
+.ip-icon:hover, .ip-icon.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--bg)); }
+.ip-own input { flex: 1; min-width: 0; }
+.own-icon { font-weight: normal; }
+.tb-shortcut { display: inline-flex; gap: 0.25rem; align-items: center; padding: 0.125rem 0.5rem; border-radius: var(--radius);
+  background: none; border: 1px solid var(--line); max-width: 11rem; }
+.tb-shortcut .tb-emoji { font-size: 1.05rem; line-height: 1; }
+.tb-shortcut .tb-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.8125rem; }
+@media (max-width: 40rem) { .tb-shortcut .tb-name { display: none; } .tb-shortcut { border: 0; padding: 0.125rem 0.25rem; } }
+.own-svg { width: 1.15em; height: 1.15em; vertical-align: -0.2em; object-fit: contain; }
+.ip-more { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; }

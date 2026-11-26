@@ -120,7 +120,11 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
   panel is open there's one history step of ours, and Back closes the topmost (a dialog through its
   `cancel`). Found by a MutationObserver on `open`/`hidden`/`class`; don't push history for a dialog
   yourself. Then Back goes up `viewTrail` (the screens a project or timeline was opened from;
-  `setView` keeps it), and in the app (installed, or a phone's layout) never leaves: on a main screen it toggles the sidebar. **Icons and shortcuts:** `icon` (an emoji, or `svg:<version>` for an uploaded SVG kept in
+  `setView` keeps it), and in the app (installed, or a phone's layout) never leaves: on a main screen it toggles the sidebar.
+  Chrome lets Back skip history steps added without a tap, so in the app `fillBack` sets aside
+  `BACK_SPARE` steps at each tap (`backDepth` counts them, in `history.state.entropicideBack`); keep
+  `history.state` when calling `replaceState`. The running version (`APP_VERSION`, from the `VERSION`
+  file deploy/install.sh writes) shows in the sidebar's foot and Settings → Troubleshooting. **Icons and shortcuts:** `icon` (an emoji, or `svg:<version>` for an uploaded SVG kept in
   `svg_icons` and drawn by app.js `ownIcon`) on `project_data`, `journals`, `inventories`;
   the toolbar's shortcuts are `settings.shortcuts` ("project:<id>" …), app.js `shortcutTarget`.
 - Attachments are blobs in the database (deduplicated by sha256), so the DB file is the

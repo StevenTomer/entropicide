@@ -1285,3 +1285,4 @@ dialog.icon-picker { width: min(26rem, calc(100vw - 1rem)); }
 @media (max-width: 40rem) { .tb-shortcut .tb-name { display: none; } .tb-shortcut { border: 0; padding: 0.125rem 0.25rem; } }
 .own-svg { width: 1.15em; height: 1.15em; vertical-align: -0.2em; object-fit: contain; }
 .ip-more { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; }
+.app-build { flex-basis: 100%; font-size: 0.6875rem; color: var(--muted); }

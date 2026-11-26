@@ -5,6 +5,10 @@ Settings → Troubleshooting.
 
 ## Unreleased
 
+- **Which version:** the bottom of the sidebar, and Settings → Troubleshooting, say which version of
+  Entropicide is running (its commit and date).
+- **Fixed:** in the app, a second press of Back in a row could still close it (Chrome lets Back skip
+  steps a page adds by itself); now several presses in a row work, and any tap tops them up.
 - **Back closes things:** on a phone, Android's Back button (and a browser's) closes the open
   dialog, the sidebar, a task's details or a note, one at a time, instead of leaving the app. From a
   project (or a timeline) it goes back to where you opened it from; in the app, Back never leaves: on a

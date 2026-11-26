@@ -42,6 +42,7 @@
         <form method="post" action="{{ url_for('logout') }}">
           <button class="link" type="submit">Sign out</button>
         </form>
+        <span class="app-build" title="This version of Entropicide">v {{ version }}</span>
       </div>
     </aside>
 
@@ -131,6 +132,7 @@
 
   <script>
     window.ENTROPICIDE_BASE = {{ url_for('index')|tojson }};
+    window.ENTROPICIDE_VERSION = {{ version|tojson }};
     window.ENTROPICIDE_ANDROID_PACKAGE = {{ android_package|tojson }};
   </script>
   <script src="{{ url_for('static', filename='quickadd.js') }}"></script>

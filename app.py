@@ -422,6 +422,24 @@ def asset_links():
                                mimetype="application/json")
 
 
+def find_version():
+    """This copy's version: the VERSION file deploy/install.sh writes, else (running from the
+    repository) its last commit, else "?"."""
+    try:
+        with open(os.path.join(app.root_path, "VERSION")) as f:
+            return f.read().strip() or "?"
+    except OSError:
+        pass
+    try:
+        return subprocess.run(["git", "-C", app.root_path, "log", "-1", "--format=%h · %cs"],
+                              capture_output=True, text=True, timeout=5).stdout.strip() or "?"
+    except (OSError, subprocess.SubprocessError):
+        return "?"
+
+
+APP_VERSION = find_version()
+
+
 @app.route("/")
 def index():
     # The Android app opens SITE_PATH/?app=<version>; older builds are known by Chrome's referrer.
@@ -429,7 +447,7 @@ def index():
         app_log("launch", **request_info(), app_version=version_name(request.args.get("app")))
     if g.user is None:
         return redirect(url_for("login"))
-    return render_template("app.html", user=g.user)
+    return render_template("app.html", user=g.user, version=APP_VERSION)
 
 
 # --- troubleshooting log (shares and app launches) ------------------------

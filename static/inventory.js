@@ -1375,7 +1375,7 @@ function showPlace(id) {
 function openFromLabel() {
   const m = location.hash.match(/^#location:(\d+)$/);
   if (!m) return;
-  history.replaceState(null, "", location.pathname + location.search);
+  history.replaceState(history.state, "", location.pathname + location.search);
   showPlace(Number(m[1]));
 }
 window.addEventListener("hashchange", openFromLabel);

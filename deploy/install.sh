@@ -47,6 +47,13 @@ mkdir -p "$DEST/data" "$DEST/backups"
 rsync -a --delete --exclude venv --exclude data --exclude backups --exclude .env \
     --exclude __pycache__ --exclude .git --exclude android --exclude tests \
     --exclude .pytest_cache --exclude .github --exclude IDEAS.md --exclude alexa "$SRC/" "$DEST/"
+# Which version this is (Settings → Troubleshooting, and the sidebar): its commit and date, and
+# "+changes" when installed with changes not yet committed.
+if git -C "$SRC" rev-parse --short HEAD >/dev/null 2>&1; then
+    VERSION="$(git -C "$SRC" log -1 --format='%h · %cs')"
+    git -C "$SRC" diff --quiet HEAD 2>/dev/null || VERSION="$VERSION +changes"
+    echo "$VERSION" > "$DEST/VERSION"
+fi
 
 if [ ! -x "$DEST/venv/bin/python" ]; then
     echo "== Creating virtualenv"

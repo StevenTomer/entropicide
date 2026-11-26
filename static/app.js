@@ -219,6 +219,11 @@ function send(method, path, body) {
 const backStep = { pushed: false, skip: 0 };
 const dialogsOpened = [];  // open dialogs, in the order they opened (the last on top)
 
+// In the app (Android's, one added to a home screen, or a phone's layout) rather than a
+// browser on a computer.
+const isPhoneLayout = () => getComputedStyle($("#menu-btn")).display !== "none";
+const inApp = () => isPhoneLayout() || matchMedia("(display-mode: standalone)").matches || document.referrer.startsWith("android-app://");
+
 function topOpen() {
   for (let i = dialogsOpened.length - 1; i >= 0; i--) {
     const d = dialogsOpened[i];
@@ -227,9 +232,6 @@ function topOpen() {
       if (d.dispatchEvent(new Event("cancel", { cancelable: true }))) d.close();
     };
   }
-  const phone = getComputedStyle($("#menu-btn")).display !== "none";
-  // (The installed app: Android's app, or one added to a home screen.)
-  const app = phone || matchMedia("(display-mode: standalone)").matches || document.referrer.startsWith("android-app://");
   if (document.body.classList.contains("nav-open")) return () => document.body.classList.remove("nav-open");
   const detail = $("#detail");
   if (detail && !detail.hidden && S.selected) return () => { S.selected = null; render(); };
@@ -238,14 +240,40 @@ function topOpen() {
   if (!isMainView(S.view)) return () => setView(viewAbove(S.view), { back: true });
   // (With nothing else to do: the sidebar, on a phone; in the app on a wide screen, where the
   // sidebar's always there, Back just does nothing, rather than closing the app.)
-  if (app && S.data) return phone ? () => document.body.classList.add("nav-open") : () => {};
+  if (inApp() && S.data) return isPhoneLayout() ? () => document.body.classList.add("nav-open") : () => {};
   return null;
 }
 
+// In the app, Back always has something to do, so there are always steps of ours to go back
+// through: backDepth of them, ahead of where the app was loaded. Chrome lets Back skip a step
+// added while the page wasn't being touched (so a site can't trap Back), and a step added
+// after a press of Back is one of those, so a second press in a row would leave the app.
+// So at each tap (when steps count) BACK_SPARE are set aside at once, and Back uses them up
+// one at a time; a step is added without a tap only when none are left.
+const BACK_SPARE = 12;
+let backDepth = 0;
+
+function pushBack() {
+  backDepth++;
+  history.pushState({ ...(history.state || {}), entropicideBack: backDepth }, "");
+}
+
+function fillBack() {
+  if (!S.data || !inApp()) return;
+  while (backDepth < BACK_SPARE) pushBack();
+}
+document.addEventListener("pointerup", fillBack, true);
+document.addEventListener("keydown", fillBack, true);
+
 function syncBackStep() {
+  if (inApp()) {
+    if (S.data && backDepth === 0) pushBack();
+    return;
+  }
+  // A browser on a computer: a step only while something's open, taken back when it closes.
   const open = !!topOpen();
   if (open && !backStep.pushed) {
-    history.pushState({ ...(history.state || {}), entropicideBack: true }, "");
+    history.pushState({ ...(history.state || {}), entropicideBack: 1 }, "");
     backStep.pushed = true;
   } else if (!open && backStep.pushed) {
     backStep.pushed = false;
@@ -254,8 +282,14 @@ function syncBackStep() {
   }
 }
 
-window.addEventListener("popstate", () => {
+window.addEventListener("popstate", (e) => {
   if (backStep.skip) { backStep.skip--; return; }
+  if (inApp()) {
+    backDepth = e.state?.entropicideBack || 0;
+    topOpen()?.();
+    setTimeout(syncBackStep, 0);
+    return;
+  }
   if (!backStep.pushed) return;
   backStep.pushed = false;
   topOpen()?.();
@@ -4437,6 +4471,7 @@ async function openSettings() {
 
     <section>
       <h3>Troubleshooting</h3>
+      <p class="small">Entropicide: <b>${h(window.ENTROPICIDE_VERSION || "?")}</b> (the version this page was loaded from)</p>
       <p class="app-version small">Android app: …</p>
       <p class="muted small"><a href="${BASE}/debug" target="_blank" rel="noopener">App log</a>: every use
         of the Share menu and every launch of the Android app, with what arrived and what happened.</p>
@@ -6000,7 +6035,7 @@ async function checkAppUpdate(params) {
     const rest = new URLSearchParams(location.search);
     rest.delete("app");
     const q = rest.toString();
-    history.replaceState(null, "", location.pathname + (q ? "?" + q : ""));
+    history.replaceState(history.state, "", location.pathname + (q ? "?" + q : ""));
   }
   if (mine === null) return;
   let latest;
@@ -6039,30 +6074,30 @@ async function afterLoad() {
   checkAppUpdate(params);
   const opened = Number(params.get("task") || params.get("shared"));
   if (opened && params.has("ask")) {
-    history.replaceState(null, "", location.pathname);
+    history.replaceState(history.state, "", location.pathname);
     askShared(opened);
   } else if (opened) {
-    history.replaceState(null, "", location.pathname);
+    history.replaceState(history.state, "", location.pathname);
     if (params.get("shared")) toast("Added to your Inbox.");
     openTask(opened);
   }
   // A Walmart product's page shared from the phone: to Add a product (inventory.js).
   if (params.get("product_link")) {
-    history.replaceState(null, "", location.pathname);
+    history.replaceState(history.state, "", location.pathname);
     productFromLink(params.get("product_link"));
   }
   if (params.get("shared_note")) {
-    history.replaceState(null, "", location.pathname);
+    history.replaceState(history.state, "", location.pathname);
     openSharedNote(Number(params.get("shared_note")));
   }
   // The installed app's New task shortcut (the manifest's shortcuts).
   if (params.has("new")) {
-    history.replaceState(null, "", location.pathname);
+    history.replaceState(history.state, "", location.pathname);
     focusQuickAdd();
   }
   // The Android app asking to be connected (its notification or tile, before it has a key).
   if (params.has("connect")) {
-    history.replaceState(null, "", location.pathname);
+    history.replaceState(history.state, "", location.pathname);
     openSettings().then(() => $("#dialog section.devices").scrollIntoView());
   }
   navigator.serviceWorker?.addEventListener("message", async (e) => {
@@ -6079,7 +6114,7 @@ async function afterLoad() {
   // Coming back from Google's sign-in page.
   const result = new URLSearchParams(location.search).get("google");
   if (result) {
-    history.replaceState(null, "", location.pathname);
+    history.replaceState(history.state, "", location.pathname);
     toast({ connected: "Google Calendar connected. Choose the calendar your tasks should go on.",
             cancelled: "Google Calendar wasn't connected.",
             expired: "That took too long. Try connecting again.",

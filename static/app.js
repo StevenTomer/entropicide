@@ -210,9 +210,11 @@ function send(method, path, body) {
 // ---- the Back button ---------------------------------------------------------
 // Android's Back (and a browser's) closes what's open instead of leaving the app: the topmost
 // dialog (as Esc would, through its "cancel"), else the phone's sidebar, else a task's or
-// project's details. While anything is open there's one step of history of ours to go back
-// through; when the last thing closes some other way (✕, Esc, a tap) that step is taken back,
-// so Back is never left with a step that does nothing.
+// project's details; else it goes back to the screen a project (or timeline) was opened from.
+// On a phone, on a main screen, it slides the sidebar in, and Back with that sidebar showing
+// leaves the app. While Back has something to do there's one step of history of ours to go
+// back through; when there's nothing (closed some other way: ✕, Esc, a tap) that step is taken
+// back, so Back is never left with a step that does nothing.
 
 const backStep = { pushed: false, skip: 0 };
 const dialogsOpened = [];  // open dialogs, in the order they opened (the last on top)
@@ -225,9 +227,17 @@ function topOpen() {
       if (d.dispatchEvent(new Event("cancel", { cancelable: true }))) d.close();
     };
   }
-  if (document.body.classList.contains("nav-open")) return () => document.body.classList.remove("nav-open");
+  const phone = getComputedStyle($("#menu-btn")).display !== "none";
+  const onMain = !viewTrail.length && isMainView(S.view);
+  if (document.body.classList.contains("nav-open")) {
+    return phone && onMain ? null : () => document.body.classList.remove("nav-open");
+  }
   const detail = $("#detail");
   if (detail && !detail.hidden && S.selected) return () => { S.selected = null; render(); };
+  if (viewTrail.length) return () => setView(viewTrail.pop(), { back: true });
+  // (Opened straight onto a project or timeline, as the app reopens where it was: up a level.)
+  if (!isMainView(S.view)) return () => setView(viewAbove(S.view), { back: true });
+  if (phone && onMain && S.data) return () => document.body.classList.add("nav-open");
   return null;
 }
 
@@ -2545,7 +2555,26 @@ function openTimelineItem(kind, id) {
 
 // ---- actions -------------------------------------------------------------
 
-function setView(view) {
+// Where Back goes from a project, subproject or timeline: the screens it was opened from (a
+// main screen, chosen in the sidebar, starts afresh).
+const viewTrail = [];
+const isMainView = (view) => !view.startsWith("project:") && !view.startsWith("timeline:");
+
+// What a project or timeline is part of: a subproject's project, else Projects; a timeline's project or journal.
+function viewAbove(view) {
+  if (view.startsWith("project:")) {
+    const parent = projectById(Number(view.slice(8)))?.parent_id;
+    return parent && projectById(parent) ? `project:${parent}` : "projects";
+  }
+  const [, kind, id] = view.split(":");
+  return kind === "project" ? `project:${id}` : kind === "journal" ? "journal" : "timeline";
+}
+
+function setView(view, { back = false } = {}) {
+  if (!back) {
+    if (isMainView(view)) viewTrail.length = 0;
+    else if (view !== S.view) viewTrail.push(S.view);
+  }
   if (view.startsWith("timeline")) timeline.data = null;  // (loaded afresh)
   doneFor = null;
   S.view = view;

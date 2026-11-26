@@ -6,7 +6,9 @@ Settings → Troubleshooting.
 ## Unreleased
 
 - **Back closes things:** on a phone, Android's Back button (and a browser's) closes the open
-  dialog, the sidebar, a task's details or a note, one at a time, instead of leaving the app.
+  dialog, the sidebar, a task's details or a note, one at a time, instead of leaving the app. From a
+  project (or a timeline) it goes back to where you opened it from; on a main screen it slides the
+  sidebar in, and Back again leaves the app.
 - **Shortcuts on the toolbar:** *☆ Add to the toolbar* on a project, journal or inventory puts a
   button at the top that goes straight to it.
 - **Icons of their own:** give a project, journal or inventory an icon (pick one, any emoji, or

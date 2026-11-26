@@ -119,7 +119,8 @@ venv/bin/python manage.py create-user me --admin      # uses ./data/entropicide.
 - **Back button** (app.js "the Back button"): while a dialog, the phone sidebar or the details
   panel is open there's one history step of ours, and Back closes the topmost (a dialog through its
   `cancel`). Found by a MutationObserver on `open`/`hidden`/`class`; don't push history for a dialog
-  yourself. **Icons and shortcuts:** `icon` (an emoji, or `svg:<version>` for an uploaded SVG kept in
+  yourself. Then Back goes up `viewTrail` (the screens a project or timeline was opened from;
+  `setView` keeps it), and on a phone's main screen opens the sidebar. **Icons and shortcuts:** `icon` (an emoji, or `svg:<version>` for an uploaded SVG kept in
   `svg_icons` and drawn by app.js `ownIcon`) on `project_data`, `journals`, `inventories`;
   the toolbar's shortcuts are `settings.shortcuts` ("project:<id>" …), app.js `shortcutTarget`.
 - Attachments are blobs in the database (deduplicated by sha256), so the DB file is the

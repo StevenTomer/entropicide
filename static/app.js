@@ -211,8 +211,8 @@ function send(method, path, body) {
 // Android's Back (and a browser's) closes what's open instead of leaving the app: the topmost
 // dialog (as Esc would, through its "cancel"), else the phone's sidebar, else a task's or
 // project's details; else it goes back to the screen a project (or timeline) was opened from.
-// On a phone, on a main screen, it slides the sidebar in, and Back with that sidebar showing
-// leaves the app. While Back has something to do there's one step of history of ours to go
+// In the app (installed, or a phone's layout) Back never leaves: on a main screen it slides
+// the sidebar in, and closes it again. While Back has something to do there's one step of history of ours to go
 // back through; when there's nothing (closed some other way: ✕, Esc, a tap) that step is taken
 // back, so Back is never left with a step that does nothing.
 
@@ -228,16 +228,17 @@ function topOpen() {
     };
   }
   const phone = getComputedStyle($("#menu-btn")).display !== "none";
-  const onMain = !viewTrail.length && isMainView(S.view);
-  if (document.body.classList.contains("nav-open")) {
-    return phone && onMain ? null : () => document.body.classList.remove("nav-open");
-  }
+  // (The installed app: Android's app, or one added to a home screen.)
+  const app = phone || matchMedia("(display-mode: standalone)").matches || document.referrer.startsWith("android-app://");
+  if (document.body.classList.contains("nav-open")) return () => document.body.classList.remove("nav-open");
   const detail = $("#detail");
   if (detail && !detail.hidden && S.selected) return () => { S.selected = null; render(); };
   if (viewTrail.length) return () => setView(viewTrail.pop(), { back: true });
   // (Opened straight onto a project or timeline, as the app reopens where it was: up a level.)
   if (!isMainView(S.view)) return () => setView(viewAbove(S.view), { back: true });
-  if (phone && onMain && S.data) return () => document.body.classList.add("nav-open");
+  // (With nothing else to do: the sidebar, on a phone; in the app on a wide screen, where the
+  // sidebar's always there, Back just does nothing, rather than closing the app.)
+  if (app && S.data) return phone ? () => document.body.classList.add("nav-open") : () => {};
   return null;
 }
 
